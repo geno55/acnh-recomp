@@ -60,7 +60,8 @@ static struct {
 } st;
 
 extern uint32_t g_window_origin_lower_left_hack;
-bool renderer_origin_lower_left(void) { return false; }
+uint32_t nvn_window_origin(void);
+bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
 const char *renderer_stats(void) {
     static int dumps;
