@@ -146,8 +146,117 @@ SERVICE("audren:u", audren_u) {
     }
 }
 
+// ------------------------------------------------------------------ audout (buffers released in real time)
+typedef struct {
+    uint32_t rate, channels, state;
+    uint64_t tags[64], sizes[64];
+    int queued, released_n;
+    uint64_t released[64];
+    uint32_t ev_r, ev_w;
+    KEvent *event;
+    uint64_t played;
+    pthread_mutex_t lock;
+} AudioOut;
+
+static void *audout_thread(void *arg) {
+    AudioOut *a = arg;
+    for (;;) {
+        pthread_mutex_lock(&a->lock);
+        uint64_t size = 0;
+        if (a->state == 0 && a->queued) size = a->sizes[0];
+        pthread_mutex_unlock(&a->lock);
+        if (!size) { struct timespec ts = {0, 2000000}; nanosleep(&ts, NULL); continue; }
+        uint64_t frames = size / (2 * (a->channels ? a->channels : 2));
+        uint64_t ns = frames * 1000000000ull / (a->rate ? a->rate : 48000);
+        struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)};
+        nanosleep(&ts, NULL);
+        pthread_mutex_lock(&a->lock);
+        if (a->queued) {
+            if (a->released_n < 64) a->released[a->released_n++] = a->tags[0];
+            memmove(a->tags, a->tags + 1, (a->queued - 1) * 8);
+            memmove(a->sizes, a->sizes + 1, (a->queued - 1) * 8);
+            a->queued--;
+            a->played += frames;
+        }
+        pthread_mutex_unlock(&a->lock);
+        pthread_mutex_lock(&g_klock);
+        kernel_signal(a->event);
+        pthread_mutex_unlock(&g_klock);
+    }
+    return NULL;
+}
+
+static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
+    AudioOut *a = s->state;
+    switch (req->cmd) {
+    case 0: OUT(uint32_t, 0) = a->state; resp_size(resp, 4); break;   // GetAudioOutState
+    case 1: a->state = 0; break;                                      // Start
+    case 2: a->state = 1; break;                                      // Stop
+    case 3: case 7: {  // AppendAudioOutBuffer(tag) <- AudioOutBuffer {next, samples, capacity, size, offset}
+        IpcBuf *b = in_buf(req, 0);
+        uint64_t tag = IN(uint64_t, 0);
+        uint64_t size = b && b->size >= 0x28 ? ((uint64_t *)(uintptr_t)b->addr)[3] : 0;
+        pthread_mutex_lock(&a->lock);
+        if (a->queued < 64) { a->tags[a->queued] = tag; a->sizes[a->queued] = size ? size : 4096; a->queued++; }
+        pthread_mutex_unlock(&a->lock);
+        break;
+    }
+    case 4: resp->copy_handles[resp->ncopy++] = a->ev_r; break;  // RegisterBufferEvent
+    case 5: case 8: {  // GetReleasedAudioOutBuffers -> tags
+        IpcBuf *b = out_buf(req, 0);
+        pthread_mutex_lock(&a->lock);
+        int n = a->released_n;
+        int max = b ? (int)(b->size / 8) : 0;
+        if (n > max) n = max;
+        for (int i = 0; i < n; i++) ((uint64_t *)(uintptr_t)b->addr)[i] = a->released[i];
+        memmove(a->released, a->released + n, (a->released_n - n) * 8);
+        a->released_n -= n;
+        pthread_mutex_unlock(&a->lock);
+        OUT(uint32_t, 0) = (uint32_t)n;
+        resp_size(resp, 4);
+        break;
+    }
+    case 6: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
+    case 9: OUT(uint32_t, 0) = (uint32_t)a->queued; resp_size(resp, 4); break;
+    case 10: OUT(uint64_t, 0) = a->played; resp_size(resp, 8); break;
+    case 11: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;
+    case 12: break;
+    case 13: OUT(float, 0) = 1.0f; resp_size(resp, 4); break;
+    default: LOG("[audout] IAudioOut cmd %u (ok)\n", req->cmd);
+    }
+}
+
 SERVICE("audout:u", audout_u) {
     (void)s;
-    LOG("[audout] cmd %u (ok)\n", req->cmd);
-    resp_size(resp, 0x10);
+    switch (req->cmd) {
+    case 0: case 2: {  // ListAudioOuts
+        IpcBuf *b = out_buf(req, 0);
+        if (b && b->size >= 0x100) strcpy((char *)(uintptr_t)b->addr, "DeviceOut");
+        OUT(uint32_t, 0) = 1;
+        resp_size(resp, 4);
+        break;
+    }
+    case 1: case 3: {  // OpenAudioOut(rate, channels, aruid, name) -> rate, channels, format, state + IAudioOut
+        AudioOut *a = calloc(1, sizeof *a);
+        a->rate = IN(uint32_t, 0) ? IN(uint32_t, 0) : 48000;
+        a->channels = IN(uint16_t, 4) ? IN(uint16_t, 4) : 2;
+        if (a->channels > 2) a->channels = 2;
+        a->state = 1;
+        pthread_mutex_init(&a->lock, NULL);
+        a->event = kernel_create_event_pair(&a->ev_w, &a->ev_r);
+        pthread_t t;
+        pthread_create(&t, NULL, audout_thread, a);
+        IpcBuf *b = out_buf(req, 0);
+        if (b && b->size) strncpy((char *)(uintptr_t)b->addr, "DeviceOut", b->size);
+        OUT(uint32_t, 0) = a->rate;
+        OUT(uint32_t, 4) = a->channels;
+        OUT(uint32_t, 8) = 2;  // PCM16
+        OUT(uint32_t, 12) = 1; // stopped
+        resp_size(resp, 16);
+        ipc_return_object(resp, service_new("IAudioOut", audio_out, a));
+        LOG("[audout] opened %u Hz, %u ch\n", a->rate, a->channels);
+        break;
+    }
+    default: LOG("[audout] cmd %u (ok)\n", req->cmd);
+    }
 }

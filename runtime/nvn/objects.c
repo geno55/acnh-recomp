@@ -57,9 +57,11 @@ NVN(nvnDeviceGetSeparateSamplerHandle) { RET((A(1) & 0xFFF) << 20); }
 NVN(nvnDeviceInstallDebugCallback) { (void)c; }
 NVN(nvnDeviceGenerateDebugDomainId) { RET(1); }
 static uint32_t window_origin, depth_mode;
-NVN(nvnDeviceSetWindowOriginMode) { window_origin = (uint32_t)A(1); }
+NVN(nvnDeviceSetWindowOriginMode) { window_origin = (uint32_t)A(1); LOG("[nvn] window origin mode %u\n", window_origin); }
+uint32_t nvn_window_origin(void) { return window_origin; }
+uint32_t nvn_depth_mode(void) { return depth_mode; }
 NVN(nvnDeviceGetWindowOriginMode) { RET(window_origin); }
-NVN(nvnDeviceSetDepthMode) { depth_mode = (uint32_t)A(1); }
+NVN(nvnDeviceSetDepthMode) { depth_mode = (uint32_t)A(1); LOG("[nvn] depth mode %u\n", depth_mode); }
 NVN(nvnDeviceGetDepthMode) { RET(depth_mode); }
 NVN(nvnDeviceRegisterFastClearColor) { RET(1); }
 NVN(nvnDeviceRegisterFastClearColori) { RET(1); }
@@ -331,6 +333,9 @@ static NvnTexture *texture_from_builder(uint64_t b) {
 
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    if (t->flags & 2)
+        LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
+            t->format, t->flags, t->target, t->addr, t->stride);
     SET_HOST(A(0), t);
     RET(1);
 }
@@ -532,7 +537,7 @@ NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
-static void set_shaders(Cpu *c) {
+static void set_shaders(Cpu *c, int stride) {
     NvnProgram *p = HOST(NvnProgram, A(0));
     int n = (int)A(1);
     const uint8_t *data = AP(2);  // NVNshaderData[n] = {u64 data (GPU addr), const void* control}
@@ -540,19 +545,32 @@ static void set_shaders(Cpu *c) {
     p->stage_mask = 0;
     p->backend = NULL;
     for (int i = 0; i < n; i++) {
-        uint64_t code = *(uint64_t *)(data + i * 16);
-        const uint8_t *control = (const uint8_t *)(uintptr_t) * (uint64_t *)(data + i * 16 + 8);
-        uint32_t stage = *(uint32_t *)(control + 0x1C);  // stage from the control section header
-        if (stage > 5) stage = (uint32_t)i;
+        uint64_t code = *(uint64_t *)(data + i * stride);
+        const uint8_t *control = (const uint8_t *)(uintptr_t) * (uint64_t *)(data + i * stride + 8);
+        // stage from the Maxwell shader program header (after the 0x30-byte NVN header)
+        uint32_t sph0 = *(uint32_t *)(uintptr_t)(code + 0x30);
+        uint32_t stage;
+        switch ((sph0 >> 10) & 0xF) {
+        case 1: stage = 0; break;  // vertex
+        case 5: stage = 1; break;  // fragment
+        case 4: stage = 2; break;  // geometry
+        case 2: stage = 3; break;  // tess control
+        case 3: stage = 4; break;  // tess eval
+        default: stage = 5; break; // compute (no SPH)
+        }
+        if (*(uint32_t *)(uintptr_t)code != 0x12345678) stage = 5;
         p->stages[stage].stage = stage;
         p->stages[stage].code_addr = code;
         p->stages[stage].control = control;
+        p->stages[stage].const_offset = *(const uint32_t *)(control + 0x700);
+        p->stages[stage].const_size = *(const uint32_t *)(control + 0x6FC);
         p->stage_mask |= 1u << stage;
     }
     RET(1);
 }
-NVN(nvnProgramSetShaders) { set_shaders(c); }
-NVN(nvnProgramSetShadersExt) { set_shaders(c); }
+
+NVN(nvnProgramSetShaders) { set_shaders(c, 16); }    // NVNshaderData {data, control}
+NVN(nvnProgramSetShadersExt) { set_shaders(c, 24); } // NVNshaderDataExt {data, control, debug hash}
 
 // ================================================================== window
 // WindowBuilder: device@0 native@8 num@0x10 textures@0x18 interval@0x20 active@0x24

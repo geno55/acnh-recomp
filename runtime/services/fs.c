@@ -31,6 +31,10 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (size > b->size) size = b->size;
         ssize_t n = pread(st->fd, (void *)(uintptr_t)b->addr, size, (off_t)off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        static uint64_t reads, bytes;
+        reads++;
+        bytes += size;
+        if ((reads & (reads - 1)) == 0) LOG("[fs] romfs reads: %llu (%llu KB)\n", reads, bytes >> 10);
         break;
     }
     case 4: OUT(uint64_t, 0) = st->size; resp_size(resp, 8); break;  // GetSize

@@ -92,5 +92,6 @@ int main(int argc, char **argv) {
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
     kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    ui_run();  // window and input on the main thread; returns only when the window closes
     return 0;
 }

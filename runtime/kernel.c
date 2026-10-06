@@ -197,9 +197,7 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
-    thread_start(t);
-    pthread_join(t->host, NULL);
-    LOG("main thread returned\n");
+    thread_start(t);  // the host main thread goes on to run the window event loop
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
@@ -210,6 +208,21 @@ KThread *kernel_current_thread(void) { return t_cur; }
 // Mutex word: owner handle | WAITERS_BIT. Waiting threads sleep on the global cond and are handed ownership.
 
 static uint32_t *u32p(uint64_t a) { return (uint32_t *)(uintptr_t)a; }
+
+// Try to take mutex `m` for `tag`, or mark it contended. Returns true if acquired. Uses CAS so a
+// concurrent user-space unlock (owner storing 0) is never overwritten.
+static bool mutex_acquire_or_mark(uint64_t m, uint32_t tag) {
+    for (;;) {
+        uint32_t v = __atomic_load_n(u32p(m), __ATOMIC_SEQ_CST);
+        if (v == 0) {
+            if (__atomic_compare_exchange_n(u32p(m), &v, tag, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return true;
+        } else {
+            if ((v & WAITERS_BIT) ||
+                __atomic_compare_exchange_n(u32p(m), &v, v | WAITERS_BIT, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+                return false;
+        }
+    }
+}
 
 // Pick a thread waiting on mutex `addr` and give it ownership. Caller holds g_klock.
 static void mutex_release(uint64_t addr) {
@@ -297,11 +310,7 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     uint32_t r = block_current(timeout);
     if (r != R_OK) {
         // timed out / cancelled: still must reacquire the mutex
-        uint32_t v = __atomic_load_n(u32p(mutex), __ATOMIC_SEQ_CST);
-        if (v == 0) {
-            __atomic_store_n(u32p(mutex), tag, __ATOMIC_SEQ_CST);
-        } else {
-            __atomic_store_n(u32p(mutex), v | WAITERS_BIT, __ATOMIC_SEQ_CST);
+        if (!mutex_acquire_or_mark(mutex, tag)) {
             t->wait_kind = WAIT_MUTEX;
             t->wait_addr = mutex;
             block_current(-1);
@@ -324,16 +333,12 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
         woken++;
         // the woken thread must reacquire its mutex
         uint64_t m = best->wait_mutex;
-        uint32_t v = __atomic_load_n(u32p(m), __ATOMIC_SEQ_CST);
-        if (v == 0) {
-            __atomic_store_n(u32p(m), best->wait_tag, __ATOMIC_SEQ_CST);
+        best->wait_result = R_OK;
+        if (mutex_acquire_or_mark(m, best->wait_tag)) {
             best->wait_kind = WAIT_NONE;
-            best->wait_result = R_OK;
         } else {
-            __atomic_store_n(u32p(m), v | WAITERS_BIT, __ATOMIC_SEQ_CST);
             best->wait_kind = WAIT_MUTEX;
             best->wait_addr = m;
-            best->wait_result = R_OK;
         }
     }
     for (KThread *t = g_waitlist; t; t = t->wnext)

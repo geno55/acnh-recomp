@@ -65,6 +65,9 @@ typedef struct Service Service;
 int ipc_handle_request(Cpu *c, uint32_t handle);
 uint32_t ipc_connect_named_port(const char *name);
 
+// ---- ui (runtime/nvn/metal.m)
+void ui_run(void);
+
 // ---- helpers
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)
 uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing

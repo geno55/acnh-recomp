@@ -64,6 +64,7 @@ typedef struct NvnShaderStage {
     uint32_t stage;           // NVNshaderStage
     uint64_t code_addr;       // GPU (== CPU) address of the code
     const uint8_t *control;   // control section
+    uint32_t const_offset, const_size;  // compiler constants (bound as c1), within the code blob
     void *backend;
 } NvnShaderStage;
 
