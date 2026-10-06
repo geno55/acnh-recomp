@@ -1,0 +1,8 @@
+input/
+extracted/
+build/
+generated/
+tools/venv/
+tools/hactool/
+__pycache__/
+.DS_Store
