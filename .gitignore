@@ -7,3 +7,4 @@ tools/hactool/
 __pycache__/
 .DS_Store
 save/
+tools/envytools/
