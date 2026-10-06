@@ -1,0 +1,350 @@
+"""Generate C for a whole NSO module.
+
+Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N]
+"""
+import argparse
+import bisect
+import os
+import re
+import struct
+import sys
+import time
+from collections import Counter
+
+import unicorn as uc
+from unicorn import arm64_const as A
+
+from analyze import eh_frame_functions
+from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx
+from nso import Nso, R_AARCH64_RELATIVE
+
+SCRATCH_MEM = 0x7300000000
+
+
+def sext26(w):
+    v = w & 0x03FFFFFF
+    return v - 0x04000000 if v & 0x02000000 else v
+
+
+def fname(a):
+    return f'f_{a:x}'
+
+
+def sanitize(sym):
+    return 'hle_' + re.sub(r'[^A-Za-z0-9_]', '_', sym)
+
+
+class Module:
+    def __init__(self, name, path, base):
+        self.name = name
+        self.nso = Nso(path)
+        self.base = base
+        n = self.nso
+        self.lo = base + n.text[0]
+        self.hi = base + n.text[0] + n.text[1]
+        self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
+        self.lifter = Lifter(base)
+        self.cache = {}
+        self.stats = Counter()
+        self.mu = None
+
+    def in_text(self, a):
+        return self.lo <= a < self.hi and a % 4 == 0
+
+    def word(self, a):
+        return self.words[(a - self.lo) // 4]
+
+    def lift(self, a):
+        ins = self.cache.get(a)
+        if ins is None:
+            try:
+                ins = self.lifter.lift(self.word(a), a)
+            except Unsupported as e:
+                self.stats['unsupported'] += 1
+                ins = Insn('trap', f'rt_udf(c, {hx(a)}); /* {e} */')
+            self.cache[a] = ins
+        return ins
+
+    def boundaries(self):
+        n, b = self.nso, self.base
+        starts = set()
+        for a in eh_frame_functions(n):
+            starts.add(b + a)
+        for name, info, shndx, value, size in n.syms:
+            if shndx and (info & 0xF) == 2:
+                starts.add(b + value)
+        for off, typ, sym, add in n.relocs:
+            if typ == R_AARCH64_RELATIVE:
+                starts.add(b + add)
+        starts = sorted(a for a in starts if self.in_text(a))
+        return starts
+
+    # ------------------------------------------------------------ jump tables
+
+    def emu(self):
+        if self.mu is None:
+            mu = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
+            n = self.nso
+            mu.mem_map(self.base, len(n.image))
+            mu.mem_write(self.base, bytes(n.image))
+            mu.mem_map(SCRATCH_MEM, 0x100000)
+            mu.reg_write(A.UC_ARM64_REG_CPACR_EL1, 0x300000)
+            self.mu = mu
+        return self.mu
+
+    def jump_table(self, br_pc, entry, end):
+        """Resolve `br xN` targets from a bounds-checked jump table, or None."""
+        rn = bits(self.word(br_pc), 5, 5)
+        # find the guarding b.hi / b.hs and its cmp, scanning backwards
+        a = br_pc - 4
+        guard = cmp = None
+        while a >= entry and br_pc - a <= 4 * 16:
+            w = self.word(a)
+            if (w & 0xFF000010) == 0x54000000 and bits(w, 0, 4) in (8, 2):
+                guard = a
+                break
+            if self.lift(a).kind in ('b', 'bl', 'blr', 'br', 'ret', 'trap'):
+                return None
+            a -= 4
+        if guard is None:
+            return None
+        a = guard - 4
+        while a >= entry and guard - a <= 4 * 8:
+            w = self.word(a)
+            # SUBS (imm) with Rd = zr, i.e. CMP #imm
+            if (w & 0x7F80001F) == 0x7100001F:
+                cmp = a
+                break
+            if self.lift(a).kind != 'op':
+                return None
+            a -= 4
+        if cmp is None:
+            return None
+        w = self.word(cmp)
+        if bits(w, 22, 1):
+            return None
+        limit = bits(w, 10, 12)
+        count = limit + 1 if bits(self.word(guard), 0, 4) == 8 else limit
+        if count <= 0 or count > 4096:
+            return None
+        idx = bits(w, 5, 5)
+        # window start: back from cmp to the first control-flow instruction
+        start = cmp
+        while start - 4 >= entry and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):
+            start -= 4
+        mu = self.emu()
+        targets = []
+        try:
+            for i in range(count):
+                for r in range(29):
+                    mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
+                mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+                if start != cmp:
+                    mu.emu_start(start, cmp)
+                mu.reg_write(A.UC_ARM64_REG_X0 + idx if idx < 29 else A.UC_ARM64_REG_X29, i)
+                mu.emu_start(cmp, br_pc)
+                if mu.reg_read(A.UC_ARM64_REG_PC) != br_pc:
+                    return None
+                t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
+                                (A.UC_ARM64_REG_X29 if rn == 29 else A.UC_ARM64_REG_X30))
+                if not (entry <= t < end) or t % 4:
+                    return None
+                targets.append(t)
+        except uc.UcError:
+            return None
+        return sorted(set(targets))
+
+    # ------------------------------------------------------------ functions
+
+    def scan(self, entry, end):
+        """Collect labels and external entries referenced by a function."""
+        labels, ext, tables = {entry}, set(), {}
+        terminated = False
+        for a in range(entry, end, 4):
+            ins = self.lift(a)
+            if ins.kind in ('b', 'bcond'):
+                t = ins.target
+                if entry <= t < end:
+                    labels.add(t)
+                elif self.in_text(t):
+                    ext.add(t)
+            elif ins.kind == 'bl':
+                if self.in_text(ins.target):
+                    ext.add(ins.target)
+            elif ins.kind == 'br':
+                jt = self.jump_table(a, entry, end)
+                if jt:
+                    tables[a] = jt
+                    labels.update(jt)
+                    self.stats['jumptables'] += 1
+                else:
+                    self.stats['br_dispatch'] += 1
+            terminated = ins.kind in ('b', 'br', 'ret', 'trap')
+        if not terminated and end < self.hi:
+            ext.add(end)
+        return labels, ext, tables
+
+    def emit_function(self, entry, end, labels, tables, hle):
+        out = [f'void {fname(entry)}(Cpu *c) {{']
+        if entry in hle:
+            out.append(f'    {sanitize(hle[entry])}(c);')
+            out.append('}')
+            return out
+        batch = []
+        refs = set()
+
+        def flush():
+            if batch:
+                out.append('    ' + emit_asm_batch(batch))
+                batch.clear()
+
+        def jump(t):
+            if entry <= t < end:
+                return f'goto L_{t:x};'
+            if not self.in_text(t):
+                return f'c->pc = {hx(t)}; __attribute__((musttail)) return rt_dispatch(c);'
+            refs.add(t)
+            return f'__attribute__((musttail)) return {fname(t)}(c);'
+
+        last = None
+        for a in range(entry, end, 4):
+            ins = self.lift(a)
+            if a in labels:
+                flush()
+                out.append(f'L_{a:x}:;')
+            k = ins.kind
+            if k == 'asm':
+                if len(batch) >= 24:
+                    flush()
+                batch.append(ins.asm)
+                try:
+                    emit_asm_batch(batch)
+                except Unsupported:
+                    batch.pop()
+                    flush()
+                    batch.append(ins.asm)
+                last = k
+                continue
+            flush()
+            if k == 'op' or k == 'trap':
+                out.append('    ' + ins.code)
+            elif k == 'b':
+                out.append('    ' + jump(ins.target))
+            elif k == 'bcond':
+                out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
+            elif k == 'bl':
+                t = ins.target
+                if self.in_text(t):
+                    refs.add(t)
+                    out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
+                else:
+                    out.append(f'    c->x[30] = {hx(a + 4)}; c->pc = {hx(t)}; rt_dispatch(c);')
+            elif k == 'blr':
+                out.append(f'    c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; rt_dispatch(c);')
+            elif k == 'br':
+                jt = tables.get(a)
+                if jt:
+                    cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in jt)
+                    out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
+                out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
+            elif k == 'ret':
+                out.append('    return;')
+            last = k
+        flush()
+        if last not in ('b', 'br', 'ret', 'trap'):
+            out.append('    ' + jump(end) if end < self.hi else f'    rt_udf(c, {hx(end)});')
+        out.append('}')
+        self._refs = refs
+        return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('name')
+    ap.add_argument('nso')
+    ap.add_argument('base', type=lambda s: int(s, 0))
+    ap.add_argument('outdir')
+    ap.add_argument('--hle')
+    ap.add_argument('--chunk', type=int, default=1500)
+    ap.add_argument('--limit', type=int, default=0)
+    args = ap.parse_args()
+
+    t0 = time.time()
+    m = Module(args.name, args.nso, args.base)
+    starts = m.boundaries()
+    hle = {}
+    if args.hle and os.path.exists(args.hle):
+        want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
+        for name, info, shndx, value, size in m.nso.syms:
+            if shndx and name in want:
+                hle[args.base + value] = name
+
+    # Partition text into functions; any branch/call target outside its function becomes a new
+    # boundary (splitting the containing function) until a fixpoint is reached.
+    start_set = set(starts)
+    for i, w in enumerate(m.words):
+        if (w & 0xFC000000) == 0x94000000:
+            t = m.lo + i * 4 + sext26(w) * 4
+            if m.in_text(t):
+                start_set.add(t)
+    scanned = {}
+    rounds = 0
+    while True:
+        rounds += 1
+        order = sorted(start_set)
+        new = set()
+        for i, a in enumerate(order):
+            end = order[i + 1] if i + 1 < len(order) else m.hi
+            key = (a, end)
+            if key not in scanned:
+                scanned[key] = m.scan(a, end)
+            new |= scanned[key][1] - start_set
+        if not new:
+            break
+        start_set |= new
+    entries = {}
+    for i, a in enumerate(order):
+        end = order[i + 1] if i + 1 < len(order) else m.hi
+        labels, ext, tables = scanned[(a, end)]
+        entries[a] = (end, labels, tables)
+    print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
+          f'{time.time() - t0:.0f}s', file=sys.stderr)
+
+    os.makedirs(args.outdir, exist_ok=True)
+    order = sorted(entries)
+    if args.limit:
+        order = order[:args.limit]
+    nchunks = 0
+    for ci in range(0, len(order), args.chunk):
+        body, refs = [], set()
+        for a in order[ci:ci + args.chunk]:
+            end, labels, tables = entries[a]
+            body += m.emit_function(a, end, labels, tables, hle)
+            refs |= getattr(m, '_refs', set())
+            m._refs = set()
+        path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
+        with open(path, 'w') as f:
+            f.write('#include "cpu.h"\n')
+            for r in sorted(refs):
+                f.write(f'void {fname(r)}(Cpu *c);\n')
+            for a in sorted(set(hle) & set(order[ci:ci + args.chunk])):
+                f.write(f'void {sanitize(hle[a])}(Cpu *c);\n')
+            f.write('\n'.join(body))
+            f.write('\n')
+        nchunks += 1
+    with open(os.path.join(args.outdir, f'{args.name}_table.c'), 'w') as f:
+        f.write('#include "cpu.h"\n')
+        for a in order:
+            f.write(f'void {fname(a)}(Cpu *c);\n')
+        f.write(f'const uint64_t {args.name}_fn_addrs[] = {{\n')
+        f.write(',\n'.join(hx(a) for a in order))
+        f.write('};\n')
+        f.write(f'const GuestFn {args.name}_fn_ptrs[] = {{\n')
+        f.write(',\n'.join(fname(a) for a in order))
+        f.write('};\n')
+        f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()
