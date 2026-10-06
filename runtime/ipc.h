@@ -42,16 +42,31 @@ struct Service {
 };
 
 typedef struct {
+    Service *objs[256];
+} Domain;
+
+typedef struct {
     KObject obj;
     Service *svc;
-    bool is_domain;
-    Service *domain_objs[256];
+    Domain *domain;  // shared by clones of a domain session
 } KSession;
 
 // payload helpers
 #define IN(type, off) (*(const type *)(req->data + (off)))
 #define OUT(type, off) (*(type *)(resp->data + (off)))
 static inline void resp_size(IpcResp *resp, uint32_t n) { if (n > resp->data_size) resp->data_size = n; }
+
+// Buffers may be sent as a pair (auto-select): use whichever one is non-empty.
+static inline IpcBuf *out_buf(IpcReq *req, int i) {
+    if (i < req->nb && req->b[i].size) return &req->b[i];
+    if (i < req->nc && req->c[i].size) return &req->c[i];
+    return i < req->nb ? &req->b[i] : i < req->nc ? &req->c[i] : NULL;
+}
+static inline IpcBuf *in_buf(IpcReq *req, int i) {
+    if (i < req->na && req->a[i].size) return &req->a[i];
+    if (i < req->nx && req->x[i].size) return &req->x[i];
+    return i < req->na ? &req->a[i] : i < req->nx ? &req->x[i] : NULL;
+}
 
 Service *service_new(const char *name, ServiceHandler h, void *state);
 Service *service_lookup(const char *name);  // from the registry (services/*.c)

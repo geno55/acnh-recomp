@@ -92,7 +92,7 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
         for (int i = 0; i < req.nmove; i++) req.move_handles[i] = *p++;
     }
     for (int i = 0; i < nx; i++, p += 2) {
-        req.x[i].addr = p[1] | ((uint64_t)((p[0] >> 12) & 0xF) << 36) | ((uint64_t)((p[0] >> 6) & 0x3F) << 32);
+        req.x[i].addr = p[1] | ((uint64_t)((p[0] >> 12) & 0xF) << 32) | ((uint64_t)((p[0] >> 6) & 0x7) << 36);
         req.x[i].size = p[0] >> 16;
     }
     req.nx = nx;
@@ -120,48 +120,56 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
     }
 
     if (req.type == 2) {  // close
-        LOG("[ipc] close session %s\n", sess->svc->name);
+        LOG("[ipc] close session %s (handle %x)\n", sess->svc->name, handle);
         return 0;
     }
     uint8_t *payload = (uint8_t *)aligned;
     bool dom = false;  // response is domain-wrapped
     if (req.type == 4 || req.type == 6) {
-        if (sess->is_domain) {
+        if (sess->domain) {
             dom = true;
             uint8_t dcmd = payload[0];
             uint8_t nin = payload[1];
             uint16_t dsize = *(uint16_t *)(payload + 2);
             req.domain_obj = *(uint32_t *)(payload + 4);
             if (dcmd == 2) {  // close object
-                sess->domain_objs[req.domain_obj] = NULL;
+                sess->domain->objs[req.domain_obj] = NULL;
                 goto write_response;
             }
             req.ndomain_in = nin;
             for (int i = 0; i < nin; i++) req.domain_in_objs[i] = *(uint32_t *)(payload + 16 + dsize + 4 * i);
             payload += 16;
         }
-        if (memcmp(payload, "SFCI", 4)) LOG("[ipc] bad SFCI magic on %s\n", sess->svc->name);
+        if (memcmp(payload, "SFCI", 4)) {
+            LOG("[ipc] bad SFCI magic on %s (domain=%d):", sess->svc->name, sess->domain != NULL);
+            for (int i = 0; i < 24; i++) LOG(" %08x", msg[i]);
+            LOG("\n");
+        }
         req.cmd = *(uint32_t *)(payload + 8);
         req.data = payload + 16;
         req.data_size = raw_words * 4 > 32 ? raw_words * 4 - 32 : 0;
         Service *target = sess->svc;
-        if (sess->is_domain) {
-            target = req.domain_obj < 256 ? sess->domain_objs[req.domain_obj] : NULL;
+        if (sess->domain) {
+            target = req.domain_obj < 256 ? sess->domain->objs[req.domain_obj] : NULL;
             if (!target) { LOG("[ipc] domain object %u missing\n", req.domain_obj); return 0xE401; }
         }
         target->handler(target, &req, &resp);
     } else if (req.type == 5 || req.type == 7) {  // control
         req.cmd = *(uint32_t *)(payload + 8);
+        LOG("[ipc] control %u on %s (handle %x)\n", req.cmd, sess->svc->name, handle);
         switch (req.cmd) {
         case 0:  // ConvertCurrentObjectToDomain
-            sess->is_domain = true;
-            sess->domain_objs[1] = sess->svc;
+            sess->domain = calloc(1, sizeof(Domain));
+            sess->domain->objs[1] = sess->svc;
             resp_size(&resp, 4);
             *(uint32_t *)resp.data = 1;
             break;
-        case 2: case 4:  // CloneCurrentObject(Ex)
-            resp.move_handles[resp.nmove++] = session_new(sess->svc);
+        case 2: case 4: {  // CloneCurrentObject(Ex)
+            uint32_t h = session_new(sess->svc);
+            ((KSession *)handle_get(h))->domain = sess->domain;
+            resp.move_handles[resp.nmove++] = h;
             break;
+        }
         case 3:  // QueryPointerBufferSize
             *(uint16_t *)resp.data = 0x8000;
             resp_size(&resp, 4);
@@ -180,8 +188,8 @@ write_response:;
     for (int i = 0; i < resp.nobjects; i++) {
         if (dom) {
             int id = 1;
-            while (id < 256 && sess->domain_objs[id]) id++;
-            sess->domain_objs[id] = resp.objects[i];
+            while (id < 256 && sess->domain->objs[id]) id++;
+            sess->domain->objs[id] = resp.objects[i];
             domain_out[ndomain_out++] = id;
         } else {
             resp.move_handles[resp.nmove++] = session_new(resp.objects[i]);

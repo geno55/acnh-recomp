@@ -12,6 +12,7 @@
 #include "kernel.h"
 
 // ------------------------------------------------------------------ results
+#undef R_OK
 #define R_OK 0
 #define R_TIMEOUT 0xEA01
 #define R_CANCELLED 0xEC01
@@ -146,14 +147,6 @@ static void query_memory(uint64_t addr, uint64_t out) {
     memcpy((void *)out, info, 0x28);
 }
 
-static bool remap(uint64_t dst, uint64_t src, uint64_t size) {
-    mach_vm_address_t target = dst;
-    vm_prot_t cur, max;
-    kern_return_t kr = mach_vm_remap(mach_task_self(), &target, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-                                     mach_task_self(), src, FALSE, &cur, &max, VM_INHERIT_NONE);
-    return kr == KERN_SUCCESS && target == dst;
-}
-
 // ------------------------------------------------------------------ threads
 static uint64_t next_thread_id = 0x50;
 
@@ -195,8 +188,7 @@ static void thread_start(KThread *t) {
 }
 
 KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio) {
-    uint64_t stack = (uint64_t)mmap((void *)ALIAS_BASE, stack_size, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    uint64_t stack = STACK_BASE + STACK_SIZE - ((stack_size + 0xFFFF) & ~0xFFFFull);
     region_add(stack, stack_size, 0xB, 3);
     KThread *t = thread_new(entry, 0, stack + stack_size, prio, 0);
     t->handle = kernel_new_handle(&t->obj);
@@ -465,7 +457,6 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
-        if (size > heap_size) mprotect((void *)(HEAP_BASE + heap_size), size - heap_size, PROT_READ | PROT_WRITE);
         heap_size = size;
         region_remove(HEAP_BASE);
         if (size) region_add(HEAP_BASE, size, 5, 3);
@@ -474,13 +465,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     }
     case 0x02: case 0x03: x[0] = R_OK; break;  // SetMemoryPermission / SetMemoryAttribute
-    case 0x04:  // MapMemory(dst, src, size)
-        if (!remap(x[0], x[1], x[2])) FATAL("MapMemory %llx <- %llx size %llx failed (16K alignment?)\n", x[0], x[1], x[2]);
+    case 0x04:  // MapMemory(dst, src, size): src is inaccessible while mapped, so copying is equivalent
+        memcpy((void *)x[0], (void *)x[1], x[2]);
         region_add(x[0], x[2], 0xB, 3);
         x[0] = R_OK;
         break;
-    case 0x05:  // UnmapMemory(dst, src, size)
-        mmap((void *)x[0], x[2], PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    case 0x05:  // UnmapMemory(dst, src, size): copy back
+        memcpy((void *)x[1], (void *)x[0], x[2]);
         region_remove(x[0]);
         x[0] = R_OK;
         break;
@@ -558,8 +549,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KObject *o = handle_get((uint32_t)x[0]);
         if (!o || o->type != KOBJ_SHMEM) { x[0] = R_INVALID_HANDLE; break; }
         KSharedMem *s = (KSharedMem *)o;
-        if (!remap(x[1], s->backing, x[2])) FATAL("MapSharedMemory %llx failed\n", x[1]);
+        memset((void *)x[1], 0, x[2]);
+        s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
         region_add(x[1], x[2], 6, 3);
+        if (s->on_map) s->on_map(s);
         x[0] = R_OK;
         break;
     }
@@ -637,7 +630,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 3: v = ALIAS_SIZE; break;
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
-        case 6: case 21: v = 0xF0000000ull; break;  // total memory available (~3.75 GB)
+        case 6: case 21: v = 0xCD500000ull; break;  // application memory (3.2 GB, as on hardware)
         case 7: case 22: v = heap_size + 0x4000000; break;
         case 8: v = 0; break;
         case 9: v = 0; break;
@@ -656,12 +649,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
-        mmap((void *)x[0], x[1], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        memset((void *)x[0], 0, x[1]);
         region_add(x[0], x[1], 0x7, 3);
         x[0] = R_OK;
         break;
     case 0x2D:  // UnmapPhysicalMemory
-        mmap((void *)x[0], x[1], PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
         region_remove(x[0]);
         x[0] = R_OK;
         break;
@@ -683,9 +675,6 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
 void kernel_init(void) {
     mach_timebase_info(&tb);
     // Reserve the heap, alias, stack, and TLS regions.
-    void *p = mmap((void *)HEAP_BASE, HEAP_MAX, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
-    if (p != (void *)HEAP_BASE) FATAL("heap reserve\n");
-    mmap((void *)TLS_BASE, TLS_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {
         Module *m = &g_modules[i];
@@ -701,4 +690,13 @@ KEvent *kernel_create_event_pair(uint32_t *w, uint32_t *r) {
     *w = kernel_new_handle(ev);
     *r = kernel_new_handle(ev);
     return ev;
+}
+
+KSharedMem *kernel_create_shared_memory(uint64_t size, void (*on_map)(KSharedMem *), uint32_t *handle) {
+    KSharedMem *s = calloc(1, sizeof *s);
+    s->obj.type = KOBJ_SHMEM;
+    s->size = size;
+    s->on_map = on_map;
+    *handle = kernel_new_handle(&s->obj);
+    return s;
 }

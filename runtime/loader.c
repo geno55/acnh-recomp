@@ -86,6 +86,8 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
         case DT_SYMTAB: m->symtab = base + d[1]; break;
         case DT_STRTAB: m->strtab = base + d[1]; break;
         case DT_HASH: m->nsyms = *(uint32_t *)(base + d[1] + 4); break;
+        case 12: m->init = base + d[1]; break;  // DT_INIT
+        case 13: m->fini = base + d[1]; break;  // DT_FINI
         case DT_INIT_ARRAY: m->init_array = base + d[1]; break;
         case DT_INIT_ARRAYSZ: m->init_array_sz = d[1]; break;
         case DT_FINI_ARRAY: m->fini_array = base + d[1]; break;
@@ -132,11 +134,12 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
     Elf64Sym *s = sym(m, symidx);
     const char *name = symname(m, s);
     if (s->shndx) return m->base + s->value;
+    HostFn impl = hle_lookup_impl(name);
+    if (impl) return hle_register(name, impl);  // host implementation wins over the guest SDK's
     uint64_t a = loader_find_symbol(name);
     if (a) return a;
     if ((s->info >> 4) == 2) return 0;  // weak undefined
-    HostFn impl = hle_lookup_impl(name);
-    return hle_register(name, impl);
+    return hle_register(name, NULL);
 }
 
 static void relocate(Module *m) {

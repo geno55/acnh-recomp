@@ -6,7 +6,7 @@ LDFLAGS  := $(shell pkg-config --libs sdl3 2>/dev/null) -framework CoreFoundatio
 
 GEN_SRC := $(wildcard generated/main/*.c) $(wildcard generated/sdk/*.c)
 GEN_OBJ := $(patsubst generated/%.c,build/obj/%.o,$(GEN_SRC))
-RT_SRC  := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c)
+RT_SRC  := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) $(wildcard runtime/nvn/*.c)
 RT_OBJ  := $(patsubst runtime/%.c,build/rt/%.o,$(RT_SRC))
 
 all: build/larecomp

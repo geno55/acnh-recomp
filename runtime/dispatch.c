@@ -55,11 +55,31 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
 }
 
 static __thread uint64_t unimpl_pc;
+static int unimpl_counts[MAX_HLE];
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
-    LOG("[hle] UNIMPLEMENTED %s (x0=%llx x1=%llx lr=%llx) -> returning 0\n", hle_slots[i].name, c->x[0], c->x[1],
-        c->x[30]);
+    if (unimpl_counts[i]++ < 3)
+        LOG("[hle] UNIMPLEMENTED %s (x0=%llx x1=%llx lr=%llx) -> returning 0\n", hle_slots[i].name, c->x[0],
+            c->x[1], c->x[30]);
     c->x[0] = 0;
+}
+
+uint64_t guest_sym(const char *name) {
+    uint64_t a = loader_find_symbol(name);
+    if (!a) FATAL("guest symbol %s not found\n", name);
+    return a;
+}
+
+void *hle_alloc(uint64_t size) {
+    static uint64_t next = HLE_HEAP;
+    static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&m);
+    uint64_t a = next;
+    next += (size + 63) & ~63ull;
+    if (next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
+    pthread_mutex_unlock(&m);
+    memset((void *)a, 0, size);
+    return (void *)a;
 }
 
 void dispatch_init(void) {

@@ -31,10 +31,14 @@ struct KThread {
     KThread *wnext;
 };
 
-typedef struct {
+typedef struct KSharedMem {
     KObject obj;
-    uint64_t backing, size;
+    uint64_t size, guest_addr;  // guest_addr: where the guest mapped it (0 if not mapped)
+    void (*on_map)(struct KSharedMem *s);  // HLE owner fills initial contents
+    void *owner;
 } KSharedMem;
+
+KSharedMem *kernel_create_shared_memory(uint64_t size, void (*on_map)(KSharedMem *), uint32_t *handle);
 
 typedef struct {
     KObject obj;

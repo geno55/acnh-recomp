@@ -11,26 +11,28 @@
 
 // ---- address space layout (guest addresses == host addresses)
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
-// guest lives in a 12 GB window at 0x70_0000_0000 claimed at startup (see main.c).
+// guest lives in a 12.5 GB window at 0x70_0000_0000 claimed at startup (see main.c).
 #define GUEST_LO     0x7000000000ull
-#define GUEST_HI     0x7300000000ull
+#define GUEST_HI     0x7320000000ull
 #define MAIN_BASE    0x7000000000ull
 #define SDK_BASE     0x7004000000ull
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull
 #define TLS_SIZE     0x0000100000ull
+#define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
+#define HLE_HEAP_SIZE 0x000E000000ull
 #define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
 #define ALIAS_SIZE   0x0100000000ull
 #define HEAP_BASE    0x7240000000ull
-#define HEAP_MAX     0x00C0000000ull   // 3 GB
+#define HEAP_MAX     0x00D0000000ull   // 3.25 GB
 
 // ---- loader.c
 typedef struct Module {
     const char *name;
     uint64_t base, size;
     uint64_t text_off, text_size, ro_off, ro_size, data_off, data_size;
-    uint64_t dynamic, init_array, init_array_sz, fini_array, fini_array_sz;
+    uint64_t dynamic, init, fini, init_array, init_array_sz, fini_array, fini_array_sz;
     uint64_t symtab, strtab, nsyms;
 } Module;
 
@@ -65,4 +67,6 @@ uint32_t ipc_connect_named_port(const char *name);
 
 // ---- helpers
 void guest_call(Cpu *c, uint64_t addr);   // call guest function at addr (saves/restores x30)
+uint64_t guest_sym(const char *name);     // cached loader_find_symbol, fatal if missing
+void *hle_alloc(uint64_t size);           // zeroed guest-visible memory (never freed)
 extern const char *g_romfs_dir;

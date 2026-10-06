@@ -24,24 +24,24 @@ static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
 
 // nn::init::Start calls x2 right after nnosInitialize and x3 after nninitStartup, just before
 // nnMain: SDK constructors run early, the game's run once nninitStartup has set up its heap.
-static void rtld_init_sdk(Cpu *c) {
-    Module *m = &g_modules[1];
-    LOG("init_array %s: %llu entries\n", m->name, m->init_array_sz / 8);
-    run_array(c, m->init_array, m->init_array_sz);
+// rtld runs a module's DT_INIT, which registers it (and its TLS template) with musl via
+// __nnmusl_init_dso and then runs its init_array; fall back to the array if there is no DT_INIT.
+static void module_init(Cpu *c, Module *m) {
+    LOG("init %s (DT_INIT %llx, %llu init_array entries)\n", m->name, m->init, m->init_array_sz / 8);
+    if (m->init) guest_call(c, m->init);
+    else run_array(c, m->init_array, m->init_array_sz);
 }
 
-static void rtld_init_main(Cpu *c) {
-    Module *m = &g_modules[0];
-    LOG("init_array %s: %llu entries\n", m->name, m->init_array_sz / 8);
-    run_array(c, m->init_array, m->init_array_sz);
-}
+static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
+static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
     mach_vm_address_t a = GUEST_LO;
     if (mach_vm_allocate(mach_task_self(), &a, GUEST_HI - GUEST_LO, VM_FLAGS_FIXED) == KERN_SUCCESS) {
-        mprotect((void *)GUEST_LO, GUEST_HI - GUEST_LO, PROT_NONE);
+        // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
+        // Untouched pages cost nothing.
         return;
     }
     const char *tries = getenv("LARECOMP_REEXEC");

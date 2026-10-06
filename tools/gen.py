@@ -15,7 +15,7 @@ import unicorn as uc
 from unicorn import arm64_const as A
 
 from analyze import eh_frame_functions
-from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx
+from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
@@ -94,6 +94,75 @@ class Module:
 
     def jump_table(self, br_pc, entry, end):
         """Resolve `br xN` targets from a bounds-checked jump table, or None."""
+        r = self._jump_table_fallthrough(br_pc, entry, end)
+        if r is None:
+            r = self._jump_table_taken(br_pc, entry, end)
+        return r
+
+    def _emulate_table(self, br_pc, entry, end, start, idx, count, set_at):
+        """Run start..br for each index value (set at address set_at), collect targets."""
+        mu = self.emu()
+        rn = bits(self.word(br_pc), 5, 5)
+
+        def step_to(frm, to):
+            pc = frm
+            for _ in range(64):
+                if pc == to:
+                    return True
+                mu.emu_start(pc, 0, count=1)
+                pc = mu.reg_read(A.UC_ARM64_REG_PC)
+            return False
+
+        targets = []
+        try:
+            for i in range(count):
+                for r in range(29):
+                    mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
+                mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+                a2 = entry
+                while a2 < start:
+                    w2 = self.word(a2)
+                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
+                        mu.emu_start(a2, 0, count=1)
+                    a2 += 4
+                if set_at != start and not step_to(start, set_at):
+                    return None
+                mu.reg_write(A.UC_ARM64_REG_X0 + idx if idx < 29 else A.UC_ARM64_REG_X29, i)
+                if not step_to(set_at, br_pc):
+                    return None
+                t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
+                                (A.UC_ARM64_REG_X29 if rn == 29 else A.UC_ARM64_REG_X30))
+                if not (entry <= t < end) or t % 4:
+                    return None
+                targets.append(t)
+        except uc.UcError:
+            return None
+        return sorted(set(targets))
+
+    def _jump_table_taken(self, br_pc, entry, end):
+        """Form: cmp idx, #N ; b.ls/b.lo table ... table: <address math> ; br"""
+        # start of the block holding the br
+        s = br_pc
+        while s - 4 >= entry and br_pc - (s - 4) <= 4 * 12 and self.lift(s - 4).kind in ('op', 'asm'):
+            s -= 4
+        for g in range(entry, end, 4):
+            w = self.word(g)
+            if (w & 0xFF000010) != 0x54000000 or bits(w, 0, 4) not in (9, 3):
+                continue
+            t = g + sext(bits(w, 5, 19), 19) * 4
+            if t != s:
+                continue
+            cw = self.word(g - 4) if g - 4 >= entry else 0
+            if (cw & 0x7F80001F) != 0x7100001F or bits(cw, 22, 1):
+                continue
+            limit = bits(cw, 10, 12)
+            count = limit + 1 if bits(w, 0, 4) == 9 else limit
+            if count <= 0 or count > 4096:
+                continue
+            return self._emulate_table(br_pc, entry, end, s, bits(cw, 5, 5), count, s)
+        return None
+
+    def _jump_table_fallthrough(self, br_pc, entry, end):
         rn = bits(self.word(br_pc), 5, 5)
         # find the guarding b.hi / b.hs and its cmp, scanning backwards
         a = br_pc - 4
@@ -134,16 +203,34 @@ class Module:
             start -= 4
         mu = self.emu()
         targets = []
+
+        def step_to(frm, to):
+            # single-step: Unicorn's `until` is unreliable mid translation-block
+            pc = frm
+            for _ in range(64):
+                if pc == to:
+                    return True
+                mu.emu_start(pc, 0, count=1)
+                pc = mu.reg_read(A.UC_ARM64_REG_PC)
+            return False
+
         try:
             for i in range(count):
                 for r in range(29):
                     mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
                 mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
-                if start != cmp:
-                    mu.emu_start(start, cmp)
+                # replay address materialization (ADRP/ADR/ADD-imm) from the function entry, so table
+                # bases computed before loops or branches are known
+                a2 = entry
+                while a2 < start:
+                    w2 = self.word(a2)
+                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
+                        mu.emu_start(a2, 0, count=1)
+                    a2 += 4
+                if not step_to(start, cmp):
+                    return None
                 mu.reg_write(A.UC_ARM64_REG_X0 + idx if idx < 29 else A.UC_ARM64_REG_X29, i)
-                mu.emu_start(cmp, br_pc)
-                if mu.reg_read(A.UC_ARM64_REG_PC) != br_pc:
+                if not step_to(cmp, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
                                 (A.UC_ARM64_REG_X29 if rn == 29 else A.UC_ARM64_REG_X30))
@@ -155,6 +242,23 @@ class Module:
         return sorted(set(targets))
 
     # ------------------------------------------------------------ functions
+
+    def computed_target(self, br_pc, entry):
+        """True if the br register comes from address arithmetic (a table) rather than a load."""
+        rn = bits(self.word(br_pc), 5, 5)
+        a = br_pc - 4
+        while a >= entry and br_pc - a <= 4 * 16:
+            w = self.word(a)
+            if self.lift(a).kind not in ('op', 'asm'):
+                return False
+            if (w & 31) == rn:
+                if (w & 0x1F000000) == 0x0B000000:  # ADD/SUB (shifted or extended register)
+                    return True
+                if (w & 0x9F000000) == 0x10000000:  # ADR
+                    return True
+                return False
+            a -= 4
+        return False
 
     def scan(self, entry, end):
         """Collect labels and external entries referenced by a function."""
@@ -177,6 +281,10 @@ class Module:
                     tables[a] = jt
                     labels.update(jt)
                     self.stats['jumptables'] += 1
+                elif self.computed_target(a, entry):
+                    # unresolved table jump: allow jumping to any instruction of the function
+                    tables[a] = 'all'
+                    self.stats['br_all_labels'] += 1
                 else:
                     self.stats['br_dispatch'] += 1
             terminated = ins.kind in ('b', 'br', 'ret', 'trap')
@@ -206,6 +314,9 @@ class Module:
             refs.add(t)
             return f'__attribute__((musttail)) return {fname(t)}(c);'
 
+        all_labels = any(v == 'all' for v in tables.values())
+        if all_labels:
+            labels = set(range(entry, end, 4))
         last = None
         for a in range(entry, end, 4):
             ins = self.lift(a)
@@ -243,6 +354,9 @@ class Module:
                 out.append(f'    c->pc = {ins.target}; c->x[30] = {hx(a + 4)}; rt_dispatch(c);')
             elif k == 'br':
                 jt = tables.get(a)
+                if jt == 'all':
+                    out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
+                    continue
                 if jt:
                     cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in jt)
                     out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
@@ -253,6 +367,11 @@ class Module:
         flush()
         if last not in ('b', 'br', 'ret', 'trap'):
             out.append('    ' + jump(end) if end < self.hi else f'    rt_udf(c, {hx(end)});')
+        if all_labels:
+            out.append('L_dispatch:')
+            cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
+            out.append(f'    switch (c->pc) {{ {cases} default: break; }}')
+            out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
         self._refs = refs
         return out
@@ -287,6 +406,28 @@ def main():
             t = m.lo + i * 4 + sext26(w) * 4
             if m.in_text(t):
                 start_set.add(t)
+    # Code addresses materialized in registers (callbacks, vtables built at runtime): ADR, or
+    # ADRP followed shortly by ADD on the same register.
+    adrp_regs = {}
+    for i, w in enumerate(m.words):
+        pc = m.lo + i * 4
+        if (w & 0x9F000000) == 0x10000000:  # ADR
+            imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
+            if imm & (1 << 20):
+                imm -= 1 << 21
+            if m.in_text(pc + imm):
+                start_set.add(pc + imm)
+        elif (w & 0x9F000000) == 0x90000000:  # ADRP
+            imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
+            if imm & (1 << 20):
+                imm -= 1 << 21
+            adrp_regs[w & 31] = ((pc & ~0xFFF) + (imm << 12), i)
+        elif (w & 0xFFC00000) == 0x91000000:  # ADD (imm, 64-bit, no shift)
+            rn, rd = (w >> 5) & 31, w & 31
+            if rn in adrp_regs and i - adrp_regs[rn][1] <= 8:
+                t = adrp_regs[rn][0] + ((w >> 10) & 0xFFF)
+                if m.in_text(t):
+                    start_set.add(t)
     scanned = {}
     rounds = 0
     while True:
