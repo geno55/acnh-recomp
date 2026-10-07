@@ -10,6 +10,7 @@ from the file get the LAS GUI defaults. The output dir receives romfs/ (replacem
 """
 import json
 import os
+import re
 import sys
 import types
 
@@ -141,6 +142,40 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
+    # ---- LARecomp entrance randomizer (post-pass over the room files)
+    tier = int(settings.get('entrance-tier', 0))
+    if tier > 0:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import random as _random
+        import entrance_rando as er
+        from RandomizerCore.Tools import leb
+        doors = er.load_doors()
+        rng = _random.Random(f"{settings['seed']}-entrances")
+        entry_map, exit_map = er.shuffle(doors, tier, bool(settings.get('entrance-decoupled', False)), rng)
+        lvl_out = os.path.join(out_dir, 'romfs', 'region_common', 'level')
+
+        def room_path(name, base):
+            level = re.match(r'(.+)_\d\d[A-Z]', name).group(1)
+            return os.path.join(base, level, name + '.leb')
+
+        def read_room(name):
+            p = room_path(name, lvl_out)
+            if not os.path.exists(p):
+                p = room_path(name, os.path.join(romfs, 'region_common', 'level'))
+            with open(p, 'rb') as f:
+                return leb.Room(f.read())
+
+        def write_room(name, room):
+            p = room_path(name, lvl_out)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'wb') as f:
+                f.write(room.repack())
+
+        n = er.apply(doors, entry_map, exit_map, read_room, write_room)
+        with open(os.path.join(out_dir, f'entrances_{settings["seed"]}.txt'), 'w') as f:
+            f.write(er.spoiler(doors, entry_map, exit_map) + '\n')
+        print('entrances shuffled:', len(entry_map), 'doors,', n, 'rooms edited', flush=True)
+
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
