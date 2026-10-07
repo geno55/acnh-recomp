@@ -346,7 +346,9 @@ class Module:
             refs.add(t)
             return f'__attribute__((musttail)) return {fname(t)}(c);'
 
-        all_labels = any(v == 'all' for v in tables.values())
+        # Functions with jump tables also get the all-instruction fallback: a table whose emulation
+        # missed some cases then still reaches the right instruction instead of aborting.
+        all_labels = bool(tables)
         if all_labels:
             labels = set(range(entry, end, 4))
         last = None
@@ -392,6 +394,8 @@ class Module:
                 if jt:
                     cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in jt)
                     out.append(f'    switch ({ins.target}) {{ {cases} default: break; }}')
+                    out.append(f'    c->pc = {ins.target}; goto L_dispatch;')
+                    continue
                 out.append(f'    c->pc = {ins.target}; __attribute__((musttail)) return rt_dispatch(c);')
             elif k == 'ret':
                 out.append('    return;')
