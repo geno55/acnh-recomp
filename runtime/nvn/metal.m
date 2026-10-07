@@ -180,6 +180,9 @@ static TexBackend *tex_backend(NvnTexture *t) {
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget |
               MTLTextureUsageShaderWrite;
     d.storageMode = MTLStorageModePrivate;
+    // Shaders sample depth through ordinary texture2d bindings (Maxwell has no separate depth type);
+    // keep depth uncompressed so those reads see the stored values.
+    if (renderer_format_is_depth(t->format)) d.allowGPUOptimizedContents = NO;
     if (mf.force_alpha_one)
         d.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen,
                                                   MTLTextureSwizzleBlue, MTLTextureSwizzleOne);

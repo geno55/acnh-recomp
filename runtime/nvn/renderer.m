@@ -691,6 +691,69 @@ static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bo
     return tex;
 }
 
+
+// ---- render-target feedback: a draw that samples one of the pass's own attachments (e.g. depth
+// bound for testing while the shader reads it) gets a snapshot copy, as sampling an attachment of the
+// current Metal pass is undefined.
+static NvnTexture *feedback_tex[4];
+static id<MTLTexture> feedback_copy[4];
+static int nfeedback;
+
+static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
+    int slot = ((int)st_->handle_offset - 0x20) / 8;
+    uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
+    uint32_t tic = h & 0xFFFFF;
+    if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
+    return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+}
+
+static bool is_attachment(NvnTexture *t) {
+    if (!t) return false;
+    if (t == st.rt.depth) return true;
+    for (int i = 0; i < st.rt.ncolor; i++) if (t == st.rt.color[i]) return true;
+    return false;
+}
+
+static void resolve_feedback(Prog *pr) {
+    nfeedback = 0;
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_FEEDBACK") != NULL;
+    if (off) return;
+    ShaderInfo *infos[2] = {pr->vi, pr->fi};
+    for (int sg = 0; sg < 2; sg++)
+        for (int i = 0; i < infos[sg]->ntex; i++) {
+            NvnTexture *t = shader_texture_object(sg, &infos[sg]->tex[i]);
+            if (!is_attachment(t)) continue;
+            bool have = false;
+            for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
+            if (have || nfeedback == 4) continue;
+            end_pass();
+            id<MTLTexture> src = renderer_texture(t, nil, true);
+            static NSMutableDictionary *copies;
+            if (!copies) copies = [NSMutableDictionary new];
+            NSValue *key = [NSValue valueWithPointer:t];
+            id<MTLTexture> dst = copies[key];
+            if (!dst || dst.width != src.width || dst.height != src.height || dst.pixelFormat != src.pixelFormat) {
+                MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width
+                                                                                           height:src.height mipmapped:NO];
+                d.textureType = src.textureType == MTLTextureType2DMultisample ? MTLTextureType2DMultisample : MTLTextureType2D;
+                d.sampleCount = src.sampleCount;
+                d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+                d.storageMode = MTLStorageModePrivate;
+                dst = [dev newTextureWithDescriptor:d];
+                copies[key] = dst;
+            }
+            id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
+            [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                    sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:dst destinationSlice:0 destinationLevel:0
+             destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [b endEncoding];
+            feedback_tex[nfeedback] = t;
+            feedback_copy[nfeedback++] = dst;
+            st.rt_dirty = true;  // the pass resumes (loading) after the copy
+        }
+}
+
 static void bind_textures(int stage, ShaderInfo *si) {
     for (int i = 0; i < si->ntex; i++) {
         ShaderTexture *st_ = &si->tex[i];
@@ -702,6 +765,14 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            for (int k = 0; k < nfeedback; k++)
+                if (e->tex == feedback_tex[k]) {
+                    id<MTLTexture> fc = feedback_copy[k];
+                    MTLTextureType want = mtl_type_for(st_->type);
+                    if (fc.textureType != want && want == MTLTextureType2DArray)
+                        fc = [fc newTextureViewWithPixelFormat:fc.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+                    tex = fc;
+                }
             if (g_debug_frame && e->tex && e->tex->addr) {
                 uint64_t total = tegra_total_size(&e->tex->layout), nz = 0;
                 const uint8_t *p = (const uint8_t *)(uintptr_t)e->tex->addr;
@@ -904,6 +975,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            for (int k = 0; k < nfeedback; k++)
+                if (e->tex == feedback_tex[k]) {
+                    id<MTLTexture> fc = feedback_copy[k];
+                    MTLTextureType want = mtl_type_for(st_->type);
+                    if (fc.textureType != want && want == MTLTextureType2DArray)
+                        fc = [fc newTextureViewWithPixelFormat:fc.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+                    tex = fc;
+                }
         }
         if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
         [ce setTexture:tex ? tex : dummy_texture(st_->type) atIndex:i];
@@ -1025,6 +1104,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (g_debug_frame || addr_hit || (log_rt_w && st.rt.ncolor && st.rt.color[0] && (int)st.rt.color[0]->width == log_rt_w &&
                           (int)st.rt.color[0]->height == log_rt_h))
         debug_draw(pr, r, indexed);
+    resolve_feedback(pr);
     begin_pass();
 
     // pipeline
@@ -1230,7 +1310,10 @@ static const char *copy_src =
     "  float2 p = float2((vid << 1) & 2, vid & 2); V o; o.pos = float4(p.x * 2 - 1, 1 - p.y * 2, 0, 1);\n"
     "  o.uv = r.xy + p * r.zw; return o; }\n"
     "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
-    "  return t.sample(s, in.uv); }\n";
+    "  return t.sample(s, in.uv); }\n"
+    "struct D { float d [[depth(any)]]; };\n"
+    "fragment D fs_depth(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  D o; o.d = t.sample(s, in.uv); return o; }\n";
 
 // Bytes per block of the Metal texture backing an NVN format (RGB8 is expanded to RGBA8 on the host).
 static uint64_t renderer_pixel_format_bytes(MTLPixelFormat pf, uint64_t nvn_bpb) {
@@ -1325,16 +1408,91 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     renderer_mark_gpu_owned(dt);
     id<MTLTexture> d = view_texture(dt, &dst->view, dst->has_view, true, nil);
     const int32_t *sr = src->region, *dr = dst->region;
-    if (g_debug_frame || (dt->width == 720 && dt->height == 41)) {
+    if (g_debug_frame) {
         static int nl;
         uint64_t total = tegra_total_size(&st_->layout), nz = 0;
         for (uint64_t k = 0; k < total && st_->addr; k++) nz += ((const uint8_t *)(uintptr_t)st_->addr)[k] != 0;
-        if (nl < 40) LOG("[copytex] src addr %llx size %llu nonzero %llu tflags %#x stride %u bh %u\n", st_->addr, total, nz, st_->flags, st_->stride, st_->layout.block_height_log2);
-        if (nl++ < 40) LOG("[copytex] %ux%u f%#x (%d,%d %dx%d) -> %ux%u f%#x (%d,%d %dx%d) flags %llx src_gpu %d\n", st_->width, st_->height, st_->format,
+        if (nl < 400) LOG("[copytex] src addr %llx size %llu nonzero %llu tflags %#x stride %u bh %u\n", st_->addr, total, nz, st_->flags, st_->stride, st_->layout.block_height_log2);
+        if (nl++ < 400) LOG("[copytex] %ux%u f%#x (%d,%d %dx%d) -> %ux%u f%#x (%d,%d %dx%d) flags %llx src_gpu %d\n", st_->width, st_->height, st_->format,
             sr[0], sr[1], sr[3], sr[4], dt->width, dt->height, dt->format, dr[0], dr[1], dr[3], dr[4], flags, renderer_is_gpu_owned(st_));
     }
     int sw = sr[3] ? sr[3] : (int)s.width, sh = sr[4] ? sr[4] : (int)s.height;
     int dw = dr[3] ? dr[3] : (int)d.width, dh = dr[4] ? dr[4] : (int)d.height;
+    static int no_depth_scale = -1;
+    if (no_depth_scale < 0) no_depth_scale = getenv("LARECOMP_NO_DEPTH_SCALE") != NULL;
+    if (!no_depth_scale && renderer_format_is_depth(dt->format) && (sw != dw || sh != dh) && s.sampleCount == 1 && dt->format != 0x31) {
+        // scaled depth copy (the game builds its depth pyramid this way): draw, writing fragment depth
+        MTLRenderPassDescriptor *drp = [MTLRenderPassDescriptor renderPassDescriptor];
+        drp.depthAttachment.texture = d;
+        drp.depthAttachment.loadAction = MTLLoadActionLoad;
+        drp.depthAttachment.storeAction = MTLStoreActionStore;
+        if (renderer_format_has_stencil(dt->format)) {
+            drp.stencilAttachment.texture = d;
+            drp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            drp.stencilAttachment.storeAction = MTLStoreActionStore;
+        }
+        id<MTLRenderCommandEncoder> e = [cb() renderCommandEncoderWithDescriptor:drp];
+        NSString *key = [NSString stringWithFormat:@"copydepth %lu", (unsigned long)d.pixelFormat];
+        id<MTLRenderPipelineState> pipe = cache[key];
+        if (!pipe) {
+            static id<MTLLibrary> dlib;
+            NSError *derr = nil;
+            if (!dlib) dlib = [dev newLibraryWithSource:@(copy_src) options:nil error:&derr];
+            if (!dlib) LOG("[copy] depth copy library: %s\n", derr.localizedDescription.UTF8String);
+            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+            pd.vertexFunction = [dlib newFunctionWithName:@"vs"];
+            pd.fragmentFunction = [dlib newFunctionWithName:@"fs_depth"];
+            pd.depthAttachmentPixelFormat = d.pixelFormat;
+            if (renderer_format_has_stencil(dt->format)) pd.stencilAttachmentPixelFormat = d.pixelFormat;
+            NSError *perr = nil;
+            pipe = [dev newRenderPipelineStateWithDescriptor:pd error:&perr];
+            if (!pipe) { LOG("[copy] depth copy pipeline: %s\n", perr.localizedDescription.UTF8String); return; }
+            cache[key] = pipe;
+        }
+        static id<MTLDepthStencilState> always;
+        if (!always) {
+            MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+            dd.depthCompareFunction = MTLCompareFunctionAlways;
+            dd.depthWriteEnabled = YES;
+            always = [dev newDepthStencilStateWithDescriptor:dd];
+        }
+        static id<MTLSamplerState> dnear;
+        if (!dnear) dnear = [dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
+        id<MTLTexture> sdepth = s;
+        if (s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8)
+            sdepth = [s newTextureViewWithPixelFormat:s.pixelFormat];
+        float r[4] = {(float)sr[0] / s.width, (float)sr[1] / s.height, (float)sw / s.width, (float)sh / s.height};
+        [e setRenderPipelineState:pipe];
+        [e setDepthStencilState:always];
+        [e setViewport:(MTLViewport){dr[0], dr[1], dw, dh, 0, 1}];
+        [e setVertexBytes:r length:16 atIndex:0];
+        [e setFragmentTexture:sdepth atIndex:0];
+        [e setFragmentSamplerState:dnear atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+        stat_passes++;
+        static int dbgc = -1;
+        if (dbgc < 0) dbgc = getenv("LARECOMP_DEBUG_DEPTHCOPY") != NULL;
+        if (dbgc) {
+            static int nlog;
+            if (nlog++ < 6) {
+                id<MTLBuffer> rb = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
+                id<MTLBlitCommandEncoder> bb = [cb() blitCommandEncoder];
+                MTLBlitOption opt = (s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
+                [bb copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(s.width / 2, s.height / 2, 0)
+                         sourceSize:MTLSizeMake(1, 1, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:4 destinationBytesPerImage:4 options:opt];
+                opt = (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
+                [bb copyFromTexture:d sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(d.width / 2, d.height / 2, 0)
+                         sourceSize:MTLSizeMake(1, 1, 1) toBuffer:rb destinationOffset:16 destinationBytesPerRow:4 destinationBytesPerImage:4 options:opt];
+                [bb endEncoding];
+                renderer_flush();
+                const float *f = rb.contents;
+                LOG("[copy] depth %lux%lu fmt %lu -> %lux%lu fmt %lu: centre src %g dst %g\n", (unsigned long)s.width, (unsigned long)s.height,
+                    (unsigned long)s.pixelFormat, (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, f[0], f[4]);
+            }
+        }
+        return;
+    }
     if (renderer_format_is_depth(dt->format) || (s.pixelFormat == d.pixelFormat && sw == dw && sh == dh && s.sampleCount == d.sampleCount)) {
         id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
         [b copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sr[0], sr[1], 0)
