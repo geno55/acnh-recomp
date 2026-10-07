@@ -45,6 +45,11 @@ typedef struct {
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
+// maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
+extern const uint8_t *maxwell_dbg_code;
+extern uint32_t maxwell_dbg_pc;
+extern int maxwell_dbg_reg;
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);

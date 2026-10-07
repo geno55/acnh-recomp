@@ -489,6 +489,7 @@ void backend_present(NvnTexture *t) {
         char path[256];
         snprintf(path, sizeof path, "build/frame_%05llu.png", total_frames);
         save_png(b->tex, path);
+        if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     if (now - last_fps_time >= 2.0) {

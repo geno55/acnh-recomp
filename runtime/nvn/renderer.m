@@ -525,6 +525,17 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     dump_program(p);
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
+    {
+        // LARECOMP_DBG_FS=<fs code addr hex>:<pc hex>:<reg>
+        static int parsed;
+        static unsigned long long dbg_addr;
+        static unsigned dbg_pc;
+        static int dbg_reg;
+        if (!parsed) { parsed = 1; const char *e = getenv("LARECOMP_DBG_FS"); if (e) sscanf(e, "%llx:%x:%d", &dbg_addr, &dbg_pc, &dbg_reg); }
+        maxwell_dbg_code = dbg_addr ? (const uint8_t *)(uintptr_t)dbg_addr : NULL;
+        maxwell_dbg_pc = dbg_pc;
+        maxwell_dbg_reg = dbg_reg;
+    }
     // the compiler constants follow the code, so they bound the instruction scan
     size_t vmax = p->stages[0].const_offset ? p->stages[0].const_offset : 0x10000;
     size_t fmax = p->stages[1].const_offset ? p->stages[1].const_offset : 0x10000;
@@ -747,10 +758,13 @@ static void bind_textures(int stage, ShaderInfo *si) {
 static void bind_cbufs(int stage, ShaderInfo *si) {
     for (int k = 0; k < 18; k++) {
         if (!(si->cbuf_mask & (1u << k))) continue;
-        if (k == 0) {  // driver constants: storage buffer bindings at 0x110 + 16*i {addr_lo, addr_hi, size, 0}
-            uint32_t drv[0x400 / 4] = {0};
+        if (k == 0) {
+            // driver constants: storage buffer bindings {addr_lo, addr_hi, size, 0} in a 0x100-byte table
+            // per hardware stage at 0x110 + 0x100 * stage (vertex 0, fragment 4)
+            uint32_t drv[0x800 / 4] = {0};
+            uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
             for (int i = 0; i < 16; i++) {
-                uint32_t *e = &drv[(0x110 + 16 * i) / 4];
+                uint32_t *e = &drv[(base + 16 * i) / 4];
                 e[0] = (uint32_t)st.sbuf[stage][i].addr;
                 e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;

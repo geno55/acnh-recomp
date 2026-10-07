@@ -13,8 +13,12 @@
 #include "shader.h"
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
+const uint8_t *maxwell_dbg_code;
+uint32_t maxwell_dbg_pc;
+int maxwell_dbg_reg;
 
 #define RZ 255
+#define LMEM_WORDS 256  // local memory per invocation (1 KB)
 #define PT 7
 
 typedef struct {
@@ -839,19 +843,41 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         } else {
             set_reg(c, d, t);
         }
-    } else if (OPM(0x1c00000000000000ull, 0xfe80000000000000ull)) {  // IADD32I
-        sprintf(t, "(%s%s + 0x%08xu)", bits(w, 56, 1) ? "-" : "", R(a), (uint32_t)bits(w, 20, 32));
-        set_reg(c, d, t);
+    } else if (OPM(0x1c00000000000000ull, 0xfe00000000000000ull)) {  // IADD32I (CC bit 52, X bit 53)
+        bool wcc = bits(w, 52, 1), x = bits(w, 53, 1);
+        if (wcc || x) c->uses_cc = true;
+        sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(0x%08xu)%s;%s\n", bits(w, 56, 1) ? "-" : "", R(a), (uint32_t)bits(w, 20, 32),
+           x ? " + ulong(cc)" : "", wcc ? " cc = uint(sum >> 32) & 1u;" : "");
+        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
+        sp(&c->body, "    }\n");
     } else if (OPM(0x5cc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4cc0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x38c0000000000000ull, 0xfef0000000000000ull)) {  // IADD3
-        sprintf(t, "(%s%s + %s%s + %s%s)", bits(w, 51, 1) ? "-" : "", R(a), bits(w, 50, 1) ? "-" : "", B(false),
-                bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)));
-        set_reg(c, d, t);
+        bool wcc3 = bits(w, 47, 1), x3 = bits(w, 48, 1);
+        if (wcc3 || x3) {  // carry in/out (64-bit address math)
+            c->uses_cc = true;
+            sp(&c->body, "    { ulong sum = ulong(%s%s) + ulong(%s%s) + ulong(%s%s)%s;\n", bits(w, 51, 1) ? "-" : "", R(a),
+               bits(w, 50, 1) ? "-" : "", B(false), bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)), x3 ? " + ulong(cc)" : "");
+            if (wcc3) sp(&c->body, "      cc = uint(sum >> 32) & 1u;\n");
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
+            sp(&c->body, "    }\n");
+        } else {
+            sprintf(t, "(%s%s + %s%s + %s%s)", bits(w, 51, 1) ? "-" : "", R(a), bits(w, 50, 1) ? "-" : "", B(false),
+                    bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)));
+            set_reg(c, d, t);
+        }
     } else if (OPM(0x5c18000000000000ull, 0xfff8000000000000ull) || OPM(0x4c18000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3818000000000000ull, 0xfef8000000000000ull)) {  // ISCADD
         sprintf(t, "((%s%s << %du) + %s%s)", bits(w, 49, 1) ? "-" : "", R(a), (int)bits(w, 39, 5), bits(w, 48, 1) ? "-" : "",
                 B(false));
-        set_reg(c, d, t);
+        if (bits(w, 47, 1)) {  // .CC: carry out for a following IADD.X (64-bit address math)
+            c->uses_cc = true;
+            sp(&c->body, "    { uint s = %s%s << %du; uint t2 = %s%s; uint res = s + t2; cc = (res < s) ? 1u : 0u;\n",
+               bits(w, 49, 1) ? "-" : "", R(a), (int)bits(w, 39, 5), bits(w, 48, 1) ? "-" : "", B(false));
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
+            sp(&c->body, "    }\n");
+        } else {
+            set_reg(c, d, t);
+        }
     } else if (OPM(0x1400000000000000ull, 0xfc00000000000000ull)) {  // ISCADD32I
         sprintf(t, "((%s << %du) + 0x%08xu)", R(a), (int)bits(w, 53, 5), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
@@ -963,38 +989,42 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         set_reg(c, d, t);
     } else if (OPM(0x5b00000000000000ull, 0xffc0000000000000ull) || OPM(0x4e00000000000000ull, 0xfe00000000000000ull) ||
                OPM(0x3600000000000000ull, 0xfec0000000000000ull) || OPM(0x5100000000000000ull, 0xff80000000000000ull)) {  // XMAD
+        // per Ryujinx's InstXmad* decoders and EmitXmad
         const char *bv, *cv;
         char cb[256], bb[256];
-        bool hb, psl, mrg, ha = bits(w, 53, 1);
+        bool hb, psl, mrg, ext, ha = bits(w, 53, 1);
         int cmode;
         uint64_t top = w >> 56;
         if (top == 0x5b) {  // reg, reg
             bv = R((int)bits(w, 20, 8)); cv = R((int)bits(w, 39, 8));
-            hb = bits(w, 35, 1); psl = bits(w, 36, 1); mrg = bits(w, 37, 1); cmode = (int)bits(w, 50, 3);
+            hb = bits(w, 35, 1); psl = bits(w, 36, 1); mrg = bits(w, 37, 1); ext = bits(w, 38, 1); cmode = (int)bits(w, 50, 3);
         } else if ((top & 0xfe) == 0x4e) {  // cbuf B
             bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); cv = R((int)bits(w, 39, 8));
-            hb = bits(w, 52, 1); psl = bits(w, 55, 1); mrg = bits(w, 56, 1); cmode = (int)bits(w, 50, 3);
+            hb = bits(w, 52, 1); psl = bits(w, 55, 1); mrg = bits(w, 56, 1); ext = bits(w, 54, 1); cmode = (int)bits(w, 50, 2);
         } else if ((top & 0xfe) == 0x36) {  // imm16 B
             sprintf(bb, "0x%xu", (uint32_t)bits(w, 20, 16)); bv = bb; cv = R((int)bits(w, 39, 8));
-            hb = false; psl = bits(w, 36, 1); mrg = bits(w, 37, 1); cmode = (int)bits(w, 50, 3);
+            hb = false; psl = bits(w, 36, 1); mrg = bits(w, 37, 1); ext = bits(w, 38, 1); cmode = (int)bits(w, 50, 3);
         } else {  // 0x51: B = reg39, C = cbuf
             bv = R((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb);
-            hb = bits(w, 52, 1); psl = false; mrg = false; cmode = (int)bits(w, 50, 3);
+            hb = bits(w, 52, 1); psl = false; mrg = false; ext = bits(w, 54, 1); cmode = (int)bits(w, 50, 2);
         }
-        bool sa = bits(w, 48, 1), sb = bits(w, 49, 1);
-        sp(&c->body, "    { uint xa = (%s >> %d) & 0xFFFFu; uint xb = (%s >> %d) & 0xFFFFu;\n", R(a), ha ? 16 : 0, bv, hb ? 16 : 0);
+        bool sa = bits(w, 48, 1), sb = bits(w, 49, 1), wcc = bits(w, 47, 1);
+        if (ext || wcc) c->uses_cc = true;
+        sp(&c->body, "    { uint xa = (%s >> %d) & 0xFFFFu; uint xb = (%s >> %d) & 0xFFFFu; uint xbu = %s;\n", R(a), ha ? 16 : 0, bv, hb ? 16 : 0, bv);
         if (sa) sp(&c->body, "      xa = uint(int(short(xa)));\n");
         if (sb) sp(&c->body, "      xb = uint(int(short(xb)));\n");
         sp(&c->body, "      uint prod = xa * xb;%s\n", psl ? " prod <<= 16;" : "");
         switch (cmode) {
-        case 1: sp(&c->body, "      uint cc_ = %s & 0xFFFFu;\n", cv); break;            // clo
-        case 2: sp(&c->body, "      uint cc_ = %s >> 16;\n", cv); break;                // chi
-        case 3: sp(&c->body, "      uint cc_ = %s + (xb << 16);\n", cv); break;         // csfu (approx)
-        case 4: sp(&c->body, "      uint cc_ = %s;\n", cv); break;
-        default: sp(&c->body, "      uint cc_ = %s;\n", cv);
+        case 1: sp(&c->body, "      uint cc_ = %s & 0xFFFFu;\n", cv); break;                                  // clo
+        case 2: sp(&c->body, "      uint cc_ = %s >> 16;\n", cv); break;                                      // chi
+        case 3: sp(&c->body, "      uint cc_ = %s - (((xa >> 31) << 16) + ((xb >> 31) << 16));\n", cv); break;  // csfu
+        case 4: sp(&c->body, "      uint cc_ = %s + (xbu << 16);\n", cv); break;                              // cbcc
+        default: sp(&c->body, "      uint cc_ = %s;\n", cv);                                                  // cfull
         }
-        if (mrg) sp(&c->body, "      uint res = ((prod + cc_) & 0xFFFFu) | (%s << 16);\n", bv);
+        if (ext) sp(&c->body, "      uint res = prod + (cc & 1u);\n");
         else sp(&c->body, "      uint res = prod + cc_;\n");
+        if (wcc) sp(&c->body, "      cc = (res < prod) ? 1u : 0u;\n");
+        if (mrg) sp(&c->body, "      res = (res & 0xFFFFu) | (xbu << 16);\n");
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = res;\n", d); }
         sp(&c->body, "    }\n");
     } else if (OPM(0x5090000000000000ull, 0xfff8000000000000ull)) {  // PSETP
@@ -1137,6 +1167,37 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
+    } else if (OPM(0xef40000000000000ull, 0xfff8000000000000ull) || OPM(0xef50000000000000ull, 0xfff8000000000000ull)) {  // LDL / STL
+        // thread-private local memory, modelled as a word array (byte/short accesses within a word)
+        bool store = bits(w, 52, 1);
+        int size = (int)bits(w, 48, 3);
+        int32_t off = (int32_t)sbits(w, 20, 24);
+        c->uses_local = true;
+        char addr[128];
+        if (a == RZ) sprintf(addr, "%du", off);
+        else sprintf(addr, "(%s + %du)", R(a), (uint32_t)off);
+        int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
+        sp(&c->body, "    { uint la = %s;\n", addr);
+        if (!store) {
+            if (size < 4) {
+                static const char *const ext[] = {"(v >> sh) & 0xFFu", "uint(int(char((v >> sh) & 0xFFu)))", "(v >> sh) & 0xFFFFu",
+                                                  "uint(int(short((v >> sh) & 0xFFFFu)))"};
+                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      uint v = lmem[(la >> 2) & %du]; uint sh = (la & 3u) * 8u; r%d = %s;\n", LMEM_WORDS - 1, d, ext[size]); }
+            } else {
+                for (int k = 0; k < nw; k++)
+                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = lmem[((la >> 2) + %du) & %du];\n", d + k, k, LMEM_WORDS - 1); }
+            }
+        } else {
+            if (size < 4) {
+                uint32_t m = size < 2 ? 0xFFu : 0xFFFFu;
+                sp(&c->body, "      uint sh = (la & 3u) * 8u; uint i = (la >> 2) & %du; lmem[i] = (lmem[i] & ~(0x%xu << sh)) | ((%s & 0x%xu) << sh);\n",
+                   LMEM_WORDS - 1, m, R(d), m);
+            } else {
+                for (int k = 0; k < nw; k++)
+                    sp(&c->body, "      lmem[((la >> 2) + %du) & %du] = %s;\n", k, LMEM_WORDS - 1, R(d == RZ ? RZ : d + k));
+            }
+        }
+        sp(&c->body, "    }\n");
     } else if (OPM(0xef10000000000000ull, 0xfff8000000000000ull)) {  // SHFL
         int mode = (int)bits(w, 30, 2);
         char bb[32];
@@ -1266,12 +1327,17 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         (void)is_branch_target_op;
     }
     // translate
+    bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
+    static int annotate = -1;
+    if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
+        if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         emit_insn(c, ((const uint64_t *)code)[i], pc);
+        if (dbg && pc == maxwell_dbg_pc) { c->reg_used[maxwell_dbg_reg] = 1; sp(&c->body, "    dbgv = as_type<float>(r%d);\n", maxwell_dbg_reg); }
         info->num_insts++;
     }
     free(label);
@@ -1354,6 +1420,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
     if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
+    if (c->uses_local) sp(&s, "  uint lmem[%d] = {};\n", LMEM_WORDS);
+    if (dbg) sp(&s, "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
         sp(&s, "  bool exit_now = false;\n");
@@ -1376,7 +1444,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             int kind = key ? key->rt_kind[rt] : 0;
             for (int comp = 0; comp < 4; comp++) {
                 if (!(m & (1u << comp))) continue;
-                if (r < 256 && c->reg_used[r]) {
+                if (dbg) {
+                    sp(&s, comp == 3 ? "  o.c%d[%d] = 1.0f;\n" : "  o.c%d[%d] = dbgv;\n", rt, comp);
+                } else if (r < 256 && c->reg_used[r]) {
                     if (kind == 0) sp(&s, "  o.c%d[%d] = as_type<float>(r%d);\n", rt, comp, r);
                     else sp(&s, "  o.c%d[%d] = r%d;\n", rt, comp, r);
                 } else {
