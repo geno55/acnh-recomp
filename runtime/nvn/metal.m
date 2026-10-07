@@ -241,10 +241,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     // the rest a full hash on a rotating ~16 MB/frame budget plus a cheap sample otherwise.
     if (b->uploaded && b->checked_frame == g_frame_counter) return;
     b->checked_frame = g_frame_counter;
-    if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 16 << 20; }
+    if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     bool full = b->dynamic || !b->uploaded;
-    if (!full && g_frame_counter - b->full_frame >= 30 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!full) {
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;

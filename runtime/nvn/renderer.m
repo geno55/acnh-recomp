@@ -523,14 +523,33 @@ static int rt_kind(uint32_t f) {
     }
 }
 
+#define PROG_TAB 4096
+static struct { uint64_t key; void *prog; } prog_tab[PROG_TAB];
+
 static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(p->stage_mask & 1) || !(p->stage_mask & 2)) return nil;
+    // fast path: hash of the code addresses and keys
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 2; i++) { uint64_t a = p->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    const uint8_t *vb = (const uint8_t *)vkey;
+    for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (!h) h = 1;
+    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
+    while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
+    if (prog_tab[slot].key) { Prog *fp = (__bridge Prog *)prog_tab[slot].prog; return fp->failed ? nil : fp; }
     NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@", p->stages[0].code_addr, p->stages[1].code_addr,
                      [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8]];
     Prog *pr = cache[key];
-    if (pr) return pr->failed ? nil : pr;
+    if (pr) {
+        prog_tab[slot].key = h;
+        prog_tab[slot].prog = (__bridge void *)pr;
+        return pr->failed ? nil : pr;
+    }
     pr = [Prog new];
     cache[key] = pr;
+    prog_tab[slot].key = h;
+    prog_tab[slot].prog = (__bridge void *)pr;  // retained by the cache dictionary
     dump_program(p);
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
