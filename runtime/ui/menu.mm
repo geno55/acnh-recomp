@@ -18,6 +18,7 @@ extern "C" {
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
 void save_editor_on_open(void);
+void rando_tab_draw(float scale);
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -449,8 +450,8 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
 
         // L/R (or Q/E) switch tabs; B / Esc with nothing to back out of closes the menu
         if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
-        static const char *tabs[] = {"Display", "Audio", "Save Editor", "Controls"};
-        const int ntabs = 4;
+        static const char *tabs[] = {"Display", "Audio", "Save Editor", "Randomizer", "Controls"};
+        const int ntabs = 5;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
@@ -468,7 +469,8 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
                     case 0: tab_display(); break;
                     case 1: tab_audio(); break;
                     case 2: save_editor_draw(scale); break;
-                    case 3: tab_about(); break;
+                    case 3: rando_tab_draw(scale); break;
+                    case 4: tab_about(); break;
                     }
                     ImGui::EndChild();
                     ImGui::EndTabItem();

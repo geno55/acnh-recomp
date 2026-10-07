@@ -60,7 +60,18 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
     exit(1);
 }
 
+static char **g_argv;
+
+// Restart the whole program (e.g. to switch randomizer seeds: game data is loaded at boot).
+void rt_restart(void) {
+    LOG("[main] restarting\n");
+    fflush(stderr);
+    execv(g_argv[0], g_argv);
+    LOG("[main] restart failed\n");
+}
+
 int main(int argc, char **argv) {
+    g_argv = argv;
     setvbuf(stderr, NULL, _IOLBF, 0);
     const char *root = argc > 1 ? argv[1] : "extracted";
     char exefs[1024], romfs[1024], npdm_path[1024];
