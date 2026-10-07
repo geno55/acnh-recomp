@@ -1028,6 +1028,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         [ce setSamplerState:smp ? smp : default_sampler() atIndex:i];
     }
     CST("dispatch");
+    extern bool g_debug_frame;
+    if (g_debug_frame) {
+        LOG("[dispatch] cs=%llx groups %ux%ux%u ssbo:", st.program->stages[5].code_addr, gx, gy, gz);
+        for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) LOG(" %d(%llx,%llu)", i, st.sbuf[5][i].addr, st.sbuf[5][i].size);
+        LOG(" ubo:");
+        for (int i = 0; i < 18; i++) if (st.ubuf[5][i].addr) LOG(" %d(%llx,%llu)", i, st.ubuf[5][i].addr, st.ubuf[5][i].size);
+        LOG(" gmem %d\n", si->uses_gmem);
+    }
     [ce dispatchThreadgroups:MTLSizeMake(gx, gy, gz) threadsPerThreadgroup:MTLSizeMake(cp->local[0], cp->local[1], cp->local[2])];
     [ce endEncoding];
     CST("done");
@@ -1069,6 +1077,17 @@ static id<MTLBuffer> expand_indices(uint32_t mode, uint32_t count, const void *i
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
+    static uint64_t dump_fs = 1;
+    if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
+    if (dump_fs && st.program && st.program->stages[1].code_addr == dump_fs) {
+        for (int i = 0; i < 18; i++) {
+            if (!st.ubuf[1][i].addr) continue;
+            const float *f = (const float *)(uintptr_t)st.ubuf[1][i].addr;
+            LOG("[ubo] f%d (%llu):", i, st.ubuf[1][i].size);
+            for (uint64_t k = 0; k < st.ubuf[1][i].size / 4 && k < 1200; k++) LOG(" %g", f[k]);
+            LOG("\n");
+        }
+    }
     if (st.sbuf[0][0].addr && st.sbuf[0][0].size >= 64 && st.sbuf[0][0].size <= 8192) {
         int recw = (st.sbuf[0][0].size % 96 == 0 && st.sbuf[0][0].size % 64 != 0) ? 24 : 16;
         const float *f = (const float *)(uintptr_t)st.sbuf[0][0].addr;
@@ -1816,7 +1835,13 @@ static void exec_list(uint64_t handle, int depth) {
             // (buffer, size, offset, dataSize, data): apply the update in command order
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             break;
-        case CMD_FENCE_SYNC: break;
+        case CMD_FENCE_SYNC: {
+            // The CPU may read GPU-written memory (compute results) once the fence is signaled.
+            static int fence_flush = -1;
+            if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
+            if (fence_flush) renderer_flush();
+            break;
+        }
         case CMD_REPORT_COUNTER: {
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
             if (out) { out[0] = 0; out[1] = SDL_GetTicksNS(); }

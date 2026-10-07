@@ -130,7 +130,15 @@ NVN(nvnQueueWaitSync) { RET(1); }
 NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
 NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
 NVN(nvnSyncSetDebugLabel) { (void)c; }
-NVN(nvnSyncWait) { RET(0); }  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
+void renderer_flush(void);
+NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
+    static int flush = -1;
+    static uint64_t n;
+    if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
+    if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    if (flush) renderer_flush();
+    RET(0);
+}
 NVN(nvnSyncCreateGLSync) { RET(0); }
 NVN(nvnSyncInitializeFromFencedGLSync) { RET(0); }
 
