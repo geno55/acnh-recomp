@@ -256,6 +256,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (b->uploaded) b->dynamic = true;
     b->data_hash = h;
     b->uploaded = true;
+    // callers without an encoder get a private upload command buffer, created only when needed
+    id<MTLCommandBuffer> own_cb = nil;
+    if (!blit) { own_cb = [queue commandBuffer]; blit = [own_cb blitCommandEncoder]; }
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     uint64_t layer_size = tegra_layer_size(&t->layout);
     bool linear = (t->flags & 0x10) != 0;
@@ -294,12 +297,13 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
                     destinationSlice:slice destinationLevel:lv destinationOrigin:MTLOriginMake(0, 0, 0)];
         }
     }
+    if (own_cb) { [blit endEncoding]; [own_cb commit]; }
 }
 
 id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, bool for_render) {
     TexBackend *b = tex_backend(t);
     if (for_render) b->gpu_owned = true;
-    else if (!b->gpu_owned && blit) upload_texture(t, b, blit);
+    else if (!b->gpu_owned) upload_texture(t, b, blit);
     return b->tex;
 }
 

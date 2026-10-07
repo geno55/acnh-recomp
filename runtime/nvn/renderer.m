@@ -1,5 +1,6 @@
 // Executes recorded NVN command lists with Metal.
 #import <Metal/Metal.h>
+#include <mach/mach_time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
@@ -16,7 +17,8 @@ static id<MTLCommandBuffer> cmdbuf;
 static id<MTLRenderCommandEncoder> enc;
 static id<MTLRenderPipelineState> clear_pipes[64];
 static NSMutableDictionary<NSString *, id> *cache;
-static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches;
+static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes;
+static double stat_gpu_s;
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
@@ -71,9 +73,10 @@ const char *renderer_stats(void) {
         for (int i = 0; i < CMD_COUNT; i++) if (op_counts[i]) LOG(" %d:%llu", i, op_counts[i]);
         LOG("\n");
     }
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches", stat_draws, stat_skipped,
-             stat_passes, stat_dispatches);
-    stat_draws = stat_skipped = stat_passes = stat_dispatches = 0;
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms", stat_draws, stat_skipped,
+             stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0);
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    stat_gpu_s = 0;
     return stats_text;
 }
 
@@ -122,8 +125,12 @@ static void ring_reset(void);
 void renderer_flush(void) {
     end_pass();
     if (cmdbuf) {
+        uint64_t t0 = mach_absolute_time();
         [cmdbuf commit];
         [cmdbuf waitUntilCompleted];
+        stat_wait_ns += (mach_absolute_time() - t0);
+        stat_gpu_s += cmdbuf.GPUEndTime - cmdbuf.GPUStartTime;
+        stat_flushes++;
         if (cmdbuf.error) LOG("[metal] command buffer error: %s\n", cmdbuf.error.localizedDescription.UTF8String);
         cmdbuf = nil;
     }
@@ -673,11 +680,9 @@ static id<MTLTexture> apply_swizzle(id<MTLTexture> tex, NvnTexture *t, const Nvn
 
 // Upload helper: a separate command buffer, committed now so it runs before the current pass.
 static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_type) {
-    id<MTLCommandBuffer> ucb = [renderer_queue() commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [ucb blitCommandEncoder];
-    id<MTLTexture> tex = view_texture(t, v, has_view, false, blit);
-    [blit endEncoding];
-    [ucb commit];
+    // uploads (if the CPU-side contents changed) go into their own command buffer, committed before
+    // the current one so they land first
+    id<MTLTexture> tex = view_texture(t, v, has_view, false, nil);
     tex = apply_swizzle(tex, t, v, has_view);
     MTLTextureType want = mtl_type_for(want_type);
     if (tex.textureType != want && tex.textureType != MTLTextureType2DMultisample) {
@@ -1096,6 +1101,39 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6]);
 }
 
+
+// ---- pipeline cache keyed by a hash of the raw state that shapes the pipeline (avoids building a
+// descriptor and a string key per draw)
+static uint64_t hmix(uint64_t h, const void *p, size_t n) {
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+#define PIPE_TAB 8192
+static struct { uint64_t key; void *pipe; } pipe_tab[PIPE_TAB];
+
+static uint64_t pipeline_state_hash(Prog *pr) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    h = hmix(h, &pr, sizeof pr);
+    h = hmix(h, &st.rt.ncolor, sizeof st.rt.ncolor);
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        NvnTexture *t = st.rt.color[i];
+        uint32_t v[4] = {t ? t->format : 0, t ? t->samples : 0, st.rt.has_cview[i], st.rt.has_cview[i] ? st.rt.cview[i].format | (st.rt.cview[i].setmask << 16) : 0};
+        h = hmix(h, v, sizeof v);
+        h = hmix(h, st.blend[i], 8);
+    }
+    uint32_t dfmt = st.rt.depth ? st.rt.depth->format : 0;
+    h = hmix(h, &dfmt, 4);
+    h = hmix(h, &st.nattrib, sizeof st.nattrib);
+    h = hmix(h, st.attrib, sizeof st.attrib[0] * (size_t)(st.nattrib < 32 ? st.nattrib : 32));
+    h = hmix(h, &st.nstream, sizeof st.nstream);
+    h = hmix(h, st.stream, sizeof st.stream[0] * (size_t)(st.nstream < 16 ? st.nstream : 16));
+    h = hmix(h, &st.channel_mask, sizeof st.channel_mask);
+    h = hmix(h, &st.color_state[0], sizeof st.color_state[0]);
+    h = hmix(h, &st.ms[0xC], 1);
+    return h ? h : 1;
+}
+
 static void draw(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     static bool logged_modes;
@@ -1126,13 +1164,25 @@ static void draw(CmdRec *r, bool indexed) {
     resolve_feedback(pr);
     begin_pass();
 
+    // vertex streams this draw reads (also computed inside the pipeline build on a cache miss)
+    uint32_t used_streams = 0;
+    for (int i = 0; i < 32; i++) {
+        if (!(pr->vi->attr_mask & (1u << i))) continue;
+        uint32_t a = i < st.nattrib ? st.attrib[i] : 0x2E;
+        if (i >= st.nattrib || (a & 0xFF) == 0) used_streams |= 1u << 31;
+        else used_streams |= 1u << ((a >> 8) & 0x1F);
+    }
     // pipeline
+    uint64_t phash = pipeline_state_hash(pr);
+    uint32_t pslot = (uint32_t)(phash ^ (phash >> 29)) & (PIPE_TAB - 1);
+    while (pipe_tab[pslot].key && pipe_tab[pslot].key != phash) pslot = (pslot + 1) & (PIPE_TAB - 1);
+    id<MTLRenderPipelineState> pipe = pipe_tab[pslot].key ? (__bridge id<MTLRenderPipelineState>)pipe_tab[pslot].pipe : nil;
+    if (!pipe) {
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = pr->vs;
     pd.fragmentFunction = pr->fs;
     attachment_formats(pd);
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
-    uint32_t used_streams = 0;
     for (int i = 0; i < 32; i++) {
         if (!(pr->vi->attr_mask & (1u << i))) continue;
         uint32_t a = i < st.nattrib ? st.attrib[i] : 0x2E;
@@ -1198,7 +1248,7 @@ static void draw(CmdRec *r, bool indexed) {
     for (int s = 18; s < 31; s++)
         [pk appendFormat:@" l%lu/%lu/%lu", (unsigned long)vd.layouts[s].stride, (unsigned long)vd.layouts[s].stepFunction, (unsigned long)vd.layouts[s].stepRate];
     [pk appendFormat:@" s%lu a%d", (unsigned long)pd.rasterSampleCount, pd.alphaToCoverageEnabled];
-    id<MTLRenderPipelineState> pipe = cache[pk];
+    pipe = cache[pk];
     if (!pipe) {
         NSError *err;
         pipe = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
@@ -1210,12 +1260,22 @@ static void draw(CmdRec *r, bool indexed) {
         }
         cache[pk] = pipe;
     }
+    pipe_tab[pslot].key = phash;
+    pipe_tab[pslot].pipe = (__bridge void *)pipe;  // retained by the cache dictionary
+    }
     [enc setRenderPipelineState:pipe];
 
     // depth / stencil
-    NSString *dk = [NSString stringWithFormat:@"ds %02x%02x%02x%02x%02x%02x%02x%02x %x %x", st.ds[0], st.ds[1], st.ds[2], st.ds[3],
-                    st.ds[4], st.ds[5], st.ds[6], st.ds[7], st.stencil_mask[0], st.stencil_vmask[0]];
-    id<MTLDepthStencilState> dss = cache[dk];
+    static uint64_t last_dsk;
+    static id<MTLDepthStencilState> last_dss;
+    uint64_t dsk = hmix(hmix(hmix(0xcbf29ce484222325ull, st.ds, 8), st.stencil_mask, sizeof st.stencil_mask), st.stencil_vmask, sizeof st.stencil_vmask);
+    id<MTLDepthStencilState> dss = dsk == last_dsk ? last_dss : nil;
+    NSString *dk = nil;
+    if (!dss) {
+        dk = [NSString stringWithFormat:@"ds %02x%02x%02x%02x%02x%02x%02x%02x %x %x %x %x", st.ds[0], st.ds[1], st.ds[2], st.ds[3],
+                    st.ds[4], st.ds[5], st.ds[6], st.ds[7], st.stencil_mask[0], st.stencil_vmask[0], st.stencil_mask[1], st.stencil_vmask[1]];
+        dss = cache[dk];
+    }
     if (!dss) {
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
         static int nodt = -1;
@@ -1240,6 +1300,8 @@ static void draw(CmdRec *r, bool indexed) {
         cache[dk] = dss;
     }
     [enc setDepthStencilState:dss];
+    last_dsk = dsk;
+    last_dss = dss;
     [enc setStencilFrontReferenceValue:st.stencil_ref[0] backReferenceValue:st.stencil_ref[1]];
     [enc setBlendColorRed:st.blend_color[0] green:st.blend_color[1] blue:st.blend_color[2] alpha:st.blend_color[3]];
 

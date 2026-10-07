@@ -460,7 +460,7 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
         svc_impl(c, imm, pc);
         uint64_t dt = (mach_absolute_time() - t0) * tb.numer / tb.denom;
         static _Atomic int nslow;
-        if (dt > 20000000 && imm != 0x0b && nslow < 400) {
+        if (((t_cur && t_cur->id == 80 && (imm == 0x18 || imm == 0x34)) || (dt > 10000000 && imm != 0x0b && imm != 0x1c)) && nslow < 20000) {
             nslow++;
             LOG("[slow] t%llu svc%02x %llums a=%llx,%llx,%llx,%llx h0=%x lr=%llx\n", (unsigned long long)(t_cur ? t_cur->id : 0), imm,
                 (unsigned long long)(dt / 1000000), (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3, h0, (unsigned long long)lr);
