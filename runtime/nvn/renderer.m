@@ -1108,7 +1108,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     if (st.rt.depth) LOG(" d%#x", st.rt.depth->format);
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x streams:", st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask);
     for (int i = 0; i < st.nattrib; i++) LOG(" a%d(f%#x s%u o%u)", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
-    for (int i = 0; i < 4; i++) if (st.vbuf[i].addr) LOG(" vb%d(%llx,%llu,stride %u)", i, st.vbuf[i].addr, st.vbuf[i].size, st.stream[i][0]);
+    for (int i = 0; i < 12; i++) if (st.vbuf[i].addr) LOG(" vb%d(%llx,%llu,stride %u div %u)", i, st.vbuf[i].addr, st.vbuf[i].size, st.stream[i][0], st.stream[i][1]);
     if (st.ubuf[0][0].addr && st.ubuf[0][0].size == 560) {
         const float *f = (const float *)(uintptr_t)st.ubuf[0][0].addr;
         LOG("\n  vs ubo0:");
