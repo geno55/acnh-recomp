@@ -1337,7 +1337,12 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
         if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
         emit_insn(c, ((const uint64_t *)code)[i], pc);
-        if (dbg && pc == maxwell_dbg_pc) { c->reg_used[maxwell_dbg_reg] = 1; sp(&c->body, "    dbgv = as_type<float>(r%d);\n", maxwell_dbg_reg); }
+        if (dbg && pc == maxwell_dbg_pc) {
+            int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
+            c->reg_used[rr] = 1;
+            if (half) sp(&c->body, "    dbgv = float(as_type<half2>(r%d)[%d]);\n", rr, half - 1);
+            else sp(&c->body, "    dbgv = as_type<float>(r%d);\n", rr);
+        }
         info->num_insts++;
     }
     free(label);
