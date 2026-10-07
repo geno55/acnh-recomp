@@ -16,6 +16,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
+const uint8_t *maxwell_dbg_vs;
 
 #define RZ 255
 #define LMEM_WORDS 256  // local memory per invocation (1 KB)
@@ -1235,7 +1236,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
         sp(&c->body, "    }\n");
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
-        sp(&c->body, "    pc = %uu + %s + 0x%08xu; continue;\n", pc + 8, R(a), (uint32_t)sbits(w, 20, 24));
+        // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
+        sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
+           (uint32_t)sbits(w, 20, 24));
     } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
         int test = (int)bits(w, 8, 5);
         const char *cond;
@@ -1407,7 +1410,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         else sp(&args, ", texture%s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", tn, i, i, i, i);
     }
     if (stage == STAGE_VERTEX) {
-        sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s) {\n",
+        sp(&s, "vertex VOut main0(VIn in [[stage_in]], uint vid [[vertex_id]], uint iid [[instance_id]]%s%s) {\n",
+           (maxwell_dbg_vs && blob == maxwell_dbg_vs) ? ", device float4 *dbgout [[buffer(29)]]" : "",
            args.buf ? args.buf : "");
         sp(&s, "  VOut out = {};\n  out.pos = float4(0, 0, 0, 1);\n");
         for (int i = 0; i < 32; i++)
@@ -1439,6 +1443,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (stage == STAGE_VERTEX) {
         if (key && key->flip_y) sp(&s, "  out.pos.y = -out.pos.y;\n");
         if (key && key->depth_minus_one) sp(&s, "  out.pos.z = (out.pos.z + out.pos.w) * 0.5f;\n");
+        if (maxwell_dbg_vs && blob == maxwell_dbg_vs) sp(&s, "  if (iid < 64u && vid < 8u) { dbgout[iid * 8u + vid] = out.pos; dbgout[512u + iid * 8u + vid] = %s; }\n", (c->out_attr_mask & 2u) ? "out.v1" : "float4(0)");
         sp(&s, "  return out;\n}\n");
     } else if (stage == STAGE_FRAGMENT) {
         sp(&s, "  FOut o;\n");

@@ -86,6 +86,8 @@ void renderer_init(id<MTLDevice> d) {
         st.depth_range[i][1] = 1.0f;
     }
     st.channel_mask = 0xFFFFFFFF;
+    st.stencil_mask[0] = st.stencil_mask[1] = 0xFF;
+    st.stencil_vmask[0] = st.stencil_vmask[1] = 0xFF;
     st.ds[1] = 1; st.ds[2] = 2;
     st.poly[1] = 1; st.poly[2] = 2;
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
@@ -533,6 +535,10 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
         static int dbg_reg;
         if (!parsed) { parsed = 1; const char *e = getenv("LARECOMP_DBG_FS"); if (e) sscanf(e, "%llx:%x:%d", &dbg_addr, &dbg_pc, &dbg_reg); }
         maxwell_dbg_code = dbg_addr ? (const uint8_t *)(uintptr_t)dbg_addr : NULL;
+        static unsigned long long dbg_vs;
+        static int vparsed;
+        if (!vparsed) { vparsed = 1; const char *e = getenv("LARECOMP_DBG_VS"); if (e) dbg_vs = strtoull(e, NULL, 16); }
+        maxwell_dbg_vs = dbg_vs ? (const uint8_t *)(uintptr_t)dbg_vs : NULL;
         maxwell_dbg_pc = dbg_pc;
         maxwell_dbg_reg = dbg_reg;
     }
@@ -779,7 +785,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
                 for (uint64_t k = 0; k < total; k++) nz += p[k] != 0;
                 if (e->tex->width == 1024 && e->tex->height == 2048) {
                     static int once;
-                    if (!once++) {
+                    if (!once++ || g_debug_frame) {
                         id<MTLTexture> base = renderer_texture(e->tex, nil, false);
                         LOG("[dtex] glyph cache target %u depth %u layers %u levels %u stride %u flags %#x base type %lu arrlen %lu\n",
                             e->tex->target, e->tex->depth, e->tex->layout.layers, e->tex->levels, e->tex->stride, e->tex->flags,
@@ -1039,12 +1045,13 @@ static id<MTLBuffer> expand_indices(uint32_t mode, uint32_t count, const void *i
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
-    if (st.sbuf[0][0].addr && st.sbuf[0][0].size >= 64 && st.sbuf[0][0].size <= 4096) {
+    if (st.sbuf[0][0].addr && st.sbuf[0][0].size >= 64 && st.sbuf[0][0].size <= 8192) {
+        int recw = (st.sbuf[0][0].size % 96 == 0 && st.sbuf[0][0].size % 64 != 0) ? 24 : 16;
         const float *f = (const float *)(uintptr_t)st.sbuf[0][0].addr;
         const uint32_t *u = (const uint32_t *)f;
-        for (int g = 0; g < (int)(st.sbuf[0][0].size / 64) && g < 24; g++) {
+        for (int g = 0; g < (int)(st.sbuf[0][0].size / (recw * 4)) && g < 6; g++) {
             LOG("[ssbo] rec%d:", g);
-            for (int k = 0; k < 16; k++) LOG(" %g(%08x)", f[g * 16 + k], u[g * 16 + k]);
+            for (int k = 0; k < recw; k++) LOG(" %g(%08x)", f[g * recw + k], u[g * recw + k]);
             LOG("\n");
         }
     }
@@ -1083,7 +1090,10 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         LOG("\n  vs ubo0:");
         for (int i = 0; i < 36; i++) LOG("%s[%d] %g %g %g %g", i % 2 ? " " : "\n   ", i, f[i*4], f[i*4+1], f[i*4+2], f[i*4+3]);
     }
-    LOG(" blend %#x ds %02x%02x%02x poly %02x%02x\n", st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1]);
+    LOG(" blend %#x ds %02x%02x%02x poly %02x%02x scissor %d,%d %dx%d chmask %08x stencil %02x%02x%02x%02x%02x ref %u/%u wm %x vm %x bf %d,%d,%d,%d,%d,%d\n", st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
+        st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], st.channel_mask, st.ds[3], st.ds[4], st.ds[5], st.ds[6],
+        st.ds[7], st.stencil_ref[0], st.stencil_ref[1], st.stencil_mask[0], st.stencil_vmask[0], st.blend[0][1], st.blend[0][2],
+        st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6]);
 }
 
 static void draw(CmdRec *r, bool indexed) {
@@ -1208,7 +1218,9 @@ static void draw(CmdRec *r, bool indexed) {
     id<MTLDepthStencilState> dss = cache[dk];
     if (!dss) {
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
-        if (st.ds[0]) { dd.depthCompareFunction = compare_fn(st.ds[2]); dd.depthWriteEnabled = st.ds[1] != 0; }
+        static int nodt = -1;
+        if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+        if (st.ds[0] && !nodt) { dd.depthCompareFunction = compare_fn(st.ds[2]); dd.depthWriteEnabled = st.ds[1] != 0; }
         else { dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; }
         if (st.ds[3]) {
             uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
@@ -1219,8 +1231,8 @@ static void draw(CmdRec *r, bool indexed) {
                 sd.stencilFailureOperation = stencil_op(o & 0xF);
                 sd.depthFailureOperation = stencil_op((o >> 4) & 0xF);
                 sd.depthStencilPassOperation = stencil_op((o >> 8) & 0xF);
-                sd.readMask = st.stencil_vmask[f] ? st.stencil_vmask[f] : 0xFF;
-                sd.writeMask = st.stencil_mask[f] ? st.stencil_mask[f] : 0xFF;
+                sd.readMask = st.stencil_vmask[f] & 0xFF;
+                sd.writeMask = st.stencil_mask[f] & 0xFF;
                 if (f) dd.backFaceStencil = sd; else dd.frontFaceStencil = sd;
             }
         }
@@ -1246,6 +1258,13 @@ static void draw(CmdRec *r, bool indexed) {
     bind_cbufs(0, pr->vi);
     bind_cbufs(1, pr->fi);
     if (pr->vi->uses_gmem) [enc setVertexBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
+    static id<MTLBuffer> dbgvs;
+    bool dbg_this = maxwell_dbg_vs && (const uint8_t *)(uintptr_t)st.program->stages[0].code_addr == maxwell_dbg_vs;
+    if (dbg_this) {
+        if (!dbgvs) dbgvs = [dev newBufferWithLength:2 * 64 * 8 * 16 options:MTLResourceStorageModeShared];
+        memset(dbgvs.contents, 0xff, 2 * 64 * 8 * 16);
+        [enc setVertexBuffer:dbgvs offset:0 atIndex:DBG_VS_BUFFER_INDEX];
+    }
     if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
@@ -1307,6 +1326,18 @@ static void draw(CmdRec *r, bool indexed) {
         }
     }
     stat_draws++;
+    if (dbg_this) {
+        static int nlog;
+        if (nlog++ < 4) {
+            renderer_flush();
+            const float *f = dbgvs.contents;
+            LOG("[dbgvs] draw %d:", nlog);
+            for (int i = 0; i < 2; i++)
+                for (int v = 0; v < 4; v++) LOG(" i%d v%d (%g %g %g %g) uv(%g %g %g)", i, v, f[(i * 8 + v) * 4], f[(i * 8 + v) * 4 + 1], f[(i * 8 + v) * 4 + 2], f[(i * 8 + v) * 4 + 3],
+                                                f[(512 + i * 8 + v) * 4], f[(512 + i * 8 + v) * 4 + 1], f[(512 + i * 8 + v) * 4 + 2]);
+            LOG("\n");
+        }
+    }
 }
 
 // ------------------------------------------------------------------ texture copies

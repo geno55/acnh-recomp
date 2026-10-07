@@ -50,6 +50,9 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 extern const uint8_t *maxwell_dbg_code;
 extern uint32_t maxwell_dbg_pc;
 extern int maxwell_dbg_reg;
+// Debug: the vertex shader at maxwell_dbg_vs writes each vertex's position to buffer 18 (slot iid*8+vid).
+extern const uint8_t *maxwell_dbg_vs;
+#define DBG_VS_BUFFER_INDEX 29
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
