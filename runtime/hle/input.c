@@ -1,6 +1,194 @@
-// Controller input (SDL events -> HID state). Filled in once rendering works.
+// Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
+//
+// Keyboard: WASD left stick, arrows D-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR,
+//           Enter = Plus, Backspace = Minus, IJKL-style right stick on numpad 8/4/5/6.
+#include <SDL3/SDL.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "../hle.h"
 #include "../nvn/nvn.h"
 #include "../nvn/renderer.h"
 
-void input_handle_event(const SDL_Event *e) { (void)e; }
+enum {
+    BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
+    BTN_LEFT, BTN_UP, BTN_RIGHT, BTN_DOWN
+};
+
+static _Atomic uint64_t key_buttons, pad_buttons;
+static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
+static uint8_t keys_down[SDL_SCANCODE_COUNT];
+static SDL_Gamepad *pad;
+static _Atomic int64_t sampling;
+
+static void recompute_keyboard(void) {
+    static const struct { SDL_Scancode sc; int bit; } map[] = {
+        {SDL_SCANCODE_K, BTN_A}, {SDL_SCANCODE_J, BTN_B}, {SDL_SCANCODE_L, BTN_X}, {SDL_SCANCODE_I, BTN_Y},
+        {SDL_SCANCODE_Q, BTN_L}, {SDL_SCANCODE_E, BTN_R}, {SDL_SCANCODE_1, BTN_ZL}, {SDL_SCANCODE_3, BTN_ZR},
+        {SDL_SCANCODE_RETURN, BTN_PLUS}, {SDL_SCANCODE_BACKSPACE, BTN_MINUS},
+        {SDL_SCANCODE_LEFT, BTN_LEFT}, {SDL_SCANCODE_UP, BTN_UP}, {SDL_SCANCODE_RIGHT, BTN_RIGHT},
+        {SDL_SCANCODE_DOWN, BTN_DOWN}, {SDL_SCANCODE_F, BTN_LSTICK}, {SDL_SCANCODE_KP_0, BTN_RSTICK},
+    };
+    uint64_t b = 0;
+    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
+        if (keys_down[map[i].sc]) b |= 1ull << map[i].bit;
+    key_buttons = b;
+    key_lx = (keys_down[SDL_SCANCODE_D] - keys_down[SDL_SCANCODE_A]) * 32767;
+    key_ly = (keys_down[SDL_SCANCODE_W] - keys_down[SDL_SCANCODE_S]) * 32767;
+    key_rx = (keys_down[SDL_SCANCODE_KP_6] - keys_down[SDL_SCANCODE_KP_4]) * 32767;
+    key_ry = (keys_down[SDL_SCANCODE_KP_8] - keys_down[SDL_SCANCODE_KP_5]) * 32767;
+}
+
+static void recompute_pad(void) {
+    if (!pad) { pad_buttons = 0; pad_lx = pad_ly = pad_rx = pad_ry = 0; return; }
+    // Nintendo layout by position: east = A, south = B, north = X, west = Y
+    static const struct { SDL_GamepadButton b; int bit; } map[] = {
+        {SDL_GAMEPAD_BUTTON_EAST, BTN_A}, {SDL_GAMEPAD_BUTTON_SOUTH, BTN_B}, {SDL_GAMEPAD_BUTTON_NORTH, BTN_X},
+        {SDL_GAMEPAD_BUTTON_WEST, BTN_Y}, {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L},
+        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R}, {SDL_GAMEPAD_BUTTON_START, BTN_PLUS},
+        {SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS}, {SDL_GAMEPAD_BUTTON_LEFT_STICK, BTN_LSTICK},
+        {SDL_GAMEPAD_BUTTON_RIGHT_STICK, BTN_RSTICK}, {SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT},
+        {SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, BTN_RIGHT},
+        {SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN},
+    };
+    uint64_t b = 0;
+    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
+        if (SDL_GetGamepadButton(pad, map[i].b)) b |= 1ull << map[i].bit;
+    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) b |= 1ull << BTN_ZL;
+    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) b |= 1ull << BTN_ZR;
+    pad_buttons = b;
+    pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
+    pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+    pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
+    pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+}
+
+void input_handle_event(const SDL_Event *e) {
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
+        if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+        recompute_keyboard();
+        break;
+    case SDL_EVENT_GAMEPAD_ADDED:
+        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); }
+        break;
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; }
+        recompute_pad();
+        break;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        recompute_pad();
+        break;
+    }
+}
+
+// Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
+// MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT).
+static _Atomic uint64_t script_buttons;
+static _Atomic int32_t script_lx, script_ly;
+
+void input_frame(uint64_t frame) {
+    const char *spec = getenv("LARECOMP_INPUT");
+    if (!spec) return;
+    static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
+                                        "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+    uint64_t b = 0;
+    int32_t lx = 0, ly = 0;
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        unsigned long start = 0, len = 10;
+        char name[32] = "";
+        if (sscanf(tok, "%lu:%31[A-Z_]:%lu", &start, name, &len) < 2) continue;
+        if (frame < start || frame >= start + len) continue;
+        if (!strcmp(name, "STICK_UP")) ly = 32767;
+        else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
+        else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
+        else if (!strcmp(name, "STICK_RIGHT")) lx = 32767;
+        for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
+    }
+    script_buttons = b;
+    script_lx = lx;
+    script_ly = ly;
+}
+
+static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
+
+// NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
+// {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
+static void fill_state(Cpu *c) {
+    uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
+    uint32_t id = *(uint32_t *)(uintptr_t)c->x[1];
+    memset(s, 0, 0x28);
+    *(int64_t *)s = ++sampling;
+    static int nlog;
+    if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
+    if (id != 0 && id != 0x20) return;  // No1 and Handheld only
+    uint64_t b = key_buttons | pad_buttons | script_buttons;
+    int32_t lx = clamp_axis(key_lx + pad_lx + script_lx), ly = clamp_axis(key_ly + pad_ly + script_ly);
+    int32_t rx = clamp_axis(key_rx + pad_rx), ry = clamp_axis(key_ry + pad_ry);
+    // stick directions also appear as buttons (bits 16-23)
+    if (lx < -16000) b |= 1ull << 16;
+    if (ly > 16000) b |= 1ull << 17;
+    if (lx > 16000) b |= 1ull << 18;
+    if (ly < -16000) b |= 1ull << 19;
+    if (rx < -16000) b |= 1ull << 20;
+    if (ry > 16000) b |= 1ull << 21;
+    if (rx > 16000) b |= 1ull << 22;
+    if (ry < -16000) b |= 1ull << 23;
+    *(uint64_t *)(s + 8) = b;
+    *(int32_t *)(s + 16) = lx;
+    *(int32_t *)(s + 20) = ly;
+    *(int32_t *)(s + 24) = rx;
+    *(int32_t *)(s + 28) = ry;
+    *(uint32_t *)(s + 32) = 1;  // IsConnected
+}
+
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", hid_state_fullkey) { fill_state(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", hid_state_dual) { fill_state(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left) { fill_state(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
+HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
+
+// FullKey for player 1, Handheld for the handheld id
+HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
+    uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];
+    static int nlog;
+    if (nlog++ < 4) LOG("[input] GetNpadStyleSet id %#x\n", id);
+    c->x[0] = id == 0 ? 1 : id == 0x20 ? 2 : 0;
+}
+
+// BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
+// controller connected.
+#include "../kernel.h"
+HLE_FUNC("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", hid_bind_style_event) {
+    uint32_t w, r;
+    KEvent *ev = kernel_create_event_pair(&w, &r);
+    pthread_mutex_lock(&g_klock);
+    kernel_signal(ev);
+    pthread_mutex_unlock(&g_klock);
+    uint64_t clear_mode = c->x[2];
+    c->x[0] = c->x[1];
+    c->x[1] = r;
+    c->x[2] = 0;
+    c->x[3] = clear_mode;
+    guest_call(c, guest_sym("_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE"));
+    LOG("[input] style set update event bound\n");
+}
+
+// Vibration devices: accepted but inert (the SDK's vibration node graph stays recompiled).
+HLE_FUNC("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", hid_init_vibration) { (void)c; }
+HLE_FUNC("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", hid_vibration_handles) {
+    uint32_t *out = (uint32_t *)(uintptr_t)c->x[0];
+    int n = (int)c->x[1] < 2 ? (int)c->x[1] : 2;
+    uint32_t id = *(uint32_t *)(uintptr_t)c->x[2];
+    for (int i = 0; i < n; i++) out[i] = (id & 0xFF) << 8 | (uint32_t)i | 0x03000000u;  // type, player, position
+    c->x[0] = (uint64_t)n;
+}
+HLE_FUNC("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", hid_vibration_info) {
+    uint32_t *info = (uint32_t *)(uintptr_t)c->x[0];
+    uint32_t h = *(uint32_t *)(uintptr_t)c->x[1];
+    info[0] = 1;        // VibrationDeviceType_LinearResonantActuator
+    info[1] = h & 1;    // position: left / right
+}

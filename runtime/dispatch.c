@@ -30,6 +30,8 @@ extern const HleImpl __start_hle_impls[] __asm__("section$start$__DATA$__hle_imp
 extern const HleImpl __stop_hle_impls[] __asm__("section$end$__DATA$__hle_impls");
 
 HostFn hle_lookup_impl(const char *name) {
+    const char *skip = getenv("LARECOMP_HLE_SKIP");  // debugging: disable HLE for names containing this
+    if (skip && strstr(name, skip)) return NULL;
     for (const HleImpl *p = __start_hle_impls; p < __stop_hle_impls; p++)
         if (!strcmp(p->name, name)) return p->fn;
     return NULL;
@@ -65,8 +67,18 @@ static void hle_unimplemented(Cpu *c) {
 }
 
 uint64_t guest_sym(const char *name) {
+    // small cache: callers pass string literals, so pointer identity is a good key
+    static struct { const char *name; uint64_t addr; } cache[64];
+    static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&m);
+    for (int i = 0; i < 64 && cache[i].name; i++)
+        if (cache[i].name == name) { uint64_t a = cache[i].addr; pthread_mutex_unlock(&m); return a; }
+    pthread_mutex_unlock(&m);
     uint64_t a = loader_find_symbol(name);
     if (!a) FATAL("guest symbol %s not found\n", name);
+    pthread_mutex_lock(&m);
+    for (int i = 0; i < 64; i++) if (!cache[i].name) { cache[i].name = name; cache[i].addr = a; break; }
+    pthread_mutex_unlock(&m);
     return a;
 }
 

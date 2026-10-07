@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../hle.h"
 
@@ -342,6 +343,13 @@ typedef struct {
     struct SwsContext *sws;
     uint8_t *rgba;
     pthread_mutex_t lock;
+    // asynchronous decode: packets are copied to a host worker thread
+    pthread_cond_t cond;
+    pthread_t worker;
+    struct { uint8_t *data; int size; int64_t time; uint32_t flags; } q[16];
+    int qn;
+    bool output_pending;  // an output-available event is owed to the guest
+    bool running;
 } Decoder;
 
 typedef struct NvnTexture NvnTexture;
@@ -405,6 +413,7 @@ static void dec_start(Cpu *c) {
     c->x[0] = 0;
 }
 
+static void flush_signals(Cpu *c, Decoder *d);
 static uint64_t n_acq_in, n_send, n_acq_out, n_get_out, n_rel_out, n_frames;
 static void movie_stats(void) {
     static uint64_t last;
@@ -419,10 +428,21 @@ static void dec_acquire_input(Cpu *c) {
     Decoder *d = self_state(c);
     n_acq_in++;
     movie_stats();
+    flush_signals(c, d);
     pthread_mutex_lock(&d->lock);
-    int out_free = 0;
-    for (int i = 0; i < NOUT; i++) if (!d->out_busy[i]) out_free++;
-    if (out_free < 2) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // backpressure
+    if (d->qn >= 4) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 20000000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        if (d->running) pthread_cond_timedwait(&d->cond, &d->lock, &ts);
+    }
+    if (d->qn >= 4) {  // backpressure: the release of an output buffer re-signals input
+        pthread_mutex_unlock(&d->lock);
+        flush_signals(c, d);
+        c->x[0] = 1;
+        return;
+    }
     int idx = -1, free_n = 0;
     for (int i = 0; i < NIN; i++)
         if (!d->in_busy[i]) { if (idx < 0) idx = i; else free_n++; }
@@ -485,6 +505,57 @@ static bool emit_frame(Decoder *d, int64_t time, uint32_t flags) {
     return true;
 }
 
+static void *dec_worker(void *arg) {
+    Decoder *d = arg;
+    pthread_mutex_lock(&d->lock);
+    for (;;) {
+        while (!d->qn) pthread_cond_wait(&d->cond, &d->lock);
+        uint8_t *data = d->q[0].data;
+        int size = d->q[0].size;
+        int64_t time = d->q[0].time;
+        uint32_t flags = d->q[0].flags;
+        memmove(d->q, d->q + 1, --d->qn * sizeof d->q[0]);
+        pthread_mutex_unlock(&d->lock);
+        AVPacket *pkt = av_packet_alloc();
+        if (size > 0) {
+            pkt->data = data;
+            pkt->size = size;
+            pkt->pts = time;
+            avcodec_send_packet(d->ctx, pkt);
+        }
+        if (flags & MOVIE_EOS) avcodec_send_packet(d->ctx, NULL);
+        av_packet_free(&pkt);
+        free(data);
+        pthread_mutex_lock(&d->lock);
+        for (;;) {
+            // wait for a free output slot rather than dropping frames
+            int free_slots = 0;
+            for (int i = 0; i < NOUT; i++) if (!d->out_busy[i]) free_slots++;
+            if (!free_slots) { pthread_cond_wait(&d->cond, &d->lock); continue; }
+            pthread_mutex_unlock(&d->lock);
+            int r = avcodec_receive_frame(d->ctx, d->frame);
+            pthread_mutex_lock(&d->lock);
+            if (r != 0) break;
+            int64_t t = d->frame->pts != AV_NOPTS_VALUE ? d->frame->pts : time;
+            emit_frame(d, t, 0);
+            n_frames++;
+            d->output_pending = true;
+        }
+        if (flags & MOVIE_EOS) { emit_frame(d, time, MOVIE_EOS); d->output_pending = true; }
+        pthread_cond_broadcast(&d->cond);
+    }
+    return NULL;
+}
+
+// Signal events owed to the guest; runs on guest threads (inside decoder calls).
+static void flush_signals(Cpu *c, Decoder *d) {
+    pthread_mutex_lock(&d->lock);
+    bool out = d->output_pending;
+    d->output_pending = false;
+    pthread_mutex_unlock(&d->lock);
+    if (out) signal_guest_event(c, d->events[1]);
+}
+
 static void dec_send_input(Cpu *c) {
     Decoder *d = self_state(c);
     n_send++;
@@ -492,32 +563,36 @@ static void dec_send_input(Cpu *c) {
     int64_t time = (int64_t)c->x[4];
     uint32_t flags = (uint32_t)c->x[5];
     pthread_mutex_lock(&d->lock);
-    if (size > 0 && idx >= 0 && idx < NIN) {
-        av_packet_unref(d->pkt);
-        d->pkt->data = d->in_mem[idx] + off;
-        d->pkt->size = size;
-        d->pkt->pts = time;
-        avcodec_send_packet(d->ctx, d->pkt);
+    if (!d->running) {
+        d->running = true;
+        pthread_cond_init(&d->cond, NULL);
+        pthread_create(&d->worker, NULL, dec_worker, d);
     }
-    if (flags & MOVIE_EOS) avcodec_send_packet(d->ctx, NULL);
-    bool produced = false;
-    while (avcodec_receive_frame(d->ctx, d->frame) == 0) {
-        int64_t t = d->frame->pts != AV_NOPTS_VALUE ? d->frame->pts : time;
-        if (!emit_frame(d, t, 0)) LOG("[movie] output buffers full, dropping frame\n");
-        n_frames++;
-        produced = true;
+    if (d->qn < 16) {
+        uint8_t *copy = NULL;
+        if (size > 0 && idx >= 0 && idx < NIN) {
+            copy = malloc((size_t)size + AV_INPUT_BUFFER_PADDING_SIZE);
+            memcpy(copy, d->in_mem[idx] + off, (size_t)size);
+            memset(copy + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        }
+        d->q[d->qn].data = copy;
+        d->q[d->qn].size = copy ? size : 0;
+        d->q[d->qn].time = time;
+        d->q[d->qn].flags = flags;
+        d->qn++;
+        pthread_cond_broadcast(&d->cond);
     }
-    if (flags & MOVIE_EOS) { emit_frame(d, time, MOVIE_EOS); produced = true; }
     if (idx >= 0 && idx < NIN) d->in_busy[idx] = false;
     pthread_mutex_unlock(&d->lock);
     signal_guest_event(c, d->events[0]);
-    if (produced) signal_guest_event(c, d->events[1]);
+    flush_signals(c, d);
     c->x[0] = 0;
 }
 
 static void dec_acquire_output(Cpu *c) {
     Decoder *d = self_state(c);
     n_acq_out++;
+    flush_signals(c, d);
     pthread_mutex_lock(&d->lock);
     if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }
     OutReady r = d->ready[0];
@@ -567,7 +642,9 @@ static void dec_release_output(Cpu *c) {
     int i = (int)c->x[1];
     pthread_mutex_lock(&d->lock);
     if (i >= 0 && i < NOUT) d->out_busy[i] = false;
+    if (d->running) pthread_cond_broadcast(&d->cond);
     pthread_mutex_unlock(&d->lock);
+    flush_signals(c, d);
     c->x[0] = 0;
 }
 

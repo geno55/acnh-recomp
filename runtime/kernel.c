@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -447,7 +448,43 @@ static int trace_svc = -1;
 
 static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc);
 
+static _Atomic uint64_t svc_wait_ns[32][0x80], svc_calls[32][0x80];
+static int prof_svc = -1;
+
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
+    if (prof_svc < 0) prof_svc = getenv("LARECOMP_PROF_SVC") != NULL;
+    if (prof_svc && imm < 0x80) {
+        uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
+        uint32_t h0 = imm == 0x18 && a2 ? *(uint32_t *)(uintptr_t)a1 : 0;
+        uint64_t t0 = mach_absolute_time();
+        svc_impl(c, imm, pc);
+        uint64_t dt = (mach_absolute_time() - t0) * tb.numer / tb.denom;
+        static _Atomic int nslow;
+        if (dt > 20000000 && imm != 0x0b && nslow < 400) {
+            nslow++;
+            LOG("[slow] t%llu svc%02x %llums a=%llx,%llx,%llx,%llx h0=%x lr=%llx\n", (unsigned long long)(t_cur ? t_cur->id : 0), imm,
+                (unsigned long long)(dt / 1000000), (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2, (unsigned long long)a3, h0, (unsigned long long)lr);
+        }
+        unsigned tid = t_cur ? (unsigned)(t_cur->id & 31) : 31;
+        svc_wait_ns[tid][imm] += dt;
+        svc_calls[tid][imm]++;
+        static _Atomic uint64_t last;
+        uint64_t now = mach_absolute_time() * tb.numer / tb.denom;
+        if (now - last > 2000000000ull) {
+            last = now;
+            for (int t = 0; t < 32; t++) {
+                int any = 0;
+                for (int i = 0; i < 0x80; i++)
+                    if (svc_calls[t][i]) {
+                        if (!any) { LOG("[svcprof] t%d", t); any = 1; }
+                        LOG(" %02x:%llu/%llums", i, (unsigned long long)svc_calls[t][i], (unsigned long long)(svc_wait_ns[t][i] / 1000000));
+                        svc_calls[t][i] = 0; svc_wait_ns[t][i] = 0;
+                    }
+                if (any) LOG("\n");
+            }
+        }
+        return;
+    }
     if (trace_svc < 0) trace_svc = getenv("LARECOMP_TRACE_SVC") != NULL;
     if (!trace_svc) return svc_impl(c, imm, pc);
     uint64_t in[4] = {c->x[0], c->x[1], c->x[2], c->x[3]};
@@ -670,6 +707,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = R_OK;
         x[1] = kernel_new_handle(ev);
         x[2] = kernel_new_handle(ev);
+        if (getenv("LARECOMP_PROF_SVC")) LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
         break;
     }
     default:
@@ -694,6 +732,7 @@ KEvent *kernel_create_event_pair(uint32_t *w, uint32_t *r) {
     ev->type = KOBJ_EVENT;
     *w = kernel_new_handle(ev);
     *r = kernel_new_handle(ev);
+    if (getenv("LARECOMP_PROF_SVC")) { Dl_info di; dladdr(__builtin_return_address(0), &di); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, di.dli_sname); }
     return ev;
 }
 

@@ -403,6 +403,8 @@ void backend_present(NvnTexture *t) {
     }
     frames++;
     total_frames++;
+    extern void input_frame(uint64_t frame);
+    input_frame(total_frames);
     static long shot_every = -1;
     if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
     extern bool g_debug_frame;
@@ -425,6 +427,13 @@ void backend_present(NvnTexture *t) {
 
 // ================================================================== UI thread
 void ui_run(void) {
+    // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
+    // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
+    static id activity;
+    activity = [[NSProcessInfo processInfo]
+        beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
+                          reason:@"Game emulation"];
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     window = SDL_CreateWindow("Link's Awakening (LARecomp)", 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE |
                                                                        SDL_WINDOW_HIGH_PIXEL_DENSITY);

@@ -1,5 +1,7 @@
 // nn::vi (display/layer) and nv:: (graphics driver init), implemented on the host.
+#include <stdlib.h>
 #include <time.h>
+#include <pthread/qos.h>
 
 #include "../hle.h"
 #include "../kernel.h"
@@ -16,6 +18,7 @@ static void sleep_until(const struct timespec *t) {
 
 static void *vsync_thread(void *arg) {
     (void)arg;
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
     for (;;) {
