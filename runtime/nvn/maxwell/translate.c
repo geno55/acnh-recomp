@@ -461,6 +461,12 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
 }
 
 // TEXS / TLDS: texture_info selects target and coordinate layout
+static const char *alayer(const char *r, int slot, char *buf) {
+    sprintf(buf, "min(%s, t%d.get_array_size() - 1u)", r, slot);
+    return buf;
+}
+#define ALAYER(r, slot) alayer((r), (slot), alloca(96))
+
 static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
     uint32_t index = (uint32_t)bits(w, 36, 13);
@@ -496,9 +502,9 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         case 6: slot = tex_slot(c, index, TEXTYPE_2D, true, false);
             sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s, level(0)))", slot, slot, F(A), F(A1), F(Bv)); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s)", slot, slot, F(A1), F(Bv), A); break;
+            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s)", slot, slot, F(A1), F(Bv), ALAYER(A, slot)); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
-            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s, level(0))", slot, slot, F(A1), F(Bv), A); break;
+            sprintf(call, "t%d.sample(s%d, float2(%s, %s), %s, level(0))", slot, slot, F(A1), F(Bv), ALAYER(A, slot)); break;
         case 9: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, true, true);
             sprintf(call, "float4(t%d.sample_compare(s%d, float2(%s, %s), %s, %s, level(0)))", slot, slot, F(A1), F(Bv), A, F(B1)); break;
         case 10: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
@@ -552,7 +558,8 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int slot = tex_slot(c, index, type, dc, array);
     char coords[256] = "", layer[64] = "", tmp[64];
     int ar = a;
-    if (array) { sprintf(layer, "uint(r%d)", a); c->reg_used[a] = 1; ar = a + 1; }
+    // the hardware clamps the array index to the layer count
+    if (array) { sprintf(layer, "min(uint(r%d), t%d.get_array_size() - 1u)", a, slot); c->reg_used[a] = 1; ar = a + 1; }
     for (int i = 0; i < ncoord; i++) {
         sprintf(tmp, "%sas_type<float>(r%d)", i ? ", " : "", ar + i);
         c->reg_used[ar + i] = 1;
@@ -590,7 +597,14 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     int pr = (int)bits(w, 16, 3);
     bool prn = bits(w, 19, 1);
     uint16_t op13 = (uint16_t)(w >> 51);  // top 13 bits
-    // predicate guard
+    // predicate guard. SSY/PBK/PCNT/PRET take no predicate: those bits are zero in the encoding,
+    // which would otherwise read as @P0.
+    uint64_t top12 = w & 0xfff0000000000000ull;
+    if (top12 == 0xe290000000000000ull || top12 == 0xe2a0000000000000ull || top12 == 0xe2b0000000000000ull ||
+        top12 == 0xe270000000000000ull) {
+        pr = PT;
+        prn = false;
+    }
     bool guarded = !(pr == PT && !prn);
     if (pr == PT && prn) return;  // @!pt: never executes
     if (guarded) sp(&c->body, "  if (%s) {\n", P(pr, prn));
@@ -600,7 +614,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
-        sp(&c->body, "    discard_fragment();\n");
+        if (!getenv("LARECOMP_NO_DISCARD")) sp(&c->body, "    discard_fragment();\n");
     } else if (OPM(0xe240000000000000ull, 0xfff0000000000020ull)) {  // BRA
         uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
         c->uses_branches = true;

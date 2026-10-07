@@ -108,8 +108,10 @@ static void end_pass(void) {
             [c commit];
             [c waitUntilCompleted];
             char path[256];
-            snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
+            snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no);
             renderer_save_texture(t, path);
+            snprintf(path, sizeof path, "build/pass_%03d_a.png", debug_pass_no++);
+            renderer_save_texture_alpha(t, path);
         }
     }
 }
@@ -687,6 +689,35 @@ static void bind_textures(int stage, ShaderInfo *si) {
                 uint64_t total = tegra_total_size(&e->tex->layout), nz = 0;
                 const uint8_t *p = (const uint8_t *)(uintptr_t)e->tex->addr;
                 for (uint64_t k = 0; k < total; k++) nz += p[k] != 0;
+                if (e->tex->width == 1024 && e->tex->height == 2048) {
+                    static int once;
+                    if (!once++) {
+                        id<MTLTexture> base = renderer_texture(e->tex, nil, false);
+                        LOG("[dtex] glyph cache target %u depth %u layers %u levels %u stride %u flags %#x base type %lu arrlen %lu\n",
+                            e->tex->target, e->tex->depth, e->tex->layout.layers, e->tex->levels, e->tex->stride, e->tex->flags,
+                            (unsigned long)base.textureType, (unsigned long)base.arrayLength);
+                        LOG("[dtex] glyph view: has %d mask %#x levels %u+%u layers %u+%u fmt %#x target %u\n", e->has_view, e->view.setmask,
+                            e->view.base_level, e->view.num_levels, e->view.min_layer, e->view.num_layers, e->view.format, e->view.target);
+                        LOG("[dtex] glyph cache: mtl fmt %lu type %lu swizzle tex %d %d %d %d view(%d) %d %d %d %d, tex.swz %08x\n",
+                            (unsigned long)base.pixelFormat, (unsigned long)tex.textureType, e->tex->swizzle[0], e->tex->swizzle[1],
+                            e->tex->swizzle[2], e->tex->swizzle[3], e->has_view && (e->view.setmask & 8), e->view.swizzle[0],
+                            e->view.swizzle[1], e->view.swizzle[2], e->view.swizzle[3],
+                            (unsigned)(tex.swizzle.red | tex.swizzle.green << 8 | tex.swizzle.blue << 16 | tex.swizzle.alpha << 24));
+                        renderer_save_texture(base, "build/glyph_gpu.png");
+                        NvnSamplerDesc *sd = (h && st.spool && tsc < (uint32_t)st.spool->count) ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
+                        if (sd) { const uint32_t *w = (const uint32_t *)sd; LOG("[dtex] glyph sampler words %08x %08x %08x %08x %08x %08x %08x %08x\n", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); }
+                    }
+                }
+                if ((e->tex->flags & 0x10) && !getenv("NO_RAW")) {
+                    static int nraw;
+                    if (nraw++ < 2) {
+                        char rp[64];
+                        snprintf(rp, sizeof rp, "build/raw_%llx.bin", e->tex->addr);
+                        FILE *rf = fopen(rp, "wb");
+                        if (rf) { fwrite(p, 1, total, rf); fclose(rf); }
+                        LOG("[dtex] linear texture stride %u -> %s\n", e->tex->stride, rp);
+                    }
+                }
                 LOG("[dtex] slot %d tex %ux%u f%#x addr %llx size %llu nonzero %llu gpu_owned %d\n", i, e->tex->width,
                     e->tex->height, e->tex->format, e->tex->addr, total, nz, renderer_is_gpu_owned(e->tex));
             }
@@ -898,12 +929,26 @@ static id<MTLBuffer> expand_indices(uint32_t mode, uint32_t count, const void *i
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
-    LOG("[draw] %s mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | ubufs:",
+    if (st.sbuf[0][0].addr && st.sbuf[0][0].size >= 64 && st.sbuf[0][0].size <= 4096) {
+        const float *f = (const float *)(uintptr_t)st.sbuf[0][0].addr;
+        const uint32_t *u = (const uint32_t *)f;
+        for (int g = 0; g < (int)(st.sbuf[0][0].size / 64) && g < 24; g++) {
+            LOG("[ssbo] rec%d:", g);
+            for (int k = 0; k < 16; k++) LOG(" %g(%08x)", f[g * 16 + k], u[g * 16 + k]);
+            LOG("\n");
+        }
+    }
+    LOG("[draw] %s inst %llu", indexed ? "e" : "a", indexed ? r->x[6] : r->x[4]);
+    LOG(" %s mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | ubufs:",
         indexed ? "elems" : "arrays", r->x[0], r->x[2], st.program->stages[0].code_addr, st.program->stages[1].code_addr,
         pr->vi->cbuf_mask, pr->fi->cbuf_mask);
     for (int s = 0; s < 2; s++)
         for (int i = 0; i < 18; i++)
             if (st.ubuf[s][i].addr) LOG(" %c%d(%llx,%llu)", s ? 'f' : 'v', i, st.ubuf[s][i].addr, st.ubuf[s][i].size);
+    LOG(" | ssbo:");
+    for (int sg = 0; sg < 2; sg++)
+        for (int i = 0; i < 16; i++)
+            if (st.sbuf[sg][i].addr) LOG(" %c%d(%llx,%llu)", sg ? 'f' : 'v', i, st.sbuf[sg][i].addr, st.sbuf[sg][i].size);
     LOG(" | tex:");
     for (int i = 0; i < pr->fi->ntex; i++) LOG(" off%u", pr->fi->tex[i].handle_offset);
     LOG(" bound:");
