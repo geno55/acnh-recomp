@@ -88,7 +88,23 @@ void input_handle_event(const SDL_Event *e) {
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly;
 
+static uint64_t g_pad_obj;
 void input_frame(uint64_t frame) {
+    if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
+        const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
+        LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
+            *(uint32_t *)(m + 0x4e0), *(uint32_t *)(m + 0x4e4), *(uint32_t *)(m + 0x4e8), *(uint32_t *)(m + 0x548),
+            m[0x54c], m[0x54d], m[0x54e], m[0x56c]);
+        for (int i = 0; i < 9; i++) {
+            const uint8_t *o = m + 0x98 + 0x48 * i;
+            uint64_t player = *(uint64_t *)(m + 0x10 * i);
+            LOG("[pad]  ctl%d id %#x style %#x btn %#x conn %d %d | player %llx [8]=%u\n", i, *(uint32_t *)(o + 8),
+                *(uint32_t *)(o + 0xc), *(uint32_t *)(o + 0x14), o[0x44], o[0x45], player,
+                player ? *(uint32_t *)(uintptr_t)(player + 8) : 0);
+        }
+    }
+    extern void watch_arm(void);
+    watch_arm();
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -124,7 +140,16 @@ static void fill_state(Cpu *c) {
     *(int64_t *)s = ++sampling;
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
-    if (id != 0 && id != 0x20) return;  // No1 and Handheld only
+    if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
+    extern uint64_t g_watch_lo, g_watch_hi;
+    if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
+    if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
+        unsigned lo = 0x98 + 0x10, hi = 0x98 + 0x48;  // offsets from the controller manager
+        sscanf(getenv("LARECOMP_WATCH_PAD"), "%x,%x", &lo, &hi);
+        g_watch_lo = c->x[1] - 8 - 0x98 + lo;
+        g_watch_hi = c->x[1] - 8 - 0x98 + hi;
+        LOG("[input] watching controller object %llx\n", c->x[1] - 8);
+    }
     uint64_t b = key_buttons | pad_buttons | script_buttons;
     int32_t lx = clamp_axis(key_lx + pad_lx + script_lx), ly = clamp_axis(key_ly + pad_ly + script_ly);
     int32_t rx = clamp_axis(key_rx + pad_rx), ry = clamp_axis(key_ry + pad_ry);
@@ -138,6 +163,9 @@ static void fill_state(Cpu *c) {
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
     *(uint64_t *)(s + 8) = b;
+    static uint64_t last_b;
+    if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
+    last_b = b;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;
     *(int32_t *)(s + 24) = rx;
@@ -151,12 +179,12 @@ HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left)
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
 
-// FullKey for player 1, Handheld for the handheld id
+// FullKey for player 1 only (we report docked mode, where Handheld is unavailable)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];
     static int nlog;
     if (nlog++ < 4) LOG("[input] GetNpadStyleSet id %#x\n", id);
-    c->x[0] = id == 0 ? 1 : id == 0x20 ? 2 : 0;
+    c->x[0] = id == 0 ? 1 : 0;  // docked: no handheld controller
 }
 
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a

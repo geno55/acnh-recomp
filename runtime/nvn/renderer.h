@@ -6,6 +6,7 @@ void renderer_init(id<MTLDevice> dev);
 id<MTLCommandQueue> renderer_queue(void);
 id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, bool for_render);
 MTLPixelFormat renderer_pixel_format(uint32_t nvn_format);
+bool renderer_format_alpha_one(uint32_t nvn_format);
 extern id<MTLBuffer> g_guest_buffer;
 extern uint64_t g_guest_buffer_base;
 #endif

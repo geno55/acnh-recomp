@@ -136,6 +136,7 @@ static MtlFormat mtl_format(uint32_t f) {
 bool renderer_format_is_depth(uint32_t f) { return f >= 0x31 && f <= 0x36; }
 bool renderer_format_has_stencil(uint32_t f) { return f == 0x31 || f == 0x35 || f == 0x36; }
 MTLPixelFormat renderer_pixel_format(uint32_t f) { return mtl_format(f).pf; }
+bool renderer_format_alpha_one(uint32_t f) { return mtl_format(f).force_alpha_one; }
 
 // ================================================================== textures
 typedef struct {

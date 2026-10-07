@@ -12,6 +12,8 @@
 
 #include "shader.h"
 
+uint64_t maxwell_gmem_base, maxwell_gmem_size;
+
 #define RZ 255
 #define PT 7
 
@@ -897,6 +899,36 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (right) sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) >> (%s & 31u)))", hi, R(a), sh);
         else sprintf(t, "uint((((ulong(%s) << 32) | ulong(%s)) << (%s & 31u)) >> 32)", hi, R(a), sh);
         set_reg(c, d, t);
+    } else if (OPM(0xeed0000000000000ull, 0xfff8000000000000ull) || OPM(0xeed8000000000000ull, 0xfff8000000000000ull)) {  // LDG / STG
+        bool store = bits(w, 51, 1);
+        bool wide = bits(w, 45, 1);
+        int size = (int)bits(w, 48, 3);
+        int64_t off = sbits(w, 20, 24);
+        c->info->uses_gmem = true;
+        char addr[256];
+        if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+        else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+        else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+        sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul;\n", addr,
+           (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
+        static const char *const ld_small[] = {"uint(gmem[ga])", "uint(int(char(gmem[ga])))",
+                                               "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
+        int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
+        if (!store) {
+            if (size < 4) {
+                if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = ok ? %s : 0u;\n", d, ld_small[size]); }
+            } else {
+                for (int k = 0; k < nw; k++)
+                    if (d != RZ && d + k < RZ) { c->reg_used[d + k] = 1; sp(&c->body, "      r%d = ok ? *(device uint *)(gmem + ga + %du) : 0u;\n", d + k, k * 4); }
+            }
+        } else {
+            if (size == 0 || size == 1) sp(&c->body, "      if (ok) gmem[ga] = uchar(%s);\n", R(d));
+            else if (size == 2 || size == 3) sp(&c->body, "      if (ok) *(device ushort *)(gmem + ga) = ushort(%s);\n", R(d));
+            else
+                for (int k = 0; k < nw; k++)
+                    sp(&c->body, "      if (ok) *(device uint *)(gmem + ga + %du) = %s;\n", k * 4, R(d == RZ ? RZ : d + k));
+        }
+        sp(&c->body, "    }\n");
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         sp(&c->body, "    pc = %uu + %s + 0x%08xu; continue;\n", pc + 8, R(a), (uint32_t)sbits(w, 20, 24));
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
@@ -1024,6 +1056,10 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     Str args = {0};
     for (int i = 0; i < 18; i++)
         if (info->cbuf_mask & (1u << i)) sp(&args, ", constant uint4 *cb%d [[buffer(%d)]]", i, i);
+    if (info->uses_gmem) {
+        if (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX)) { free(args.buf); fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX); }
+        sp(&args, ", device uchar *gmem [[buffer(%d)]]", GMEM_BUFFER_INDEX);
+    }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
         const char *tn = tex_type_name(t->type);

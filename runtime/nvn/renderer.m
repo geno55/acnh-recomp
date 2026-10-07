@@ -520,7 +520,12 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     pr = [Prog new];
     cache[key] = pr;
     dump_program(p);
-    pr->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[0].code_addr, 0x10000, STAGE_VERTEX, vkey);
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    // the compiler constants follow the code, so they bound the instruction scan
+    size_t vmax = p->stages[0].const_offset ? p->stages[0].const_offset : 0x10000;
+    size_t fmax = p->stages[1].const_offset ? p->stages[1].const_offset : 0x10000;
+    pr->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[0].code_addr, vmax, STAGE_VERTEX, vkey);
     if (!pr->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", pr->vi->error, p->stages[0].code_addr);
         char path[128];
@@ -531,7 +536,7 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
         return nil;
     }
     fkey->vs_out_mask = pr->vi->out_mask;
-    pr->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[1].code_addr, 0x10000, STAGE_FRAGMENT, fkey);
+    pr->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[1].code_addr, fmax, STAGE_FRAGMENT, fkey);
     if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return nil; }
     if (getenv("LARECOMP_SAVE_MSL")) {
         mkdir("build/msl", 0755);
@@ -616,6 +621,34 @@ static MTLTextureType mtl_type_for(int t) {
     }
 }
 
+// NVN texture/view component swizzle (same enum values as MTLTextureSwizzle), applied as a view.
+static id<MTLTexture> apply_swizzle(id<MTLTexture> tex, NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    const uint8_t *sw = (has_view && (v->setmask & 8)) ? v->swizzle : t->swizzle;
+    uint8_t c[4];
+    for (int i = 0; i < 4; i++) c[i] = sw[i] <= 5 ? sw[i] : (uint8_t)(2 + i);
+    if (!c[0] && !c[1] && !c[2] && !c[3]) return tex;  // never set: identity
+    if (renderer_format_alpha_one(t->format))
+        for (int i = 0; i < 4; i++) if (c[i] == MTLTextureSwizzleAlpha) c[i] = MTLTextureSwizzleOne;
+    if (c[0] == 2 && c[1] == 3 && c[2] == 4 && c[3] == (renderer_format_alpha_one(t->format) ? 1 : 5)) return tex;
+    if (tex.sampleCount > 1 || renderer_format_is_depth(t->format)) return tex;
+    static NSMutableDictionary *views;
+    if (!views) views = [NSMutableDictionary new];
+    NSValue *k = [NSValue valueWithPointer:(__bridge void *)tex];
+    uint32_t swz = c[0] | c[1] << 8 | c[2] << 16 | (uint32_t)c[3] << 24;
+    NSMutableDictionary *per = views[k];
+    if (!per) { per = [NSMutableDictionary new]; views[k] = per; }
+    id<MTLTexture> view = per[@(swz)];
+    if (!view) {
+        NSUInteger slices = tex.textureType == MTLTextureType3D ? 1 : tex.arrayLength * (tex.textureType == MTLTextureTypeCube || tex.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+        view = [tex newTextureViewWithPixelFormat:tex.pixelFormat textureType:tex.textureType
+                                           levels:NSMakeRange(0, tex.mipmapLevelCount) slices:NSMakeRange(0, slices)
+                                          swizzle:MTLTextureSwizzleChannelsMake(c[0], c[1], c[2], c[3])];
+        if (!view) return tex;
+        per[@(swz)] = view;
+    }
+    return view;
+}
+
 // Upload helper: a separate command buffer, committed now so it runs before the current pass.
 static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bool has_view, int want_type) {
     id<MTLCommandBuffer> ucb = [renderer_queue() commandBuffer];
@@ -623,6 +656,7 @@ static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bo
     id<MTLTexture> tex = view_texture(t, v, has_view, false, blit);
     [blit endEncoding];
     [ucb commit];
+    tex = apply_swizzle(tex, t, v, has_view);
     MTLTextureType want = mtl_type_for(want_type);
     if (tex.textureType != want && tex.textureType != MTLTextureType2DMultisample) {
         if (want == MTLTextureType2D && (tex.textureType == MTLTextureType2DArray || tex.textureType == MTLTextureTypeCube))
@@ -675,6 +709,20 @@ static void bind_textures(int stage, ShaderInfo *si) {
 static void bind_cbufs(int stage, ShaderInfo *si) {
     for (int k = 0; k < 18; k++) {
         if (!(si->cbuf_mask & (1u << k))) continue;
+        if (k == 0) {  // driver constants: storage buffer bindings at 0x110 + 16*i {addr_lo, addr_hi, size, 0}
+            uint32_t drv[0x400 / 4] = {0};
+            for (int i = 0; i < 16; i++) {
+                uint32_t *e = &drv[(0x110 + 16 * i) / 4];
+                e[0] = (uint32_t)st.sbuf[stage][i].addr;
+                e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
+                e[2] = (uint32_t)st.sbuf[stage][i].size;
+            }
+            uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
+            uint64_t off = ring_alloc(drv, size);
+            if (stage == 0) [enc setVertexBuffer:ring offset:off atIndex:0];
+            else [enc setFragmentBuffer:ring offset:off atIndex:0];
+            continue;
+        }
         if (k == 1) {  // compiler constants stored after the shader code
             NvnShaderStage *ss = &st.program->stages[stage];
             uint64_t size = ss->const_size ? ss->const_size : 16;
@@ -925,6 +973,8 @@ static void draw(CmdRec *r, bool indexed) {
     // resources
     bind_cbufs(0, pr->vi);
     bind_cbufs(1, pr->fi);
+    if (pr->vi->uses_gmem) [enc setVertexBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
+    if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
     for (int s = 0; s < 12; s++) {

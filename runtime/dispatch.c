@@ -1,3 +1,5 @@
+#include <pthread.h>
+#include <unistd.h>
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <execinfo.h>
 #include <stdlib.h>
@@ -188,8 +190,42 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 #include <signal.h>
 #include <sys/ucontext.h>
 
+// Debug data watchpoint: the page is protected; accesses in [lo, hi) are attributed to the host
+// function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
+uint64_t g_watch_lo, g_watch_hi;
+static uint64_t watch_page;
+static void *watch_thread(void *a) {
+    (void)a;
+    for (;;) { mprotect((void *)watch_page, 0x4000, PROT_NONE); usleep(100); }
+    return NULL;
+}
+void watch_arm(void) {
+    if (!g_watch_lo || watch_page) return;
+    watch_page = g_watch_lo & ~0x3FFFull;
+    pthread_t t;
+    pthread_create(&t, NULL, watch_thread, NULL);
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
+    uint64_t fa = (uint64_t)si->si_addr;
+    if (watch_page && fa >= watch_page && fa < watch_page + 0x4000) {
+        if (fa >= g_watch_lo && fa < g_watch_hi) {
+            static char seen[64][48];
+            static int nseen;
+            Dl_info wi = {0};
+            dladdr((void *)uc->uc_mcontext->__ss.__pc, &wi);
+            const char *nm = wi.dli_sname ? wi.dli_sname : "?";
+            bool found = false;
+            for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], nm);
+            if (!found && nseen < 64) {
+                snprintf(seen[nseen++], 48, "%s", nm);
+                fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
+            }
+        }
+        mprotect((void *)watch_page, 0x4000, PROT_READ | PROT_WRITE);
+        return;
+    }
     uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
     Dl_info di = {0}, dl = {0};
     dladdr((void *)pc, &di);

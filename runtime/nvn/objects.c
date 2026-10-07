@@ -381,18 +381,18 @@ NVN(nvnTextureViewSetLevels) { TV(uint32_t, 0) |= 1; TV(uint16_t, 4) = (uint16_t
 NVN(nvnTextureViewSetLayers) { TV(uint32_t, 0) |= 2; TV(uint16_t, 8) = (uint16_t)A(1); TV(uint16_t, 10) = (uint16_t)A(2); }
 NVN(nvnTextureViewSetFormat) { TV(uint32_t, 0) |= 4; TV(uint32_t, 12) = (uint32_t)A(1); }
 NVN(nvnTextureViewSetSwizzle) {
-    TV(uint32_t, 0) |= 8;
-    TV(uint8_t, 16) = (uint8_t)A(1); TV(uint8_t, 17) = (uint8_t)A(2);
-    TV(uint8_t, 18) = (uint8_t)A(3); TV(uint8_t, 19) = (uint8_t)A(4);
+    NvnTextureView *v = AP(0);
+    v->setmask |= 8;
+    v->swizzle[0] = (uint8_t)A(1); v->swizzle[1] = (uint8_t)A(2); v->swizzle[2] = (uint8_t)A(3); v->swizzle[3] = (uint8_t)A(4);
 }
-NVN(nvnTextureViewSetDepthStencilMode) { TV(uint32_t, 0) |= 16; TV(uint32_t, 20) = (uint32_t)A(1); }
-NVN(nvnTextureViewSetTarget) { TV(uint32_t, 0) |= 32; TV(uint32_t, 24) = (uint32_t)A(1); }
+NVN(nvnTextureViewSetDepthStencilMode) { NvnTextureView *v = AP(0); v->setmask |= 16; v->ds_mode = (uint32_t)A(1); }
+NVN(nvnTextureViewSetTarget) { NvnTextureView *v = AP(0); v->setmask |= 32; v->target = (uint32_t)A(1); }
 NVN(nvnTextureViewGetLevels) { *(int32_t *)AP(1) = TV(uint16_t, 4); *(int32_t *)AP(2) = TV(uint16_t, 6); RET(TV(uint32_t, 0) & 1); }
 NVN(nvnTextureViewGetLayers) { *(int32_t *)AP(1) = TV(uint16_t, 8); *(int32_t *)AP(2) = TV(uint16_t, 10); RET(!!(TV(uint32_t, 0) & 2)); }
 NVN(nvnTextureViewGetFormat) { *(uint32_t *)AP(1) = TV(uint32_t, 12); RET(!!(TV(uint32_t, 0) & 4)); }
-NVN(nvnTextureViewGetSwizzle) { for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) = TV(uint8_t, 16 + i); RET(!!(TV(uint32_t, 0) & 8)); }
-NVN(nvnTextureViewGetDepthStencilMode) { *(uint32_t *)AP(1) = TV(uint32_t, 20); RET(!!(TV(uint32_t, 0) & 16)); }
-NVN(nvnTextureViewGetTarget) { *(uint32_t *)AP(1) = TV(uint32_t, 24); RET(!!(TV(uint32_t, 0) & 32)); }
+NVN(nvnTextureViewGetSwizzle) { NvnTextureView *v = AP(0); for (int i = 0; i < 4; i++) *(uint32_t *)AP(1 + i) = v->swizzle[i]; RET(!!(v->setmask & 8)); }
+NVN(nvnTextureViewGetDepthStencilMode) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->ds_mode; RET(!!(v->setmask & 16)); }
+NVN(nvnTextureViewGetTarget) { NvnTextureView *v = AP(0); *(uint32_t *)AP(1) = v->target; RET(!!(v->setmask & 32)); }
 NVN(nvnTextureViewCompare) { RET(memcmp(AP(0), AP(1), 0x1C) == 0); }
 
 NVN(nvnTextureWriteTexels) {

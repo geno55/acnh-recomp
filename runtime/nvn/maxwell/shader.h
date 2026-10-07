@@ -35,10 +35,15 @@ typedef struct {
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
+    bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     char error[256];        // set when translation fails
 } ShaderInfo;
+
+// Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
+#define GMEM_BUFFER_INDEX 17
+extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
