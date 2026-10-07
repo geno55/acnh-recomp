@@ -576,8 +576,16 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     // effects (not processed): report them as enabled/disabled per request
     const uint8_t *ein = vin + voices_sz;
     oh[5] = neffects * 0x10;
-    for (uint32_t i = 0; i < neffects && o + 0x10 <= out->size; i++, o += 0x10)
-        op[o] = ein[i * 0xC0 + 2] ? 3 : 4;  // UsageState Enabled / Disabled
+    for (uint32_t i = 0; i < neffects && o + 0x10 <= out->size; i++, o += 0x10) {
+        const uint8_t *e = ein + i * 0xC0;
+        op[o] = e[2] ? 3 : 4;  // UsageState Enabled / Disabled
+        static uint32_t seen_types;
+        if (e[0] && e[0] < 32 && !(seen_types & (1u << e[0]))) {
+            seen_types |= 1u << e[0];
+            LOG("[audren] effect type %u used (not implemented): slot %u mix %d enabled %u\n", e[0], i,
+                *(const int32_t *)(e + 4), e[2]);
+        }
+    }
     const uint8_t *min = ein + effects_sz;
     if (r->splitters && *(const uint32_t *)min == 0x48444E53) {
         static int warned;
