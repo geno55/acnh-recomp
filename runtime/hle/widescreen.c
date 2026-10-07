@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "../hle.h"
+#include "../settings.h"
 
 #define BACKDROP_HASHES 0x71fe31bbf03c3515ull
 
@@ -16,7 +17,7 @@ float widescreen_factor(void) { return g_wide; }
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;
-bool widescreen_allowed(void) { return g_allowed && !getenv("LARECOMP_NO_WIDESCREEN"); }
+bool widescreen_allowed(void) { return g_allowed && g_settings.aspect == ASPECT_UNLOCKED && !getenv("LARECOMP_NO_WIDESCREEN"); }
 void widescreen_set_allowed(bool on) { g_allowed = on; }
 
 // Interiors and dungeons use cameras that never load the patched overworld aspect (site 0). Count

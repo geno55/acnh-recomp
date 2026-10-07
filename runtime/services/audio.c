@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 
 #include "../hle.h"
+#include "../settings.h"
 #include "../ipc.h"
 
 // ------------------------------------------------------------------ audren: a CPU mixer modelled on
@@ -462,7 +463,7 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
             if (no_reverb < 0) no_reverb = getenv("LARECOMP_NO_REVERB") ? 1 : 0;
             static int toggle = -1;
             if (toggle < 0) toggle = getenv("LARECOMP_REVERB_TOGGLE") ? atoi(getenv("LARECOMP_REVERB_TOGGLE")) : 0;
-            int off = no_reverb || (toggle && (r->elapsed_frames / toggle) % 2);
+            int off = no_reverb || !g_settings.reverb || (toggle && (r->elapsed_frames / toggle) % 2);
             if (fx->enabled && !off) reverb_process(&fx->rv, in, out, N);
             else
                 for (int c = 0; c < ch; c++) if (in[c] != out[c]) memcpy(out[c], in[c], N * sizeof(float));
@@ -603,6 +604,14 @@ static void render_frame(Renderer *r, float *stereo) {
     }
 }
 
+// Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live).
+static void apply_gain(SDL_AudioStream *st) {
+    static double env = -1;
+    if (env < 0) env = getenv("LARECOMP_AUDIO_GAIN") ? atof(getenv("LARECOMP_AUDIO_GAIN")) : 1.0;
+    float g = (float)(env * g_settings.volume);
+    if (st && SDL_GetAudioStreamGain(st) != g) SDL_SetAudioStreamGain(st, g);
+}
+
 static void wav_header(FILE *f, uint32_t bytes) {
     uint32_t h[11] = {0x46464952, 36 + bytes, 0x45564157, 0x20746d66, 16, 0x00020003, 48000, 48000 * 8,
                       0x00200008, 0x61746164, bytes};
@@ -650,7 +659,7 @@ static void *renderer_tick(void *arg) {
             memset(out, 0, frame_bytes);
         }
         pthread_mutex_unlock(&r->lock);
-        if (r->stream) SDL_PutAudioStreamData(r->stream, out, frame_bytes);
+        if (r->stream) { apply_gain(r->stream); SDL_PutAudioStreamData(r->stream, out, frame_bytes); }
         if (r->wav && r->state == 0) {
             fwrite(out, 1, frame_bytes, r->wav);
             r->wav_bytes += frame_bytes;
@@ -1047,6 +1056,7 @@ static void *audout_thread(void *arg) {
         if (!size) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); continue; }
         uint64_t frames = size / (2 * ch);
         if (a->stream) {
+            apply_gain(a->stream);
             if (data) SDL_PutAudioStreamData(a->stream, (const void *)(uintptr_t)data, (int)size);
             while (SDL_GetAudioStreamQueued(a->stream) > target) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
         } else {

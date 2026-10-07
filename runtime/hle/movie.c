@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../settings.h"
 
 #define MOVIE_EOS 4u
 
@@ -190,7 +191,7 @@ static void ex_set_data_source(Cpu *c) {
     e->ntracks = 0;
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)
         if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
-            (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && !getenv("LARECOMP_NO_MOVIE_AUDIO")))
+            (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && g_settings.movie_audio && !getenv("LARECOMP_NO_MOVIE_AUDIO")))
             e->map[e->ntracks++] = (int)i;
     c->x[0] = 0;
 }

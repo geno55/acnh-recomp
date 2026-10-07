@@ -14,7 +14,13 @@ RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runti
 RT_OBJ   := $(patsubst runtime/%.c,build/rt/%.o,$(RT_SRC))
 OBJC_SRC := $(wildcard runtime/nvn/*.m)
 OBJC_OBJ := $(patsubst runtime/%.m,build/rt/%.o,$(OBJC_SRC))
-RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/nvn/*.h) $(wildcard runtime/nvn/maxwell/*.h)
+RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/nvn/*.h) $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/ui/*.h)
+IMGUI    := third_party/imgui
+UI_SRC   := $(wildcard runtime/ui/*.mm)
+UI_OBJ   := $(patsubst runtime/%.mm,build/rt/%.o,$(UI_SRC))
+IMGUI_OBJ := build/imgui/imgui.o build/imgui/imgui_draw.o build/imgui/imgui_tables.o build/imgui/imgui_widgets.o \
+             build/imgui/imgui_impl_metal.o
+CXXFLAGS := -O2 -g -std=c++17 -fobjc-arc -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(SDL)/include
 
 all: build/larecomp
 
@@ -30,8 +36,20 @@ build/rt/%.o: runtime/%.m $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -fobjc-arc -c $< -o $@
 
-build/larecomp: $(GEN_OBJ) $(RT_OBJ) $(OBJC_OBJ)
-	$(CC) -o $@ $^ $(LDFLAGS)
+build/larecomp: $(GEN_OBJ) $(RT_OBJ) $(OBJC_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+	clang++ -o $@ $^ $(LDFLAGS)
+
+build/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
+	@mkdir -p $(dir $@)
+	clang++ $(CXXFLAGS) -c $< -o $@
+
+build/imgui/%.o: $(IMGUI)/%.cpp
+	@mkdir -p $(dir $@)
+	clang++ $(CXXFLAGS) -c $< -o $@
+
+build/imgui/imgui_impl_metal.o: $(IMGUI)/backends/imgui_impl_metal.mm
+	@mkdir -p $(dir $@)
+	clang++ $(CXXFLAGS) -c $< -o $@
 
 gen:
 	cd tools && ./venv/bin/python gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../generated/sdk --hle ../runtime/hle/hle_symbols.txt

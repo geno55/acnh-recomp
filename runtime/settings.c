@@ -1,0 +1,52 @@
+#include "settings.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "hle.h"
+
+#define SETTINGS_FILE "larecomp.ini"
+
+Settings g_settings = {
+    .aspect = ASPECT_UNLOCKED,
+    .fullscreen = false,
+    .volume = 1.0f,
+    .reverb = true,
+    .movie_audio = true,
+    .show_fps = false,
+};
+
+void settings_load(void) {
+    FILE *f = fopen(SETTINGS_FILE, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        char key[64];
+        char val[128];
+        if (sscanf(line, " %63[^= ] = %127s", key, val) != 2) continue;
+        if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
+        else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
+        else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
+        else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
+        else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
+        else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+    }
+    fclose(f);
+    if (g_settings.volume < 0) g_settings.volume = 0;
+    if (g_settings.volume > 2) g_settings.volume = 2;
+    LOG("[settings] loaded %s\n", SETTINGS_FILE);
+}
+
+void settings_save(void) {
+    FILE *f = fopen(SETTINGS_FILE, "w");
+    if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
+    fprintf(f, "# LARecomp settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
+    fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "unlocked");
+    fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
+    fprintf(f, "volume = %.2f\n", g_settings.volume);
+    fprintf(f, "reverb = %d\n", g_settings.reverb);
+    fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
+    fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fclose(f);
+}

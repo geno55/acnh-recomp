@@ -64,6 +64,12 @@ static void recompute_pad(void) {
     pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
 }
 
+// Forget held keys (the menu took focus); the gamepad is re-read on its next event.
+void input_reset(void) {
+    memset(keys_down, 0, sizeof keys_down);
+    recompute_keyboard();
+}
+
 void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
@@ -150,9 +156,11 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    uint64_t b = key_buttons | pad_buttons | script_buttons;
-    int32_t lx = clamp_axis(key_lx + pad_lx + script_lx), ly = clamp_axis(key_ly + pad_ly + script_ly);
-    int32_t rx = clamp_axis(key_rx + pad_rx), ry = clamp_axis(key_ry + pad_ry);
+    extern bool menu_is_open(void);
+    bool menu = menu_is_open();  // the overlay menu has the controls
+    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
+    int32_t rx = menu ? 0 : clamp_axis(key_rx + pad_rx), ry = menu ? 0 : clamp_axis(key_ry + pad_ry);
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;

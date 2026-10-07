@@ -1,4 +1,6 @@
 #include <sys/mman.h>
+#include "settings.h"
+#include "ui/menu.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -530,6 +532,7 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
     [e setRenderPipelineState:pipe];
+    if (strstr(path, "window")) flip = 0;  // the window image is already upright
     float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
     [e setVertexBytes:pv length:sizeof pv atIndex:0];
     [e setFragmentTexture:raw_view(tex) atIndex:0];
@@ -635,8 +638,29 @@ void backend_present(NvnTexture *t) {
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
         [enc endEncoding];
+        static long menu_at = -1;  // test hook: open the menu at this frame (LARECOMP_MENU_AT)
+        if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
+        if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+        menu_render(dev, cb, drawable.texture);
+        static long win_shot = -1;  // LARECOMP_WINDOW_SHOT=<frame>: save the final window image (game + menu)
+        if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
+        id<MTLTexture> shot_tex = nil;
+        if (win_shot && (long)total_frames + 1 == win_shot) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
+                                         width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead;
+            shot_tex = [dev newTextureWithDescriptor:td];
+            id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            [bl copyFromTexture:drawable.texture toTexture:shot_tex];
+            [bl endEncoding];
+        }
         [cb presentDrawable:drawable];
         [cb commit];
+        if (shot_tex) {
+            [cb waitUntilCompleted];
+            renderer_save_texture(shot_tex, "build/window.png");
+            if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        }
     }
     frames++;
     total_frames++;
@@ -673,6 +697,7 @@ void ui_run(void) {
         beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
                           reason:@"Game emulation"];
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    settings_load();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
@@ -684,14 +709,16 @@ void ui_run(void) {
     dev = MTLCreateSystemDefaultDevice();
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = YES;
+    layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
     atomic_store(&ui_ready, true);
     for (;;) {
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+            if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
+        menu_apply_window_requests(window);
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);
