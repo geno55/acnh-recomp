@@ -108,8 +108,9 @@ static float pass_sx = 1, pass_sy = 1;  // allocation scale of the current pass'
 bool renderer_texture_presented(NvnTexture *t);
 // Widescreen UI: 2D draws into the swapchain image use a centred 16:9 region (uniform scale) instead of
 // the stretched wide mapping. vp_* is the mapping for the current draw: physical = guest * s + off.
-static float vp_sx = 1, vp_sy = 1, vp_ox = 0;
+static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
+static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
@@ -218,6 +219,12 @@ static void begin_pass(void) {
         id<MTLTexture> tex = view_texture(t, &st.rt.cview[i], st.rt.has_cview[i], true, nil);
         rp.colorAttachments[i].texture = tex;
         rp.colorAttachments[i].loadAction = MTLLoadActionLoad;
+        // reshaped output: areas outside the game's 16:9 drawing (interiors, fades) start black each frame
+        extern bool renderer_texture_first_write(NvnTexture *t);
+        if (renderer_texture_first_write(t)) {
+            rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        }
         rp.colorAttachments[i].storeAction = MTLStoreActionStore;
         if (!w) renderer_texture_scale(t, &pass_sx, &pass_sy);
         w = (int)tex.width; h = (int)tex.height;
@@ -243,7 +250,7 @@ static void begin_pass(void) {
         rp.defaultRasterSampleCount = 1;
     }
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
-    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
 
@@ -262,10 +269,11 @@ static void apply_scissor(void) {
     pass_size(&w, &h);
     if (!w) return;
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
-    if (vp_sx != 1 || vp_sy != 1 || vp_ox != 0) {
-        double x0 = floor(x * (double)vp_sx + vp_ox), y0 = floor(y * (double)vp_sy);
-        double x1 = ceil(((double)x + sw) * vp_sx + vp_ox), y1 = ceil(((double)y + sh) * vp_sy);
+    if (vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) {
+        double x0 = floor(x * (double)vp_sx + vp_ox), y0 = floor(y * (double)vp_sy + vp_oy);
+        double x1 = ceil(((double)x + sw) * vp_sx + vp_ox), y1 = ceil(((double)y + sh) * vp_sy + vp_oy);
         if (sw >= 16384) x1 = 1e9;  // "unbounded" scissors stay unbounded
+        if (sh >= 16384) y1 = 1e9;
         if (x1 > 1e9) x1 = 1e9;
         if (y1 > 1e9) y1 = 1e9;
         x = (int)x0; y = (int)y0; sw = (int)(x1 - x0); sh = (int)(y1 - y0);
@@ -369,7 +377,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     int w, h;
     pass_size(&w, &h);
     [enc setViewport:(MTLViewport){0, 0, w, h, 0, 1}];
-    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     apply_scissor();
     float d4[4] = {dval, 0, 0, 0};
     [enc setVertexBytes:d4 length:16 atIndex:0];
@@ -861,10 +869,14 @@ static void bind_textures(int stage, ShaderInfo *si) {
         id<MTLSamplerState> smp = nil;
         uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
         tex_sc[stage][i][0] = tex_sc[stage][i][1] = 1;
+        if (i < 64) tex_wh[stage][i][0] = tex_wh[stage][i][1] = 0;
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
-            if (e->tex && i < 64) renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
+            if (e->tex && i < 64) {
+                renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
+                tex_wh[stage][i][0] = e->tex->width; tex_wh[stage][i][1] = e->tex->height;
+            }
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k]) {
                     id<MTLTexture> fc = feedback_copy[k];
@@ -1265,6 +1277,20 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr) { stat_skipped++; return; }
+    {   // Interiors/dungeons draw a 16:9 backdrop quad over the still-rendered overworld: frames that
+        // draw it are presented cropped to 16:9 (see backend_present).
+        static uint64_t last_fs, last_hash;
+        uint64_t fs = st.program->stages[1].code_addr;
+        if (fs != last_fs) {
+            last_fs = fs;
+            last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+        }
+        static uint64_t log_hash = 1;
+        if (log_hash == 1) log_hash = getenv("LARECOMP_LOG_FSHASH") ? 0 : 2;
+        if (!log_hash && g_debug_frame) LOG("[fshash] fs=%llx hash %016llx\n", fs, last_hash);
+        extern void widescreen_backdrop_seen(uint64_t hash);
+        if (last_hash) widescreen_backdrop_seen(last_hash);
+    }
     static int log_rt_w = -1, log_rt_h;
     if (log_rt_w < 0) { const char *e = getenv("LARECOMP_LOG_RT"); log_rt_w = 0; if (e) sscanf(e, "%dx%d", &log_rt_w, &log_rt_h); }
     static uint64_t log_rt_addr = 1;
@@ -1443,21 +1469,39 @@ static void draw(CmdRec *r, bool indexed) {
     if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
-    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
-    if (pass_sx > pass_sy * 1.01f && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
-        bool reads_scene = false;  // the scene composite samples the wide scene; UI samples atlases/fonts/video
-        for (int i = 0; i < pr->fi->ntex && i < 64; i++) if (tex_sc[1][i][0] != 1) reads_scene = true;
-        if (!reads_scene) {
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+        // Draws into the swapchain image: the frame's leading run of draws that sample the reshaped scene
+        // is the final composite and keeps the full mapping; everything after it is UI (HUD, text, menus,
+        // some of which sample the blurred scene too) and goes into a centred 16:9 box. A movie frame
+        // doesn't sample the scene, so it is pillarboxed as well.
+        bool reads_scene = false;  // samples a reshaped texture the size of the framebuffer (the scene itself)
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++)
+            if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
+                tex_wh[1][i][1] == st.rt.color[0]->height)
+                reads_scene = true;
+        extern uint64_t renderer_present_count(void);
+        static uint64_t frame = ~0ull;
+        static bool in_composite;
+        if (frame != renderer_present_count()) { frame = renderer_present_count(); in_composite = true; }
+        if (!reads_scene) in_composite = false;
+        bool composite = in_composite;
+        if (getenv("LARECOMP_LOG_UI") && g_debug_frame)
+            LOG("[ui] fs=%llx count %llu reads_scene %d -> %s\n", st.program->stages[1].code_addr, r->x[2], reads_scene,
+                composite ? "composite" : "ui");
+        if (!composite) {  // centred 16:9 region with a uniform scale
             int pw, ph;
             pass_size(&pw, &ph);
-            vp_sx = pass_sy;
-            vp_ox = (pw - st.rt.color[0]->width * pass_sy) * 0.5f;
+            float u = fminf(pass_sx, pass_sy);
+            vp_sx = vp_sy = u;
+            vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
+            vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
         }
     }
-    [enc setViewport:(MTLViewport){vp[0] * vp_sx + vp_ox, vp[1] * vp_sy, vp[2] * vp_sx, vp[3] * vp_sy, zn, zf}];
+    [enc setViewport:(MTLViewport){vp[0] * vp_sx + vp_ox, vp[1] * vp_sy + vp_oy, vp[2] * vp_sx, vp[3] * vp_sy, zn, zf}];
     apply_scissor();
     if (pr->fi->uses_rscale) {  // [0] = render target scale, [1 + i] = scale of texture i
-        float rs[65][4] = {{vp_sx, vp_sy, vp_ox, 0}};
+        float rs[65][4] = {{vp_sx, vp_sy, vp_ox, vp_oy}};
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
         [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
@@ -1696,6 +1740,12 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     id<MTLTexture> s = sampled_texture(st_, &src->view, src->has_view, TEXTYPE_2D);
     renderer_mark_gpu_owned(dt);
     id<MTLTexture> d = view_texture(dt, &dst->view, dst->has_view, true, nil);
+    // a full copy into a swapchain image: the source is the frame's final framebuffer (UI is drawn there)
+    extern void renderer_texture_mark_presented(NvnTexture *t);
+    if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height)
+        renderer_texture_mark_presented(st_);
+    extern bool renderer_texture_first_write(NvnTexture *t);
+    renderer_texture_first_write(dt);  // a copy fills the image: no clear afterwards this frame
     const int32_t *sr = src->region, *dr = dst->region;
     if (g_debug_frame) {
         static int nl;

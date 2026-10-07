@@ -51,7 +51,11 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     case 8: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;   // GetBootMode
     case 9: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetCurrentFocusState: in focus
     case 13: case 61: resp->copy_handles[resp->ncopy++] = new_event(); break;
-    case 60: OUT(int32_t, 0) = 1920; OUT(int32_t, 4) = 1080; resp_size(resp, 8); break;
+    case 60: {  // GetDefaultDisplayResolution
+        int w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;
+        LOG("[am] GetDefaultDisplayResolution -> %dx1080\n", w);
+        OUT(int32_t, 0) = w; OUT(int32_t, 4) = 1080; resp_size(resp, 8); break;
+    }
     default: UNHANDLED("ICommonStateGetter");
     }
 }

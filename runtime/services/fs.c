@@ -18,6 +18,84 @@
 const char *g_save_dir = "save";
 static int romfs_fd = -1;
 
+// ------------------------------------------------------------------ RomFS file index (offset -> path)
+// Lets the runtime see which game files are being streamed (e.g. which level is loading).
+typedef struct { uint64_t off, size; char *path; } RomFile;
+static RomFile *rom_files;
+static int rom_nfiles;
+static uint64_t rom_data_off;
+
+static int rom_cmp(const void *a, const void *b) {
+    const RomFile *x = a, *y = b;
+    return x->off < y->off ? -1 : x->off > y->off;
+}
+
+static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, char *out, size_t cap) {
+    char parts[16][256];
+    int n = 0;
+    while (dir != 0 && dir < dsize && n < 16) {  // root (offset 0) has an empty name
+        uint32_t parent, namelen;
+        memcpy(&parent, dmeta + dir, 4);
+        memcpy(&namelen, dmeta + dir + 0x14, 4);
+        if (namelen > 255) namelen = 255;
+        memcpy(parts[n], dmeta + dir + 0x18, namelen);
+        parts[n][namelen] = 0;
+        n++;
+        dir = parent;
+    }
+    out[0] = 0;
+    for (int i = n - 1; i >= 0; i--) { strlcat(out, parts[i], cap); strlcat(out, "/", cap); }
+}
+
+static void rom_index(int fd) {
+    uint64_t h[10];
+    if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return;
+    // header: size, dir hash (off,size), dir meta (off,size), file hash (off,size), file meta (off,size), data off
+    uint64_t doff = h[3], dsz = h[4], foff = h[7], fsz = h[8];
+    rom_data_off = h[9];
+    uint8_t *dmeta = malloc(dsz), *fmeta = malloc(fsz);
+    if (pread(fd, dmeta, dsz, (off_t)doff) != (ssize_t)dsz || pread(fd, fmeta, fsz, (off_t)foff) != (ssize_t)fsz) return;
+    int cap = 4096;
+    rom_files = malloc(sizeof(RomFile) * cap);
+    for (uint64_t o = 0; o + 0x20 <= fsz;) {
+        uint32_t parent, namelen;
+        uint64_t data, size;
+        memcpy(&parent, fmeta + o, 4);
+        memcpy(&data, fmeta + o + 8, 8);
+        memcpy(&size, fmeta + o + 0x10, 8);
+        memcpy(&namelen, fmeta + o + 0x1C, 4);
+        char dir[1024], name[256];
+        rom_dir_path(dmeta, (uint32_t)dsz, parent, dir, sizeof dir);
+        uint32_t nl = namelen > 255 ? 255 : namelen;
+        memcpy(name, fmeta + o + 0x20, nl);
+        name[nl] = 0;
+        if (rom_nfiles == cap) { cap *= 2; rom_files = realloc(rom_files, sizeof(RomFile) * cap); }
+        char *path = malloc(strlen(dir) + nl + 1);
+        strcpy(path, dir);
+        strcat(path, name);
+        rom_files[rom_nfiles++] = (RomFile){rom_data_off + data, size, path};
+        o += 0x20 + ((namelen + 3) & ~3u);
+    }
+    qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
+    free(dmeta);
+    free(fmeta);
+    LOG("[fs] romfs index: %d files\n", rom_nfiles);
+}
+
+// Path of the RomFS file containing image offset `off` (NULL if none).
+const char *romfs_file_at(uint64_t off) {
+    int lo = 0, hi = rom_nfiles - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (off < rom_files[mid].off) hi = mid - 1;
+        else if (off >= rom_files[mid].off + rom_files[mid].size) lo = mid + 1;
+        else return rom_files[mid].path;
+    }
+    return NULL;
+}
+
+void romfs_file_read_hook(const char *path);
+
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
 typedef struct { int fd; uint64_t size; } Storage;
 
@@ -31,6 +109,15 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (size > b->size) size = b->size;
         ssize_t n = pread(st->fd, (void *)(uintptr_t)b->addr, size, (off_t)off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        {
+            const char *path = romfs_file_at(off);
+            static const char *last;
+            if (path && path != last) {
+                last = path;
+                if (getenv("LARECOMP_LOG_FILES")) LOG("[fs] read %s\n", path);
+                romfs_file_read_hook(path);
+            }
+        }
         static uint64_t reads, bytes;
         reads++;
         bytes += size;
@@ -48,6 +135,7 @@ static Service *open_romfs_storage(void) {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
         romfs_fd = open(path, O_RDONLY);
         if (romfs_fd < 0) FATAL("cannot open %s (extract it with hactool --romfs=)\n", path);
+        rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);
     st->fd = romfs_fd;

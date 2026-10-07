@@ -149,8 +149,12 @@ typedef struct {
     uint64_t checked_frame, full_frame;
     bool scalable;       // screen-shaped render target: allocated at the output resolution
     bool presented;      // has been shown by backend_present (a swapchain image)
+    uint64_t touched_frame;  // last frame it was written (cleared at the first write of a frame when reshaped)
     float sx, sy;        // allocation scale relative to the guest's size
 } TexBackend;
+
+static uint64_t frames, total_frames;
+uint64_t renderer_present_count(void) { return total_frames; }
 
 // Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
 // (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.
@@ -163,6 +167,23 @@ static bool tex_scalable(const NvnTexture *t) {
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;  // 16:9 (1920x1080 and its fractions, 704x396, 60x33...)
+}
+
+// First write this frame to a presented image while the output is reshaped: returns true once per frame.
+bool renderer_texture_first_write(NvnTexture *t) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    extern bool g_debug_frame;
+    if (g_debug_frame && b && b->presented)
+        LOG("[fw] tex %p %ux%u f%#x sx %.2f sy %.2f touched %llu now %llu\n", (void *)t, t->width, t->height, t->format,
+            b->sx, b->sy, (unsigned long long)b->touched_frame, (unsigned long long)total_frames + 1);
+    if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == total_frames + 1) return false;
+    b->touched_frame = total_frames + 1;
+    return true;
+}
+
+void renderer_texture_mark_presented(NvnTexture *t) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    if (b) b->presented = true;
 }
 
 bool renderer_texture_presented(NvnTexture *t) {
@@ -390,9 +411,10 @@ static const char *present_src =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct V { float4 pos [[position]]; float2 uv; };\n"
-    "vertex V vs(uint vid [[vertex_id]], constant float &flip [[buffer(0)]]) {\n"
+    "vertex V vs(uint vid [[vertex_id]], constant float4 *pv [[buffer(0)]]) {\n"
     "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
-    "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); o.uv = float2(p.x, flip > 0.5 ? p.y : 1.0 - p.y); return o; }\n"
+    "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1);\n"
+    "  float2 uv = float2(p.x, pv[0].x > 0.5 ? p.y : 1.0 - p.y); o.uv = pv[1].xy + uv * pv[1].zw; return o; }\n"
     "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return float4(t.sample(s, in.uv).rgb, 1.0); }\n";
 
@@ -475,8 +497,14 @@ void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     free(a);
     LOG("[metal] saved alpha %s (%lux%lu, max %u)\n", path, (unsigned long)w, (unsigned long)h, amax);
 }
+static float g_shot_crop[4] = {0, 0, 1, 1};  // presented crop of the current frame (screenshots match it)
 void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     NSUInteger w = tex.width, h = tex.height;
+    float shot_crop[4] = {0, 0, 1, 1};
+    if (strstr(path, "frame_")) {
+        memcpy(shot_crop, g_shot_crop, sizeof shot_crop);
+        w = (NSUInteger)(w * shot_crop[2]); h = (NSUInteger)(h * shot_crop[3]);
+    }
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                  width:w height:h mipmapped:NO];
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -499,7 +527,8 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
     [e setRenderPipelineState:pipe];
-    [e setVertexBytes:&flip length:4 atIndex:0];
+    float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
+    [e setVertexBytes:pv length:sizeof pv atIndex:0];
     [e setFragmentTexture:raw_view(tex) atIndex:0];
     [e setFragmentSamplerState:present_sampler atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -521,7 +550,7 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
 }
 
 // ================================================================== present
-static uint64_t frames, total_frames;
+
 static double last_fps_time;
 
 void backend_present(NvnTexture *t) {
@@ -550,25 +579,54 @@ void backend_present(NvnTexture *t) {
         double fit = fmin(dw / 1920.0, dh / 1080.0);
         static double forced = -1;
         if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-        // Widescreen: wider windows widen the camera instead of pillarboxing (the scene is rendered
-        // horizontally compressed in guest units and stretched back by a wider allocation).
+        // Any window shape: render targets match the window. Wider than 16:9 widens the camera, taller
+        // widens the vertical field of view (tools/patches.py); rooms that keep 16:9 framing (interiors)
+        // are letterboxed/pillarboxed instead.
         static double wide_test = -1;
         if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+        extern void widescreen_frame_end(uint64_t frame);
+        widescreen_frame_end(total_frames);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
-        double wide = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-        if (wide < 1.0 || !widescreen_allowed()) wide = 1.0;
-        widescreen_set_factor((float)wide);
-        double vh0 = wide > 1.0 ? dh / 1080.0 : fit;  // vertical scale
-        float scale = forced > 0 ? (float)forced : (float)fmax(vh0, 0.25);
-        renderer_set_scale(scale * (float)wide, scale);
+        double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
+        bool reshape = widescreen_allowed() && fabs(shape - 1.0) > 0.005;
+        double sx, sy, vx, vy, vw, vh;
+        if (!reshape) {  // 16:9 image fitted inside the window
+            sx = sy = forced > 0 ? forced : fmax(fit, 0.25);
+            vw = 1920.0 * fit; vh = 1080.0 * fit;
+            shape = 1.0;
+        } else if (wide_test > 0) {  // test: forced scale, wide_test times wider, fitted for viewing
+            sy = forced > 0 ? forced : fmax(fit, 0.25);
+            sx = sy * wide_test;
+            double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
+            vw = 1920.0 * wide_test * f2; vh = 1080.0 * f2;
+        } else {  // fill the window exactly
+            sx = dw / 1920.0; sy = dh / 1080.0;
+            if (forced > 0) { sx *= forced / sy; sy = forced; }
+            vw = dw; vh = dh;
+        }
+        vx = (dw - vw) / 2; vy = (dh - vh) / 2;
+        // Interior frames (16:9 backdrop drawn): show only the centre 16:9 region of the image.
+        extern bool widescreen_frame_boxed(uint64_t frame);
+        float crop[4] = {0, 0, 1, 1};  // uv origin and size
+        if (shape != 1.0 && widescreen_frame_boxed(total_frames)) {
+            if (shape > 1.0) {
+                crop[0] = (float)((1.0 - 1.0 / shape) / 2); crop[2] = (float)(1.0 / shape);
+                double nw = vw / shape; vx += (vw - nw) / 2; vw = nw;
+            } else {
+                crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
+                double nh = vh * shape; vy += (vh - nh) / 2; vh = nh;
+            }
+        }
+        widescreen_set_factor((float)shape);
+        renderer_set_scale((float)sx, (float)sy);
         if (b && b->tex) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
-            double vw = 1920.0 * fit * (wide_test > 0 ? 1 : wide), vh = 1080.0 * fit;
-            if (wide > 1.0 && wide_test <= 0) { vw = dw; vh = dh; }
-            [enc setViewport:(MTLViewport){(dw - vw) / 2, (dh - vh) / 2, vw, vh, 0, 1}];
+            [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
-            [enc setVertexBytes:&flip length:4 atIndex:0];
+            float pv[8] = {flip, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+            memcpy(g_shot_crop, crop, sizeof crop);
+            [enc setVertexBytes:pv length:sizeof pv atIndex:0];
             [enc setFragmentTexture:raw_view(b->tex) atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
