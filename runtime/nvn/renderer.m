@@ -20,6 +20,7 @@ static uint64_t stat_draws, stat_skipped, stat_passes;
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
+void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path);
 static char stats_text[128];
 
 // ------------------------------------------------------------------ state
@@ -520,7 +521,15 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     cache[key] = pr;
     dump_program(p);
     pr->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[0].code_addr, 0x10000, STAGE_VERTEX, vkey);
-    if (!pr->vi->msl) { LOG("[shader] VS translate failed: %s\n", pr->vi->error); pr->failed = true; return nil; }
+    if (!pr->vi->msl) {
+        LOG("[shader] VS translate failed: %s (code %llx)\n", pr->vi->error, p->stages[0].code_addr);
+        char path[128];
+        snprintf(path, sizeof path, "build/shaders/fail_%llx_s0_code.bin", p->stages[0].code_addr);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite((void *)(uintptr_t)p->stages[0].code_addr, 1, 0x4000, f); fclose(f); }
+        pr->failed = true;
+        return nil;
+    }
     fkey->vs_out_mask = pr->vi->out_mask;
     pr->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->stages[1].code_addr, 0x10000, STAGE_FRAGMENT, fkey);
     if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return nil; }
@@ -639,10 +648,25 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (g_debug_frame && e->tex && e->tex->addr) {
+                uint64_t total = tegra_total_size(&e->tex->layout), nz = 0;
+                const uint8_t *p = (const uint8_t *)(uintptr_t)e->tex->addr;
+                for (uint64_t k = 0; k < total; k++) nz += p[k] != 0;
+                LOG("[dtex] slot %d tex %ux%u f%#x addr %llx size %llu nonzero %llu gpu_owned %d\n", i, e->tex->width,
+                    e->tex->height, e->tex->format, e->tex->addr, total, nz, renderer_is_gpu_owned(e->tex));
+            }
         }
         if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
         if (!tex) tex = dummy_texture(st_->type);
         if (!smp) smp = default_sampler();
+        if (g_debug_frame && tex.textureType == MTLTextureType2D && stage == 1) {
+            static int dn;
+            char path[128];
+            snprintf(path, sizeof path, "build/dtex_%03d_%d.png", dn++, i);
+            renderer_save_texture(tex, path);
+            snprintf(path, sizeof path, "build/dtex_%03d_%d_a.png", dn - 1, i);
+            renderer_save_texture_alpha(tex, path);
+        }
         if (stage == 0) { [enc setVertexTexture:tex atIndex:i]; [enc setVertexSamplerState:smp atIndex:i]; }
         else { [enc setFragmentTexture:tex atIndex:i]; [enc setFragmentSamplerState:smp atIndex:i]; }
     }
@@ -759,7 +783,17 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr) { stat_skipped++; return; }
-    if (g_debug_frame) debug_draw(pr, r, indexed);
+    static int log_rt_w = -1, log_rt_h;
+    if (log_rt_w < 0) { const char *e = getenv("LARECOMP_LOG_RT"); log_rt_w = 0; if (e) sscanf(e, "%dx%d", &log_rt_w, &log_rt_h); }
+    static uint64_t log_rt_addr = 1;
+    if (log_rt_addr == 1) { const char *e = getenv("LARECOMP_LOG_RT_ADDR"); log_rt_addr = e ? strtoull(e, NULL, 16) : 0; }
+    bool addr_hit = false;
+    for (int i = 0; log_rt_addr && i < st.rt.ncolor; i++)
+        if (st.rt.color[i] && st.rt.color[i]->addr <= log_rt_addr + 0x40000 && st.rt.color[i]->addr + 0x40000 >= log_rt_addr) addr_hit = true;
+    if (addr_hit) LOG("[rtaddr] rt0 addr %llx\n", st.rt.color[0] ? st.rt.color[0]->addr : 0);
+    if (g_debug_frame || addr_hit || (log_rt_w && st.rt.ncolor && st.rt.color[0] && (int)st.rt.color[0]->width == log_rt_w &&
+                          (int)st.rt.color[0]->height == log_rt_h))
+        debug_draw(pr, r, indexed);
     begin_pass();
 
     // pipeline
@@ -965,6 +999,91 @@ static const char *copy_src =
     "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return t.sample(s, in.uv); }\n";
 
+// Bytes per block of the Metal texture backing an NVN format (RGB8 is expanded to RGBA8 on the host).
+static uint64_t renderer_pixel_format_bytes(MTLPixelFormat pf, uint64_t nvn_bpb) {
+    (void)pf;
+    return nvn_bpb == 3 ? 4 : nvn_bpb;
+}
+
+// Linear guest memory <-> texture region. Row/image strides of 0 mean tightly packed.
+static void copy_region_dims(NvnTexture *t, const TexRefRec *ref, const FormatInfo **fi, int32_t rg[6], int *level,
+                             uint64_t *row, uint64_t *img) {
+    *fi = nvn_format_info(t->format);
+    memcpy(rg, ref->region, sizeof ref->region);
+    if (!rg[3]) rg[3] = (int32_t)t->width;
+    if (!rg[4]) rg[4] = (int32_t)t->height;
+    if (!rg[5]) rg[5] = 1;
+    *level = ref->has_view && (ref->view.setmask & 1) ? ref->view.base_level : 0;
+    uint32_t wb = ((uint32_t)rg[3] + (*fi)->bw - 1) / (*fi)->bw, hb = ((uint32_t)rg[4] + (*fi)->bh - 1) / (*fi)->bh;
+    *row = st.copy_row_stride ? st.copy_row_stride : (uint64_t)wb * (*fi)->bpb;
+    *img = st.copy_image_stride ? st.copy_image_stride : *row * hb;
+}
+
+static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
+    NvnTexture *t = (NvnTexture *)(uintptr_t)dst->tex;
+    if (!t || !src) return;
+    end_pass();
+    const FormatInfo *fi;
+    int32_t rg[6];
+    int level;
+    uint64_t row, img;
+    copy_region_dims(t, dst, &fi, rg, &level, &row, &img);
+    if (!fi || !fi->bpb) return;
+    static int nlog;
+    if (nlog++ < 20) LOG("[copy] buf %llx -> tex %ux%u f%#x region %d,%d,%d %dx%dx%d row %llu lvl %d\n", src, t->width, t->height, t->format, rg[0], rg[1], rg[2], rg[3], rg[4], rg[5], row, level);
+    id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
+    id<MTLTexture> tex = renderer_texture(t, b, false);  // make sure prior CPU contents are uploaded first
+    renderer_mark_gpu_owned(t);
+    bool array = tex.textureType == MTLTextureType2DArray || tex.textureType == MTLTextureTypeCube;
+    uint32_t hb = ((uint32_t)rg[4] + fi->bh - 1) / fi->bh, wb = ((uint32_t)rg[3] + fi->bw - 1) / fi->bw;
+    uint64_t mtl_bpb = renderer_pixel_format_bytes(tex.pixelFormat, fi->bpb);
+    for (int z = 0; z < (array ? rg[5] : 1); z++) {
+        const uint8_t *s = (const uint8_t *)(uintptr_t)(src + (uint64_t)z * img);
+        uint64_t out_row = (uint64_t)wb * mtl_bpb;
+        uint8_t *data = malloc(out_row * hb * (array ? 1 : rg[5]));
+        for (int d = 0; d < (array ? 1 : rg[5]); d++)
+            for (uint32_t y = 0; y < hb; y++) {
+                const uint8_t *sr = s + (uint64_t)d * img + (uint64_t)y * row;
+                uint8_t *dr = data + ((uint64_t)d * hb + y) * out_row;
+                if (mtl_bpb == fi->bpb) memcpy(dr, sr, out_row);
+                else if (fi->bpb == 3 && mtl_bpb == 4)
+                    for (uint32_t x = 0; x < wb; x++) { memcpy(dr + x * 4, sr + x * 3, 3); dr[x * 4 + 3] = 255; }
+                else memset(dr, 0, out_row);
+            }
+        id<MTLBuffer> staging = [dev newBufferWithBytes:data length:out_row * hb * (array ? 1 : rg[5])
+                                                options:MTLResourceStorageModeShared];
+        free(data);
+        [b copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:out_row sourceBytesPerImage:out_row * hb
+               sourceSize:MTLSizeMake(rg[3], rg[4], array ? 1 : rg[5]) toTexture:tex
+         destinationSlice:array ? rg[2] + z : 0 destinationLevel:level
+        destinationOrigin:MTLOriginMake(rg[0], rg[1], array ? 0 : rg[2])];
+    }
+    [b endEncoding];
+}
+
+static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
+    NvnTexture *t = (NvnTexture *)(uintptr_t)src->tex;
+    if (!t || !dst || dst < HEAP_BASE) return;
+    end_pass();
+    const FormatInfo *fi;
+    int32_t rg[6];
+    int level;
+    uint64_t row, img;
+    copy_region_dims(t, src, &fi, rg, &level, &row, &img);
+    if (!fi || !fi->bpb) return;
+    id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
+    id<MTLTexture> tex = renderer_texture(t, b, false);
+    if (renderer_pixel_format_bytes(tex.pixelFormat, fi->bpb) != fi->bpb) { [b endEncoding]; return; }
+    bool array = tex.textureType == MTLTextureType2DArray || tex.textureType == MTLTextureTypeCube;
+    for (int z = 0; z < (array ? rg[5] : 1); z++)
+        [b copyFromTexture:tex sourceSlice:array ? rg[2] + z : 0 sourceLevel:level
+              sourceOrigin:MTLOriginMake(rg[0], rg[1], array ? 0 : rg[2])
+                sourceSize:MTLSizeMake(rg[3], rg[4], array ? 1 : rg[5]) toBuffer:g_guest_buffer
+         destinationOffset:dst - HEAP_BASE + (uint64_t)z * img destinationBytesPerRow:row destinationBytesPerImage:img];
+    [b endEncoding];
+    renderer_flush();  // the CPU may read the result right after the fence
+}
+
 static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
@@ -973,6 +1092,14 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     renderer_mark_gpu_owned(dt);
     id<MTLTexture> d = view_texture(dt, &dst->view, dst->has_view, true, nil);
     const int32_t *sr = src->region, *dr = dst->region;
+    if (g_debug_frame || (dt->width == 720 && dt->height == 41)) {
+        static int nl;
+        uint64_t total = tegra_total_size(&st_->layout), nz = 0;
+        for (uint64_t k = 0; k < total && st_->addr; k++) nz += ((const uint8_t *)(uintptr_t)st_->addr)[k] != 0;
+        if (nl < 40) LOG("[copytex] src addr %llx size %llu nonzero %llu tflags %#x stride %u bh %u\n", st_->addr, total, nz, st_->flags, st_->stride, st_->layout.block_height_log2);
+        if (nl++ < 40) LOG("[copytex] %ux%u f%#x (%d,%d %dx%d) -> %ux%u f%#x (%d,%d %dx%d) flags %llx src_gpu %d\n", st_->width, st_->height, st_->format,
+            sr[0], sr[1], sr[3], sr[4], dt->width, dt->height, dt->format, dr[0], dr[1], dr[3], dr[4], flags, renderer_is_gpu_owned(st_));
+    }
     int sw = sr[3] ? sr[3] : (int)s.width, sh = sr[4] ? sr[4] : (int)s.height;
     int dw = dr[3] ? dr[3] : (int)d.width, dh = dr[4] ? dr[4] : (int)d.height;
     if (renderer_format_is_depth(dt->format) || (s.pixelFormat == d.pixelFormat && sw == dw && sh == dh && s.sampleCount == d.sampleCount)) {
@@ -1192,6 +1319,8 @@ static void exec_list(uint64_t handle, int depth) {
             copy_texture(&t[0], &t[1], 1);
             break;
         }
+        case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);

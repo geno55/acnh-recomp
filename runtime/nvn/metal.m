@@ -266,6 +266,7 @@ id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, b
 }
 
 void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
+bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
@@ -327,6 +328,36 @@ id<MTLCommandQueue> renderer_queue(void) { return queue; }
 
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
 static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_texture(tex, path); }
+
+// Debug: dump an 8-bit-per-channel 2D texture's raw bytes (alpha kept, written as a separate grey PNG).
+void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
+    if (tex.pixelFormat != MTLPixelFormatRGBA8Unorm && tex.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
+        tex.pixelFormat != MTLPixelFormatBGRA8Unorm)
+        return;
+    NSUInteger w = tex.width, h = tex.height;
+    id<MTLBuffer> buf = [dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    [b copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
+              toBuffer:buf destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
+    [b endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    const uint8_t *px = buf.contents;
+    uint8_t *a = malloc(w * h);
+    unsigned amax = 0;
+    for (NSUInteger i = 0; i < w * h; i++) { a[i] = px[i * 4 + 3]; if (a[i] > amax) amax = a[i]; }
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceGray();
+    CGContextRef ctx = CGBitmapContextCreate(a, w, h, 8, w, cs, kCGImageAlphaNone);
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
+    CGImageDestinationAddImage(dest, img, NULL);
+    CGImageDestinationFinalize(dest);
+    CFRelease(dest); CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+    free(a);
+    LOG("[metal] saved alpha %s (%lux%lu, max %u)\n", path, (unsigned long)w, (unsigned long)h, amax);
+}
 void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     NSUInteger w = tex.width, h = tex.height;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -380,7 +411,13 @@ void backend_present(NvnTexture *t) {
     renderer_flush();
     TexBackend *b = t->backend;
     @autoreleasepool {
+        uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
+        uint64_t nd = SDL_GetTicksNS() - nd0;
+        if (nd > 30000000) {
+            static int warned;
+            if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
+        }
         if (!drawable) return;
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];

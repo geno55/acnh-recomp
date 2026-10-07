@@ -11,6 +11,7 @@ extern uint64_t g_guest_buffer_base;
 #endif
 #include <SDL3/SDL_events.h>
 
+bool renderer_is_gpu_owned(NvnTexture *t);
 void renderer_flush(void);  // finish all recorded GPU work
 bool renderer_origin_lower_left(void);
 const char *renderer_stats(void);
