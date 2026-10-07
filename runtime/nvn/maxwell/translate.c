@@ -812,12 +812,18 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sprintf(t, "(%s ? %s : %s)", P((int)bits(w, 39, 3), bits(w, 42, 1)), R(a), B(false));
         set_reg(c, d, t);
     } else if (OPM(0x5cb0000000000000ull, 0xfff8000000000000ull) || OPM(0x4cb0000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0x38b0000000000000ull, 0xfef8000000000000ull)) {  // F2I
-        const char *x = NA(F(B(true)), bits(w, 45, 1), bits(w, 49, 1));
+               OPM(0x38b0000000000000ull, 0xfef8000000000000ull)) {  // F2I (src fmt bits 10-11: 1 F16; dst size bits 8-9)
+        char srcv[512];
+        if (bits(w, 10, 2) == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
+        else strcpy(srcv, F(B(true)));
+        const char *x = NA(srcv, bits(w, 45, 1), bits(w, 49, 1));
         int rnd = (int)bits(w, 39, 2);
-        bool sgn = bits(w, 12, 1);
+        bool sgn = bits(w, 12, 1), i16 = bits(w, 8, 2) == 1;
         static const char *const rf[] = {"rint", "floor", "ceil", "trunc"};
-        sprintf(t, sgn ? "uint(int(clamp(%s(%s), -2147483648.0f, 2147483520.0f)))" : "uint(clamp(%s(%s), 0.0f, 4294967040.0f))", rf[rnd], x);
+        if (i16)
+            sprintf(t, sgn ? "uint(int(clamp(%s(%s), -32768.0f, 32767.0f)))" : "uint(clamp(%s(%s), 0.0f, 65535.0f))", rf[rnd], x);
+        else
+            sprintf(t, sgn ? "uint(int(clamp(%s(%s), -2147483648.0f, 2147483520.0f)))" : "uint(clamp(%s(%s), 0.0f, 4294967040.0f))", rf[rnd], x);
         set_reg(c, d, t);
     } else if (OPM(0x5cb8000000000000ull, 0xfff8000000000000ull) || OPM(0x4cb8000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x38b8000000000000ull, 0xfef8000000000000ull)) {  // I2F
@@ -829,10 +835,20 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else if (sz == 1) sprintf(src, sgn ? "int(short((%s >> %d) & 0xFFFF))" : "((%s >> %d) & 0xFFFFu)", bv, sel * 8);
         else sprintf(src, sgn ? "int(%s)" : "%s", bv);
         sprintf(u, "float(%s)", src);
-        set_reg(c, d, FRES(NA(u, bits(w, 45, 1), bits(w, 49, 1)), false));
+        if (bits(w, 8, 2) == 1) {  // F16 result in the low half
+            char h[700];
+            snprintf(h, sizeof h, "(uint(as_type<ushort>(half(%s))))", NA(u, bits(w, 45, 1), bits(w, 49, 1)));
+            set_reg(c, d, h);
+        } else {
+            set_reg(c, d, FRES(NA(u, bits(w, 45, 1), bits(w, 49, 1)), false));
+        }
     } else if (OPM(0x5ca8000000000000ull, 0xfff8000000000000ull) || OPM(0x4ca8000000000000ull, 0xfff8000000000000ull) ||
-               OPM(0x38a8000000000000ull, 0xfef8000000000000ull)) {  // F2F
-        const char *x = NA(F(B(true)), bits(w, 45, 1), bits(w, 49, 1));
+               OPM(0x38a8000000000000ull, 0xfef8000000000000ull)) {  // F2F (formats: 1 F16, 2 F32; bit 41 = high half)
+        int dfmt = (int)bits(w, 8, 2), sfmt = (int)bits(w, 10, 2);
+        char srcv[512];
+        if (sfmt == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
+        else strcpy(srcv, F(B(true)));
+        const char *x = NA(srcv, bits(w, 45, 1), bits(w, 49, 1));
         int mode = (int)((bits(w, 39, 2)) | (bits(w, 42, 1) << 2));
         switch (mode) {
         case 4: sprintf(t, "rint(%s)", x); break;
@@ -841,7 +857,13 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         case 7: sprintf(t, "trunc(%s)", x); break;
         default: sprintf(t, "%s", x);
         }
-        set_reg(c, d, FRES(t, bits(w, 50, 1)));
+        if (dfmt == 1) {  // F16 result in the low half, high half zero
+            char h[1100];
+            snprintf(h, sizeof h, "(uint(as_type<ushort>(half(%s))))", bits(w, 50, 1) ? (sprintf(u, "saturate(%s)", t), u) : t);
+            set_reg(c, d, h);
+        } else {
+            set_reg(c, d, FRES(t, bits(w, 50, 1)));
+        }
     } else if (OPM(0x5c10000000000000ull, 0xfff8000000000000ull) || OPM(0x4c10000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x3810000000000000ull, 0xfef8000000000000ull)) {  // IADD
         if (bits(w, 43, 1) || bits(w, 47, 1)) c->uses_cc = true;
