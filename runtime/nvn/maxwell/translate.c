@@ -1218,7 +1218,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     c->ipa_mode = -1;
     const uint8_t *sph = blob + 0x30;
     const uint8_t *code = blob + 0x80;
-    // compute programs have no SPH, but their code also starts at +0x80
+    // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
+    if (stage == STAGE_COMPUTE) code = blob;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
