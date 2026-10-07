@@ -357,6 +357,11 @@ class Module:
             if a in labels:
                 flush()
                 out.append(f'L_{a:x}:;')
+            if a in PATCHES:  # hand-written replacement for one instruction (tools/patches.py)
+                flush()
+                out.append('    ' + PATCHES[a](self, a))
+                last = 'op'
+                continue
             k = ins.kind
             if k == 'asm':
                 if len(batch) >= 24:
@@ -411,6 +416,9 @@ class Module:
         out.append('}')
         self._refs = refs
         return out
+
+
+from patches import PATCHES
 
 
 def main():

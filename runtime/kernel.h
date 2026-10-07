@@ -29,6 +29,8 @@ struct KThread {
     uint64_t wait_addr, wait_mutex;
     uint32_t wait_tag, wait_result;
     KThread *wnext;
+    KThread *snext;        // in WaitSynchronization (g_syncwaiters)
+    pthread_cond_t cond;   // each thread sleeps on its own condition; wakers signal it directly
 };
 
 typedef struct KSharedMem {

@@ -225,7 +225,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             int comp = (addr >> 2) & 3;
             if (comp < 2) {  // guest pixel units: the render target may be allocated larger
                 c->uses_rscale = true;
-                sprintf(e, "as_type<uint>(in.pos[%d] / rscale[0][%d])", comp, comp);
+                sprintf(e, "as_type<uint>((in.pos[%d] - rscale[0][%d]) / rscale[0][%d])", comp, comp + 2, comp);
             } else {
                 sprintf(e, "as_type<uint>(in.pos[%d])", comp);
             }

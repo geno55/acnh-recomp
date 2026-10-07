@@ -1,3 +1,4 @@
+#include <sys/mman.h>
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
@@ -147,6 +148,7 @@ typedef struct {
     uint64_t data_hash, sample_hash;
     uint64_t checked_frame, full_frame;
     bool scalable;       // screen-shaped render target: allocated at the output resolution
+    bool presented;      // has been shown by backend_present (a swapchain image)
     float sx, sy;        // allocation scale relative to the guest's size
 } TexBackend;
 
@@ -161,6 +163,11 @@ static bool tex_scalable(const NvnTexture *t) {
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;  // 16:9 (1920x1080 and its fractions, 704x396, 60x33...)
+}
+
+bool renderer_texture_presented(NvnTexture *t) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    return b && b->presented;
 }
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy) {
@@ -291,7 +298,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     b->checked_frame = g_frame_counter;
     if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
-    bool full = b->dynamic || !b->uploaded;
+    static int always_full = -1;
+    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!full) {
         uint64_t sh = fnv_sample(mem, total);
@@ -407,6 +416,12 @@ void backend_init(void) {
                                            options:MTLResourceStorageModeShared deallocator:nil];
     if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer (max %llu)\n", (uint64_t)dev.maxBufferLength);
     renderer_init(dev);
+    if (getenv("LARECOMP_ASPECT_TEST")) {  // experiment: widen the game's 16:9 aspect constant
+        float *k = (float *)(uintptr_t)0x70016afba4ull;
+        mprotect((void *)((uintptr_t)k & ~0x3fffull), 0x4000, PROT_READ | PROT_WRITE);
+        LOG("[aspect] constant %f -> %f\n", *k, (float)atof(getenv("LARECOMP_ASPECT_TEST")));
+        *k = (float)atof(getenv("LARECOMP_ASPECT_TEST"));
+    }
     LOG("[metal] %s, heap buffer %llu MB\n", dev.name.UTF8String, (uint64_t)HEAP_MAX >> 20);
 }
 
@@ -513,6 +528,7 @@ void backend_present(NvnTexture *t) {
     extern void renderer_submit(void);
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
+    if (b) b->presented = true;
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -534,11 +550,22 @@ void backend_present(NvnTexture *t) {
         double fit = fmin(dw / 1920.0, dh / 1080.0);
         static double forced = -1;
         if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-        float scale = forced > 0 ? (float)forced : (float)fmax(fit, 0.25);
-        renderer_set_scale(scale, scale);
+        // Widescreen: wider windows widen the camera instead of pillarboxing (the scene is rendered
+        // horizontally compressed in guest units and stretched back by a wider allocation).
+        static double wide_test = -1;
+        if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+        extern void widescreen_set_factor(float f);
+        extern bool widescreen_allowed(void);
+        double wide = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
+        if (wide < 1.0 || !widescreen_allowed()) wide = 1.0;
+        widescreen_set_factor((float)wide);
+        double vh0 = wide > 1.0 ? dh / 1080.0 : fit;  // vertical scale
+        float scale = forced > 0 ? (float)forced : (float)fmax(vh0, 0.25);
+        renderer_set_scale(scale * (float)wide, scale);
         if (b && b->tex) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
-            double vw = 1920.0 * fit, vh = 1080.0 * fit;
+            double vw = 1920.0 * fit * (wide_test > 0 ? 1 : wide), vh = 1080.0 * fit;
+            if (wide > 1.0 && wide_test <= 0) { vw = dw; vh = dh; }
             [enc setViewport:(MTLViewport){(dw - vw) / 2, (dh - vh) / 2, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
             [enc setVertexBytes:&flip length:4 atIndex:0];

@@ -105,6 +105,10 @@ static id<MTLCommandBuffer> cb(void) {
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
 void renderer_get_scale(float *sx, float *sy);
 static float pass_sx = 1, pass_sy = 1;  // allocation scale of the current pass's attachments
+bool renderer_texture_presented(NvnTexture *t);
+// Widescreen UI: 2D draws into the swapchain image use a centred 16:9 region (uniform scale) instead of
+// the stretched wide mapping. vp_* is the mapping for the current draw: physical = guest * s + off.
+static float vp_sx = 1, vp_sy = 1, vp_ox = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
 #define RSCALE_BUFFER_INDEX 18
 
@@ -239,6 +243,7 @@ static void begin_pass(void) {
         rp.defaultRasterSampleCount = 1;
     }
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
     stat_passes++;
 }
 
@@ -257,9 +262,10 @@ static void apply_scissor(void) {
     pass_size(&w, &h);
     if (!w) return;
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
-    if (pass_sx != 1 || pass_sy != 1) {
-        double x0 = floor(x * (double)pass_sx), y0 = floor(y * (double)pass_sy);
-        double x1 = ceil(((double)x + sw) * pass_sx), y1 = ceil(((double)y + sh) * pass_sy);
+    if (vp_sx != 1 || vp_sy != 1 || vp_ox != 0) {
+        double x0 = floor(x * (double)vp_sx + vp_ox), y0 = floor(y * (double)vp_sy);
+        double x1 = ceil(((double)x + sw) * vp_sx + vp_ox), y1 = ceil(((double)y + sh) * vp_sy);
+        if (sw >= 16384) x1 = 1e9;  // "unbounded" scissors stay unbounded
         if (x1 > 1e9) x1 = 1e9;
         if (y1 > 1e9) y1 = 1e9;
         x = (int)x0; y = (int)y0; sw = (int)(x1 - x0); sh = (int)(y1 - y0);
@@ -314,6 +320,12 @@ static void attachment_formats(MTLRenderPipelineDescriptor *pd) {
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
                   uint32_t sval, uint32_t smask) {
     begin_pass();
+    if (g_debug_frame) {
+        int pw, ph;
+        pass_size(&pw, &ph);
+        LOG("[clear] pass %d idx %d depth %d (%g) stencil %d | pass %dx%d scissor %d,%d %dx%d\n", debug_pass_no, index, depth,
+            dval, stencil, pw, ph, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3]);
+    }
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     id<MTLLibrary> lib = clear_lib(index < 0 ? 0 : index);
     pd.vertexFunction = [lib newFunctionWithName:@"vs"];
@@ -357,6 +369,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     int w, h;
     pass_size(&w, &h);
     [enc setViewport:(MTLViewport){0, 0, w, h, 0, 1}];
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
     apply_scissor();
     float d4[4] = {dval, 0, 0, 0};
     [enc setVertexBytes:d4 length:16 atIndex:0];
@@ -1415,8 +1428,6 @@ static void draw(CmdRec *r, bool indexed) {
     [enc setTriangleFillMode:st.poly[2] == 1 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
-    [enc setViewport:(MTLViewport){vp[0] * pass_sx, vp[1] * pass_sy, vp[2] * pass_sx, vp[3] * pass_sy, zn, zf}];
-    apply_scissor();
 
     // resources
     bind_cbufs(0, pr->vi);
@@ -1432,8 +1443,21 @@ static void draw(CmdRec *r, bool indexed) {
     if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
+    vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0;
+    if (pass_sx > pass_sy * 1.01f && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+        bool reads_scene = false;  // the scene composite samples the wide scene; UI samples atlases/fonts/video
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) if (tex_sc[1][i][0] != 1) reads_scene = true;
+        if (!reads_scene) {
+            int pw, ph;
+            pass_size(&pw, &ph);
+            vp_sx = pass_sy;
+            vp_ox = (pw - st.rt.color[0]->width * pass_sy) * 0.5f;
+        }
+    }
+    [enc setViewport:(MTLViewport){vp[0] * vp_sx + vp_ox, vp[1] * vp_sy, vp[2] * vp_sx, vp[3] * vp_sy, zn, zf}];
+    apply_scissor();
     if (pr->fi->uses_rscale) {  // [0] = render target scale, [1 + i] = scale of texture i
-        float rs[65][4] = {{pass_sx, pass_sy, 0, 0}};
+        float rs[65][4] = {{vp_sx, vp_sy, vp_ox, 0}};
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
         [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
@@ -1634,6 +1658,12 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     uint64_t row, img;
     copy_region_dims(t, src, &fi, rg, &level, &row, &img);
     if (!fi || !fi->bpb) return;
+    {
+        static int nlog;
+        if (nlog++ < 12 || getenv("LARECOMP_LOG_READBACK"))
+            LOG("[readback] tex %ux%u f%#x level %d region %d,%d %dx%d -> %llx row %llu\n", t->width, t->height,
+                t->format, level, rg[0], rg[1], rg[3], rg[4], dst, row);
+    }
     id<MTLTexture> tex = renderer_texture(t, nil, false);
     float tsx, tsy;
     renderer_texture_scale(t, &tsx, &tsy);
@@ -1937,6 +1967,9 @@ static void exec_list(uint64_t handle, int depth) {
         }
         case CMD_REPORT_COUNTER: {
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
+            static uint32_t seen;
+            uint32_t type = (uint32_t)r->x[0];
+            if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
             if (out) { out[0] = 0; out[1] = SDL_GetTicksNS(); }
             break;
         }

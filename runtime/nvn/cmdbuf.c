@@ -316,17 +316,37 @@ NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
 // ---- draws (all integer arguments fit in x1..x7)
 NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
 NVN(nvnCommandBufferDrawArraysInstanced) { Snap s = snap(c); record(c, CMD_DRAW_ARRAYS, 0, &s); }
+// Debug: LARECOMP_TRACE_COUNT=<n> logs the guest call chain of indexed draws with n indices.
+static void trace_draw(Cpu *c, uint64_t count) {
+    static long want = -2;
+    if (want == -2) want = getenv("LARECOMP_TRACE_COUNT") ? atol(getenv("LARECOMP_TRACE_COUNT")) : -1;
+    if (want < 0 || (long)count != want) return;
+    static int n;
+    if (n++ > 40) return;
+    LOG("[trace] draw count %llu lr %llx chain:", (unsigned long long)count, (unsigned long long)c->x[30]);
+    uint64_t fp = c->x[29];
+    for (int i = 0; i < 14 && fp >= 0x7000000000ull && fp < 0x8000000000ull && (fp & 7) == 0; i++) {
+        uint64_t next = *(uint64_t *)(uintptr_t)fp, lr = *(uint64_t *)(uintptr_t)(fp + 8);
+        LOG(" %llx", (unsigned long long)lr);
+        if (next <= fp) break;
+        fp = next;
+    }
+    LOG("\n");
+}
+
 NVN(nvnCommandBufferDrawElements) {
+    trace_draw(c, c->x[3]);
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_DRAW_ELEMENTS, 0, &s);
     r->x[4] = 0; r->x[5] = 0; r->x[6] = 1;  // base vertex, base instance, instances
 }
 NVN(nvnCommandBufferDrawElementsBaseVertex) {
+    trace_draw(c, c->x[3]);
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_DRAW_ELEMENTS, 0, &s);
     r->x[5] = 0; r->x[6] = 1;
 }
-NVN(nvnCommandBufferDrawElementsInstanced) { Snap s = snap(c); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
+NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); Snap s = snap(c); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }

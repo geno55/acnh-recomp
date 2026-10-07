@@ -29,7 +29,6 @@
 #define WAITERS_BIT 0x40000000u
 
 pthread_mutex_t g_klock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_kcond = PTHREAD_COND_INITIALIZER;
 static __thread KThread *t_cur;
 
 // ------------------------------------------------------------------ handle table
@@ -67,10 +66,15 @@ static void handle_close(uint32_t h) {
     o->refs--;
 }
 
+// Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
+static KThread *g_syncwaiters;
+
+static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
+
 void kernel_signal(KObject *o) {
     // caller holds g_klock
     o->signaled = true;
-    pthread_cond_broadcast(&g_kcond);
+    for (KThread *t = g_syncwaiters; t; t = t->snext) wake(t);
 }
 
 // ------------------------------------------------------------------ time
@@ -79,6 +83,9 @@ static mach_timebase_info_data_t tb;
 uint64_t rt_ticks(void) {
     // 19.2 MHz system tick
     uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
+    static double scale = -1;
+    if (scale < 0) scale = getenv("LARECOMP_TICK_SCALE") ? atof(getenv("LARECOMP_TICK_SCALE")) : 1.0;
+    if (scale != 1.0) ns = (uint64_t)(ns * scale);
     return (uint64_t)((__uint128_t)ns * 192 / 10000);
 }
 
@@ -89,13 +96,15 @@ static void deadline(struct timespec *ts, int64_t timeout_ns) {
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
 
-// Wait on the global condition. Returns false on timeout. Caller holds g_klock.
+// Sleep on the current thread's condition. Returns false on timeout. Caller holds g_klock.
+static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
+    pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     if (timeout_ns < 0) {
-        pthread_cond_wait(&g_kcond, &g_klock);
+        pthread_cond_wait(cv, &g_klock);
         return true;
     }
-    return pthread_cond_timedwait(&g_kcond, &g_klock, ts) == 0;
+    return pthread_cond_timedwait(cv, &g_klock, ts) == 0;
 }
 
 // ------------------------------------------------------------------ memory map
@@ -165,6 +174,7 @@ static void *thread_main(void *arg) {
 
 static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int prio, int core) {
     KThread *t = calloc(1, sizeof *t);
+    pthread_cond_init(&t->cond, NULL);
     t->obj.type = KOBJ_THREAD;
     t->entry = entry;
     t->prio = prio;
@@ -242,7 +252,7 @@ static void mutex_release(uint64_t addr) {
     __atomic_store_n(u32p(addr), next->handle | (count > 1 ? WAITERS_BIT : 0), __ATOMIC_SEQ_CST);
     next->wait_kind = WAIT_NONE;
     next->wait_result = R_OK;
-    pthread_cond_broadcast(&g_kcond);
+    wake(next);
 }
 
 KThread *g_waitlist;
@@ -337,6 +347,7 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
         best->wait_result = R_OK;
         if (mutex_acquire_or_mark(m, best->wait_tag)) {
             best->wait_kind = WAIT_NONE;
+            wake(best);
         } else {
             best->wait_kind = WAIT_MUTEX;
             best->wait_addr = m;
@@ -345,7 +356,6 @@ static void svc_signal_process_wide_key(uint64_t key, int32_t count) {
     for (KThread *t = g_waitlist; t; t = t->wnext)
         if (t->wait_kind == WAIT_CONDVAR && t->wait_addr == key) any_left = true;
     if (!any_left) __atomic_store_n(u32p(key), 0, __ATOMIC_SEQ_CST);
-    pthread_cond_broadcast(&g_kcond);
     pthread_mutex_unlock(&g_klock);
 }
 
@@ -379,10 +389,10 @@ static int arbiter_wake(uint64_t addr, int32_t count) {
         if (t->wait_kind == WAIT_ARBITER && t->wait_addr == addr) {
             t->wait_kind = WAIT_NONE;
             t->wait_result = R_OK;
+            wake(t);
             woken++;
         }
     }
-    pthread_cond_broadcast(&g_kcond);
     return woken;
 }
 
@@ -428,7 +438,11 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (t->cancel) { t->cancel = false; r = R_CANCELLED; goto out; }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
         t->in_sync_wait = true;
+        t->snext = g_syncwaiters;
+        g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
+        for (KThread **p = &g_syncwaiters; *p; p = &(*p)->snext)
+            if (*p == t) { *p = t->snext; break; }
         t->in_sync_wait = false;
         if (!ok) { r = R_TIMEOUT; goto out; }
     }
@@ -625,7 +639,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KObject *o = handle_get((uint32_t)x[0]);
         if (o && o->type == KOBJ_THREAD) {
             ((KThread *)o)->cancel = true;
-            pthread_cond_broadcast(&g_kcond);
+            wake((KThread *)o);
             x[0] = R_OK;
         } else x[0] = R_INVALID_HANDLE;
         pthread_mutex_unlock(&g_klock);
