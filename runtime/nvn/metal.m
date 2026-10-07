@@ -146,7 +146,28 @@ typedef struct {
     bool dynamic;        // contents changed after the first upload: verify fully every frame
     uint64_t data_hash, sample_hash;
     uint64_t checked_frame, full_frame;
+    bool scalable;       // screen-shaped render target: allocated at the output resolution
+    float sx, sy;        // allocation scale relative to the guest's size
 } TexBackend;
+
+// Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
+// (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.
+static float g_rs_x = 1, g_rs_y = 1;
+void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
+void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
+
+static bool tex_scalable(const NvnTexture *t) {
+    if (getenv("LARECOMP_NO_SCALE")) return false;
+    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
+    float a = (float)t->width / (float)t->height;
+    return a > 1.74f && a < 1.81f;  // 16:9 (1920x1080 and its fractions, 704x396, 60x33...)
+}
+
+void renderer_texture_scale(NvnTexture *t, float *sx, float *sy) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    if (b && b->scalable) { *sx = b->sx; *sy = b->sy; }
+    else { *sx = 1; *sy = 1; }
+}
 
 static MTLTextureType mtl_tex_type(uint32_t target, uint32_t samples) {
     switch (target) {
@@ -162,20 +183,49 @@ static MTLTextureType mtl_tex_type(uint32_t target, uint32_t samples) {
     }
 }
 
+static void create_backend_texture(NvnTexture *t, TexBackend *b);
+
 static TexBackend *tex_backend(NvnTexture *t) {
-    if (t->backend) return (TexBackend *)t->backend;
+    if (t->backend) {
+        TexBackend *b = (TexBackend *)t->backend;
+        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
+            CFBridgingRelease((__bridge CFTypeRef)b->tex);
+            create_backend_texture(t, b);
+        }
+        return b;
+    }
     TexBackend *b = calloc(1, sizeof *b);
+    b->scalable = tex_scalable(t);
+    create_backend_texture(t, b);
+    t->backend = b;
+    return b;
+}
+
+static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     MtlFormat mf = mtl_format(t->format);
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = mtl_tex_type(t->target, t->samples);
     d.pixelFormat = mf.pf;
-    d.width = t->width ? t->width : 1;
-    d.height = (t->target == 0 || t->target == 3) ? 1 : (t->height ? t->height : 1);
+    b->sx = b->scalable ? g_rs_x : 1;
+    b->sy = b->scalable ? g_rs_y : 1;
+    uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
+    if (b->scalable) {
+        tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
+        if (tw < 1) tw = 1;
+        if (th < 1) th = 1;
+    }
+    d.width = tw;
+    d.height = (t->target == 0 || t->target == 3) ? 1 : th;
     d.depth = t->target == 2 ? (t->depth ? t->depth : 1) : 1;
     if (t->target == 3) d.arrayLength = t->height ? t->height : 1;
     else if (t->target == 4 || t->target == 6) d.arrayLength = t->depth ? t->depth : 1;
     else if (t->target == 9) d.arrayLength = (t->depth ? t->depth : 6) / 6;
     d.mipmapLevelCount = t->levels ? t->levels : 1;
+    if (b->scalable) {
+        uint32_t m = 1, sz = tw > th ? tw : th;
+        while (sz > 1) { sz >>= 1; m++; }
+        if (d.mipmapLevelCount > m) d.mipmapLevelCount = m;
+    }
     if (t->samples > 1) { d.sampleCount = t->samples; d.mipmapLevelCount = 1; }
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget |
               MTLTextureUsageShaderWrite;
@@ -196,8 +246,6 @@ static TexBackend *tex_backend(NvnTexture *t) {
     tex.label = [NSString stringWithFormat:@"%s fmt%#x", t->label[0] ? t->label : "tex", t->format];
     b->tex = tex;
     CFBridgingRetain(tex);
-    t->backend = b;
-    return b;
 }
 
 void backend_texture_destroyed(NvnTexture *t) {
@@ -481,8 +529,17 @@ void backend_present(NvnTexture *t) {
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        // Next frame's render resolution follows the window: the 1920x1080 image scaled to fit.
+        double dw = drawable.texture.width, dh = drawable.texture.height;
+        double fit = fmin(dw / 1920.0, dh / 1080.0);
+        static double forced = -1;
+        if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
+        float scale = forced > 0 ? (float)forced : (float)fmax(fit, 0.25);
+        renderer_set_scale(scale, scale);
         if (b && b->tex) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
+            double vw = 1920.0 * fit, vh = 1080.0 * fit;
+            [enc setViewport:(MTLViewport){(dw - vw) / 2, (dh - vh) / 2, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
             [enc setVertexBytes:&flip length:4 atIndex:0];
             [enc setFragmentTexture:raw_view(b->tex) atIndex:0];

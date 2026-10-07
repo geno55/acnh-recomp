@@ -102,6 +102,12 @@ static id<MTLCommandBuffer> cb(void) {
     return cmdbuf;
 }
 
+void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
+void renderer_get_scale(float *sx, float *sy);
+static float pass_sx = 1, pass_sy = 1;  // allocation scale of the current pass's attachments
+static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
+#define RSCALE_BUFFER_INDEX 18
+
 static int debug_pass_no;
 static void end_pass(void) {
     if (enc) {
@@ -209,6 +215,7 @@ static void begin_pass(void) {
         rp.colorAttachments[i].texture = tex;
         rp.colorAttachments[i].loadAction = MTLLoadActionLoad;
         rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+        if (!w) renderer_texture_scale(t, &pass_sx, &pass_sy);
         w = (int)tex.width; h = (int)tex.height;
     }
     if (st.rt.depth) {
@@ -224,9 +231,10 @@ static void begin_pass(void) {
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
         }
-        if (!w) { w = (int)tex.width; h = (int)tex.height; }
+        if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = (int)tex.width; h = (int)tex.height; }
     }
     if (!w) {
+        pass_sx = pass_sy = 1;
         rp.renderTargetWidth = 16; rp.renderTargetHeight = 16;
         rp.defaultRasterSampleCount = 1;
     }
@@ -234,11 +242,14 @@ static void begin_pass(void) {
     stat_passes++;
 }
 
+// Physical size of the current pass (guest size times the attachments' allocation scale).
 static void pass_size(int *w, int *h) {
     *w = *h = 0;
     for (int i = 0; i < st.rt.ncolor && !*w; i++)
         if (st.rt.color[i]) { *w = (int)st.rt.color[i]->width; *h = (int)st.rt.color[i]->height; }
     if (!*w && st.rt.depth) { *w = (int)st.rt.depth->width; *h = (int)st.rt.depth->height; }
+    *w = (int)lroundf(*w * pass_sx);
+    *h = (int)lroundf(*h * pass_sy);
 }
 
 static void apply_scissor(void) {
@@ -246,6 +257,13 @@ static void apply_scissor(void) {
     pass_size(&w, &h);
     if (!w) return;
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
+    if (pass_sx != 1 || pass_sy != 1) {
+        double x0 = floor(x * (double)pass_sx), y0 = floor(y * (double)pass_sy);
+        double x1 = ceil(((double)x + sw) * pass_sx), y1 = ceil(((double)y + sh) * pass_sy);
+        if (x1 > 1e9) x1 = 1e9;
+        if (y1 > 1e9) y1 = 1e9;
+        x = (int)x0; y = (int)y0; sw = (int)(x1 - x0); sh = (int)(y1 - y0);
+    }
     if (x < 0) { sw += x; x = 0; }
     if (y < 0) { sh += y; y = 0; }
     if (x >= w || y >= h) { x = y = 0; sw = sh = 0; }
@@ -829,9 +847,11 @@ static void bind_textures(int stage, ShaderInfo *si) {
         id<MTLTexture> tex = nil;
         id<MTLSamplerState> smp = nil;
         uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+        tex_sc[stage][i][0] = tex_sc[stage][i][1] = 1;
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (e->tex && i < 64) renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k]) {
                     id<MTLTexture> fc = feedback_copy[k];
@@ -1048,9 +1068,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         id<MTLTexture> tex = nil;
         id<MTLSamplerState> smp = nil;
         uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+        tex_sc[0][i][0] = tex_sc[0][i][1] = 1;
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (e->tex && i < 64) renderer_texture_scale(e->tex, &tex_sc[0][i][0], &tex_sc[0][i][1]);
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k]) {
                     id<MTLTexture> fc = feedback_copy[k];
@@ -1063,6 +1085,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
         [ce setTexture:tex ? tex : dummy_texture(st_->type) atIndex:i];
         [ce setSamplerState:smp ? smp : default_sampler() atIndex:i];
+    }
+    if (si->uses_rscale) {
+        float rs[65][4] = {{1, 1, 0, 0}};
+        for (int i = 0; i < si->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[0][i][0]; rs[1 + i][1] = tex_sc[0][i][1]; }
+        [ce setBytes:rs length:(NSUInteger)(1 + si->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
     CST("dispatch");
     extern bool g_debug_frame;
@@ -1388,7 +1415,7 @@ static void draw(CmdRec *r, bool indexed) {
     [enc setTriangleFillMode:st.poly[2] == 1 ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
-    [enc setViewport:(MTLViewport){vp[0], vp[1], vp[2], vp[3], zn, zf}];
+    [enc setViewport:(MTLViewport){vp[0] * pass_sx, vp[1] * pass_sy, vp[2] * pass_sx, vp[3] * pass_sy, zn, zf}];
     apply_scissor();
 
     // resources
@@ -1405,6 +1432,11 @@ static void draw(CmdRec *r, bool indexed) {
     if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
+    if (pr->fi->uses_rscale) {  // [0] = render target scale, [1 + i] = scale of texture i
+        float rs[65][4] = {{pass_sx, pass_sy, 0, 0}};
+        for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
+        [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
+    }
     for (int s = 0; s < 12; s++) {
         if (!(used_streams & (1u << s))) continue;
         Range v = st.vbuf[s];
@@ -1554,6 +1586,44 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     [b endEncoding];
 }
 
+// Color copy with scaling: draw src rect into dst rect (physical texels).
+static void draw_copy(id<MTLTexture> s, int sx0, int sy0, int sw, int sh, id<MTLTexture> d, int dx0, int dy0, int dw, int dh,
+                      bool linear) {
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = d;
+    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb() renderCommandEncoderWithDescriptor:rp];
+    NSString *key = [NSString stringWithFormat:@"copy %lu", (unsigned long)d.pixelFormat];
+    id<MTLRenderPipelineState> pipe = cache[key];
+    if (!pipe) {
+        static id<MTLLibrary> lib;
+        if (!lib) lib = [dev newLibraryWithSource:@(copy_src) options:nil error:nil];
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.colorAttachments[0].pixelFormat = d.pixelFormat;
+        pipe = [dev newRenderPipelineStateWithDescriptor:pd error:nil];
+        cache[key] = pipe;
+    }
+    static id<MTLSamplerState> lin, near;
+    if (!lin) {
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+        near = [dev newSamplerStateWithDescriptor:sd];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+        lin = [dev newSamplerStateWithDescriptor:sd];
+    }
+    float r[4] = {(float)sx0 / s.width, (float)sy0 / s.height, (float)sw / s.width, (float)sh / s.height};
+    [e setRenderPipelineState:pipe];
+    [e setViewport:(MTLViewport){dx0, dy0, dw, dh, 0, 1}];
+    [e setVertexBytes:r length:16 atIndex:0];
+    [e setFragmentTexture:s atIndex:0];
+    [e setFragmentSamplerState:linear ? lin : near atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    stat_passes++;
+}
+
 static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     NvnTexture *t = (NvnTexture *)(uintptr_t)src->tex;
     if (!t || !dst || dst < HEAP_BASE) return;
@@ -1564,8 +1634,20 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     uint64_t row, img;
     copy_region_dims(t, src, &fi, rg, &level, &row, &img);
     if (!fi || !fi->bpb) return;
+    id<MTLTexture> tex = renderer_texture(t, nil, false);
+    float tsx, tsy;
+    renderer_texture_scale(t, &tsx, &tsy);
+    if ((tsx != 1 || tsy != 1) && level == 0 && !renderer_format_is_depth(t->format)) {
+        // the CPU expects guest-sized texels: filter the scaled allocation down first
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:tex.pixelFormat width:t->width
+                                                                                      height:t->height mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> small = [dev newTextureWithDescriptor:td];
+        draw_copy(tex, 0, 0, tex.width, tex.height, small, 0, 0, t->width, t->height, true);
+        tex = small;
+    }
     id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
-    id<MTLTexture> tex = renderer_texture(t, b, false);
     if (renderer_pixel_format_bytes(tex.pixelFormat, fi->bpb) != fi->bpb) { [b endEncoding]; return; }
     bool array = tex.textureType == MTLTextureType2DArray || tex.textureType == MTLTextureTypeCube;
     for (int z = 0; z < (array ? rg[5] : 1); z++)
@@ -1593,8 +1675,14 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         if (nl++ < 400) LOG("[copytex] %ux%u f%#x (%d,%d %dx%d) -> %ux%u f%#x (%d,%d %dx%d) flags %llx src_gpu %d\n", st_->width, st_->height, st_->format,
             sr[0], sr[1], sr[3], sr[4], dt->width, dt->height, dt->format, dr[0], dr[1], dr[3], dr[4], flags, renderer_is_gpu_owned(st_));
     }
-    int sw = sr[3] ? sr[3] : (int)s.width, sh = sr[4] ? sr[4] : (int)s.height;
-    int dw = dr[3] ? dr[3] : (int)d.width, dh = dr[4] ? dr[4] : (int)d.height;
+    // regions are in guest texels; scaled allocations (output resolution) need physical texels
+    float ssx, ssy, dsx, dsy;
+    renderer_texture_scale(st_, &ssx, &ssy);
+    renderer_texture_scale(dt, &dsx, &dsy);
+    int sx0 = (int)lroundf(sr[0] * ssx), sy0 = (int)lroundf(sr[1] * ssy);
+    int dx0 = (int)lroundf(dr[0] * dsx), dy0 = (int)lroundf(dr[1] * dsy);
+    int sw = sr[3] ? (int)lroundf(sr[3] * ssx) : (int)s.width, sh = sr[4] ? (int)lroundf(sr[4] * ssy) : (int)s.height;
+    int dw = dr[3] ? (int)lroundf(dr[3] * dsx) : (int)d.width, dh = dr[4] ? (int)lroundf(dr[4] * dsy) : (int)d.height;
     static int no_depth_scale = -1;
     if (no_depth_scale < 0) no_depth_scale = getenv("LARECOMP_NO_DEPTH_SCALE") != NULL;
     if (!no_depth_scale && renderer_format_is_depth(dt->format) && (sw != dw || sh != dh) && s.sampleCount == 1 && dt->format != 0x31) {
@@ -1638,10 +1726,10 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         id<MTLTexture> sdepth = s;
         if (s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8)
             sdepth = [s newTextureViewWithPixelFormat:s.pixelFormat];
-        float r[4] = {(float)sr[0] / s.width, (float)sr[1] / s.height, (float)sw / s.width, (float)sh / s.height};
+        float r[4] = {(float)sx0 / s.width, (float)sy0 / s.height, (float)sw / s.width, (float)sh / s.height};
         [e setRenderPipelineState:pipe];
         [e setDepthStencilState:always];
-        [e setViewport:(MTLViewport){dr[0], dr[1], dw, dh, 0, 1}];
+        [e setViewport:(MTLViewport){dx0, dy0, dw, dh, 0, 1}];
         [e setVertexBytes:r length:16 atIndex:0];
         [e setFragmentTexture:sdepth atIndex:0];
         [e setFragmentSamplerState:dnear atIndex:0];
@@ -1672,45 +1760,13 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     }
     if (renderer_format_is_depth(dt->format) || (s.pixelFormat == d.pixelFormat && sw == dw && sh == dh && s.sampleCount == d.sampleCount)) {
         id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
-        [b copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sr[0], sr[1], 0)
+        [b copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sx0, sy0, 0)
                 sourceSize:MTLSizeMake(MIN(sw, dw), MIN(sh, dh), 1) toTexture:d destinationSlice:0 destinationLevel:0
-         destinationOrigin:MTLOriginMake(dr[0], dr[1], 0)];
+         destinationOrigin:MTLOriginMake(dx0, dy0, 0)];
         [b endEncoding];
         return;
     }
-    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.colorAttachments[0].texture = d;
-    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
-    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLRenderCommandEncoder> e = [cb() renderCommandEncoderWithDescriptor:rp];
-    NSString *key = [NSString stringWithFormat:@"copy %lu", (unsigned long)d.pixelFormat];
-    id<MTLRenderPipelineState> pipe = cache[key];
-    if (!pipe) {
-        static id<MTLLibrary> lib;
-        if (!lib) lib = [dev newLibraryWithSource:@(copy_src) options:nil error:nil];
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        pd.vertexFunction = [lib newFunctionWithName:@"vs"];
-        pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
-        pd.colorAttachments[0].pixelFormat = d.pixelFormat;
-        pipe = [dev newRenderPipelineStateWithDescriptor:pd error:nil];
-        cache[key] = pipe;
-    }
-    static id<MTLSamplerState> lin, near;
-    if (!lin) {
-        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
-        near = [dev newSamplerStateWithDescriptor:sd];
-        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
-        lin = [dev newSamplerStateWithDescriptor:sd];
-    }
-    float r[4] = {(float)sr[0] / s.width, (float)sr[1] / s.height, (float)sw / s.width, (float)sh / s.height};
-    [e setRenderPipelineState:pipe];
-    [e setViewport:(MTLViewport){dr[0], dr[1], dw, dh, 0, 1}];
-    [e setVertexBytes:r length:16 atIndex:0];
-    [e setFragmentTexture:s atIndex:0];
-    [e setFragmentSamplerState:(flags & 1) ? lin : near atIndex:0];
-    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [e endEncoding];
-    stat_passes++;
+    draw_copy(s, sx0, sy0, sw, sh, d, dx0, dy0, dw, dh, flags & 1);
 }
 
 // ------------------------------------------------------------------ executor

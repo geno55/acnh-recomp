@@ -54,6 +54,7 @@ typedef struct {
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool uses_rscale;  // resolution-scale table (fragment/compute only)
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
     uint32_t omap_target, omap_depth;
@@ -222,7 +223,12 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
         if (addr >= 0x70 && addr < 0x80) {
             c->uses_frag_coord = true;
             int comp = (addr >> 2) & 3;
-            sprintf(e, "as_type<uint>(in.pos[%d])", comp);
+            if (comp < 2) {  // guest pixel units: the render target may be allocated larger
+                c->uses_rscale = true;
+                sprintf(e, "as_type<uint>(in.pos[%d] / rscale[0][%d])", comp, comp);
+            } else {
+                sprintf(e, "as_type<uint>(in.pos[%d])", comp);
+            }
         } else if (addr >= 0x80 && addr < 0x280) {
             int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
             if (c->key && c->key->vs_out_mask && !(c->key->vs_out_mask & (1u << a))) {
@@ -480,6 +486,22 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
     sp(&c->body, "    }\n");
 }
 
+// Integer texel coordinates in guest units -> the (possibly larger) allocation of texture slot `slot`.
+static const char *RSC2(Ctx *c, int slot, const char *fmt, ...) {
+    static char bufs[4][1024];
+    static int bi;
+    char *o = bufs[bi++ & 3];
+    char inner[700];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(inner, sizeof inner, fmt, ap);
+    va_end(ap);
+    if (c->stage == STAGE_VERTEX) { snprintf(o, 1024, "%s", inner); return o; }
+    c->uses_rscale = true;
+    snprintf(o, 1024, "rsc(%s, rscale[%d])", inner, slot + 1);
+    return o;
+}
+
 // TEXS / TLDS: texture_info selects target and coordinate layout
 static const char *alayer(const char *r, int slot, char *buf) {
     sprintf(buf, "min(%s, t%d.get_array_size() - 1u)", r, slot);
@@ -544,17 +566,17 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         case 1: slot = tex_slot(c, index, TEXTYPE_1D, false, false);
             sprintf(call, "t%d.read(uint(%s), uint(%s))", slot, A, Bv); break;
         case 2: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.read(uint2(%s, %s))", slot, A, Bv); break;
+            sprintf(call, "t%d.read(%s)", slot, RSC2(c, slot, "uint2(%s, %s)", A, Bv)); break;
         case 4: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.read(uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28)))", slot, A, A1, Bv, Bv); break;
+            sprintf(call, "t%d.read(%s)", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, Bv, Bv)); break;
         case 5: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.read(uint2(%s, %s), uint(%s))", slot, A, A1, Bv); break;
+            sprintf(call, "t%d.read(%s, uint(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
             sprintf(call, "t%d.read(uint3(%s, %s, %s))", slot, A, A1, Bv); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
-            sprintf(call, "t%d.read(uint2(%s, %s), uint(%s))", slot, A1, Bv, A); break;
+            sprintf(call, "t%d.read(%s, uint(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A1, Bv), A); break;
         case 12: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
-            sprintf(call, "t%d.read(uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28)), uint(%s))", slot, A, A1, B1, B1, Bv); break;
+            sprintf(call, "t%d.read(%s, uint(%s))", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, B1, B1), Bv); break;
         default: fail(c, "tlds info %d", info); return;
         }
     }
@@ -709,8 +731,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         uint32_t mask = (uint32_t)bits(w, 31, 4);
         int slot = tex_slot(c, index, -1, false, false);  // the type comes from a sample, if any
         if (qt == 1) {  // dimension
-            sp(&c->body, "    { uint lv = %s; uint4 q = uint4(t%d.get_width(lv), t%d.get_height(lv), 1, t%d.get_num_mip_levels());\n",
-               R(a), slot, slot, slot);
+            if (c->stage != STAGE_VERTEX) {  // report the guest size of scaled allocations
+                c->uses_rscale = true;
+                sp(&c->body, "    { uint lv = %s; uint4 q = uint4(uint(round(float(t%d.get_width(lv)) / rscale[%d].x)), "
+                   "uint(round(float(t%d.get_height(lv)) / rscale[%d].y)), 1, t%d.get_num_mip_levels());\n",
+                   R(a), slot, slot + 1, slot, slot + 1, slot);
+            } else {
+                sp(&c->body, "    { uint lv = %s; uint4 q = uint4(t%d.get_width(lv), t%d.get_height(lv), 1, t%d.get_num_mip_levels());\n",
+                   R(a), slot, slot, slot);
+            }
             int n = 0;
             for (int i = 0; i < 4; i++)
                 if (mask & (1u << i)) { c->reg_used[d + n] = 1; sp(&c->body, "      r%d = q[%d];\n", d + n, i); n++; }
@@ -1392,6 +1421,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     sp(&s, "static inline uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(extract_bits(int(v), pos, min(len, 32u - pos))); }\n");
     sp(&s, "static inline uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return insert_bits(base, ins, pos, min(len, 32u - pos)); }\n");
     sp(&s, "static inline float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n");
+    sp(&s, "static inline uint2 rsc(uint2 c, float4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uint2(floor((float2(c) + 0.5f) * s.xy)); }\n");
     sp(&s, "static inline float2 hx(uint v, uint swz) { if (swz == 1u) return float2(as_type<float>(v)); float2 h = float2(as_type<half2>(v)); return swz == 2u ? h.xx : swz == 3u ? h.yy : h; }\n");
     sp(&s, "static inline uint hpack(float2 r, uint merge, uint old) { if (merge == 1u) return as_type<uint>(r.x); uint lo = uint(as_type<ushort>(half(r.x))), hi = uint(as_type<ushort>(half(r.y))); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n");
     sp(&s, "static inline uint prmt(uint a, uint b, uint sel) { uint r = 0; for (uint i = 0; i < 4; i++) { uint s = (sel >> (i * 4)) & 7u; uint byte = s < 4 ? (a >> (s * 8)) & 0xFFu : (b >> ((s - 4) * 8)) & 0xFFu; r |= byte << (i * 8); } return r; }\n");
@@ -1435,6 +1465,10 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (info->uses_gmem) {
         if (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX)) { free(args.buf); fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX); }
         sp(&args, ", device uchar *gmem [[buffer(%d)]]", GMEM_BUFFER_INDEX);
+    }
+    if (c->uses_rscale && stage != STAGE_VERTEX) {
+        sp(&args, ", constant float4 *rscale [[buffer(18)]]");
+        info->uses_rscale = true;
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
