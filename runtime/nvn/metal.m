@@ -365,6 +365,18 @@ id<MTLCommandQueue> renderer_queue(void) { return queue; }
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
+
+// Scanout shows the bytes the game wrote: sample sRGB textures through a non-sRGB view so the
+// present/screenshot shaders pass them through instead of decoding to linear.
+static id<MTLTexture> raw_view(id<MTLTexture> t) {
+    MTLPixelFormat pf = t.pixelFormat;
+    MTLPixelFormat raw = pf == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm
+                       : pf == MTLPixelFormatBGRA8Unorm_sRGB ? MTLPixelFormatBGRA8Unorm : pf;
+    if (raw == pf) return t;
+    id<MTLTexture> v = [t newTextureViewWithPixelFormat:raw];
+    return v ? v : t;
+}
+
 static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_texture(tex, path); }
 
 // Debug: dump an 8-bit-per-channel 2D texture's raw bytes (alpha kept, written as a separate grey PNG).
@@ -421,7 +433,7 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
     [e setRenderPipelineState:pipe];
     [e setVertexBytes:&flip length:4 atIndex:0];
-    [e setFragmentTexture:tex atIndex:0];
+    [e setFragmentTexture:raw_view(tex) atIndex:0];
     [e setFragmentSamplerState:present_sampler atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [e endEncoding];
@@ -468,7 +480,7 @@ void backend_present(NvnTexture *t) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
             [enc setRenderPipelineState:present_pipe];
             [enc setVertexBytes:&flip length:4 atIndex:0];
-            [enc setFragmentTexture:b->tex atIndex:0];
+            [enc setFragmentTexture:raw_view(b->tex) atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }

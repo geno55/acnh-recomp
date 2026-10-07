@@ -796,6 +796,15 @@ static void bind_textures(int stage, ShaderInfo *si) {
                         if (sd) { const uint32_t *w = (const uint32_t *)sd; LOG("[dtex] glyph sampler words %08x %08x %08x %08x %08x %08x %08x %08x\n", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); }
                     }
                 }
+                if (e->tex->width == 2 && e->tex->height == 2 && e->tex->depth == 6) {
+                    static int once2;
+                    if (!once2++) {
+                        FILE *rf = fopen("build/raw_cube2.bin", "wb");
+                        if (rf) { fwrite(p, 1, total, rf); fclose(rf); }
+                        LOG("[dtex] cube2 levels %u layers %u bh %u layer_size %llu\n", e->tex->levels, e->tex->layout.layers,
+                            e->tex->layout.block_height_log2, tegra_layer_size(&e->tex->layout));
+                    }
+                }
                 if ((e->tex->flags & 0x10) && !getenv("NO_RAW")) {
                     static int nraw;
                     if (nraw++ < 2) {
