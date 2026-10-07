@@ -11,6 +11,7 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
 extern Settings g_settings;

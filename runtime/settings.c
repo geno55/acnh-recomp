@@ -18,13 +18,21 @@ Settings g_settings = {
 };
 
 void settings_load(void) {
+    static bool loaded;
+    if (loaded) return;
+    loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) return;
     char line[256];
     while (fgets(line, sizeof line, f)) {
         char key[64];
         char val[128];
-        if (sscanf(line, " %63[^= ] = %127s", key, val) != 2) continue;
+        if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) continue;
+        if (!strcmp(key, "rando_seed")) {
+            if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) != 2) val[0] = 0;
+            strlcpy(g_settings.rando_seed, val, sizeof g_settings.rando_seed);
+            continue;
+        }
         if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
@@ -48,5 +56,6 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);
 }
