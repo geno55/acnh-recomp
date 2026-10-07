@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <time.h>
 
 #include <SDL3/SDL.h>
@@ -66,6 +67,8 @@ typedef struct {
     float *buf;  // bufs * sample_count
 } Mix;
 
+typedef struct Effect Effect;
+
 typedef struct {
     uint32_t sample_rate, sample_count, mix_buffers, submixes, voices, sinks, effects, perf_frames;
     uint32_t splitters, revision;
@@ -80,6 +83,7 @@ typedef struct {
     Mix *mix;
     uint32_t nmix;
     uint8_t sink_used, sink_inputs, sink_input[6];
+    Effect *fx;
     SDL_AudioStream *stream;
     FILE *wav;
     uint32_t wav_bytes;
@@ -229,6 +233,243 @@ static int voice_prepare(Renderer *r, Voice *v) {
 
 static Mix *find_mix(Renderer *r, int32_t id) { return id >= 0 && (uint32_t)id < r->nmix && r->mix[id].used ? &r->mix[id] : NULL; }
 
+// ------------------------------------------------------------------ reverb (port of Ryujinx ReverbState/Command)
+typedef struct { float *buf; uint32_t sr, cur, last, count, max; } DelayLine;
+
+static void dl_set(DelayLine *d, float ms) {
+    uint32_t n = (uint32_t)roundf(d->sr * ms);
+    d->count = n < d->max ? n : d->max;
+    d->cur = 0;
+    d->last = d->count ? d->count - 1 : 0;
+}
+static void dl_init(DelayLine *d, uint32_t sr, float ms_max) {
+    d->sr = sr;
+    d->max = (uint32_t)roundf(sr * ms_max);
+    free(d->buf);
+    d->buf = calloc(d->max + 1, sizeof(float));
+    dl_set(d, ms_max);
+}
+static float dl_read(DelayLine *d) { return d->buf[d->cur]; }
+static float dl_update(DelayLine *d, float v) {
+    float o = d->buf[d->cur];
+    d->buf[d->cur++] = v;
+    if (d->cur >= d->last) d->cur = 0;
+    return o;
+}
+static float dl_tap_unsafe(DelayLine *d, uint32_t idx, int off) {
+    int t = (int)d->cur - ((int)idx + off);
+    if (t < 0) t += (int)d->count;
+    if (t < 0 || (uint32_t)t > d->max) return 0;
+    return d->buf[t];
+}
+static float dl_tap(DelayLine *d, uint32_t idx) {
+    if (idx >= d->count) idx = d->count ? d->count - 1 : 0;
+    return dl_tap_unsafe(d, idx, -1);
+}
+
+typedef struct { DelayLine dl; float rate; } DecayDelay;
+static float dd_update(DecayDelay *d, float v) {
+    float p = v - d->rate * dl_read(&d->dl);
+    return dl_update(&d->dl, p) + p * d->rate;
+}
+
+typedef struct {
+    uint8_t input[6], output[6];
+    uint16_t ch_max, ch;
+    int32_t sample_rate, early_mode, early_gain, pre_delay, late_mode, late_gain, decay_time, hf_decay_ratio,
+        coloration, reverb_gain, out_gain, dry_gain;
+} ReverbParam;
+
+typedef struct {
+    int ready;
+    uint8_t raw[0x44];  // last parameter bytes seen
+    ReverbParam p;
+    DelayLine fdn[4], pre, fc;
+    DecayDelay decay[4];
+    uint32_t early_time[10], pre_time;
+    float early_gain[10], hf_direct[4], hf_prev[4], prev_fb[4];
+} Reverb;
+
+static const float rv_fdn_times[20] = {53.953247f, 79.192566f, 116.238770f, 130.615295f, 53.953247f, 79.192566f,
+    116.238770f, 170.615295f, 5, 10, 5, 10, 47.03f, 71, 103, 170, 53.953247f, 79.192566f, 116.238770f, 170.615295f};
+static const float rv_decay_times[20] = {7, 9, 13, 17, 7, 9, 13, 17, 1, 1, 1, 1, 7, 7, 13, 9, 7, 9, 13, 17};
+static const float rv_early_times[50] = {0.0f, 3.5f, 2.8f, 3.9f, 2.7f, 13.4f, 7.9f, 8.4f, 9.9f, 12.0f,
+    0.0f, 11.8f, 5.5f, 11.2f, 10.4f, 38.1f, 22.2f, 29.6f, 21.2f, 24.8f,
+    0.0f, 41.5f, 20.5f, 41.3f, 0.0f, 29.5f, 33.8f, 45.2f, 46.8f, 0.0f,
+    33.1f, 43.3f, 22.8f, 37.9f, 14.9f, 35.3f, 17.9f, 34.2f, 0.0f, 43.3f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static const float rv_early_gain[50] = {0.70f, 0.68f, 0.70f, 0.68f, 0.70f, 0.68f, 0.70f, 0.68f, 0.68f, 0.68f,
+    0.70f, 0.68f, 0.70f, 0.68f, 0.70f, 0.68f, 0.68f, 0.68f, 0.68f, 0.68f,
+    0.50f, 0.70f, 0.70f, 0.68f, 0.50f, 0.68f, 0.68f, 0.70f, 0.68f, 0.00f,
+    0.93f, 0.92f, 0.87f, 0.86f, 0.94f, 0.81f, 0.80f, 0.77f, 0.76f, 0.65f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static const float rv_pre_times[5] = {12.5f, 40.0f, 50.0f, 50.0f, 0.0f};
+
+static float q14(int32_t v) { return v / 16384.0f; }
+static uint32_t rv_rate(const ReverbParam *p) {
+    uint32_t sr = (uint32_t)q14(p->sample_rate);  // samples per millisecond
+    return sr && sr <= 192 ? sr : 48;
+}
+
+static void reverb_update(Reverb *rv) {
+    ReverbParam *p = &rv->p;
+    uint32_t sr = rv_rate(p);
+    float pre_ms = q14(p->pre_delay), early_gain = q14(p->early_gain), coloration = q14(p->coloration);
+    float decay_time = q14(p->decay_time);
+    int em = p->early_mode >= 0 && p->early_mode < 5 ? p->early_mode : 4;
+    int lm = p->late_mode >= 0 && p->late_mode < 5 ? p->late_mode : 0;
+    for (int i = 0; i < 10; i++) {
+        uint32_t t = (uint32_t)roundf(sr * (rv_early_times[i] + pre_ms));
+        rv->early_time[i] = (t < rv->pre.max ? t : rv->pre.max) + 1;
+        rv->early_gain[i] = rv_early_gain[i] * early_gain;
+    }
+    if (p->ch == 2) { rv->early_gain[4] *= 0.5f; rv->early_gain[5] *= 0.5f; }
+    uint32_t pt = (uint32_t)roundf(sr * (rv_pre_times[em] + pre_ms));
+    rv->pre_time = pt < rv->pre.max ? pt : rv->pre.max;
+    float hf_ratio = q14(p->hf_decay_ratio), hf_cos = cosf(1280.0f / sr);
+    for (int i = 0; i < 4; i++) {
+        dl_set(&rv->fdn[i], rv_fdn_times[lm * 4 + i]);
+        dl_set(&rv->decay[i].dl, rv_decay_times[lm * 4 + i]);
+        float a = -3.0f * (rv->decay[i].dl.count + rv->fdn[i].count);
+        float b = decay_time > 0 ? a / (decay_time * sr) : -1000.0f;
+        float c, d;
+        if (hf_ratio < 0.995f && hf_ratio > 0) {
+            float e = powf(10.0f, (((1.0f / hf_ratio) - 1.0f) * 2) / 100 * (b / 10));
+            float f = 1.0f - e, g = 2.0f - (e * 2 * hf_cos);
+            float h = sqrtf(fmaxf(0, g * g - f * f * 4));
+            c = f != 0 ? (g - h) / (f * 2) : 0;
+            d = 1.0f - c;
+        } else {
+            c = 0;
+            d = 1;
+        }
+        rv->hf_direct[i] = powf(10.0f, b / 1000) * d * 0.7071f;
+        rv->hf_prev[i] = c;
+        rv->prev_fb[i] = 0;
+        rv->decay[i].rate = 0.6f * (1.0f - coloration);
+    }
+}
+
+static void reverb_init(Reverb *rv) {
+    uint32_t sr = rv_rate(&rv->p);
+    for (int i = 0; i < 4; i++) {
+        dl_init(&rv->fdn[i], sr, rv_fdn_times[16 + i]);
+        dl_init(&rv->decay[i].dl, sr, rv_decay_times[16 + i]);
+    }
+    dl_init(&rv->pre, sr, 150.0f);  // long pre-delay needs REV3+... 350 ms
+    dl_init(&rv->fc, sr, 5.0f);
+    reverb_update(rv);
+    rv->ready = 1;
+}
+
+static void reverb_process(Reverb *rv, float *const *in, float *const *out, uint32_t n) {
+    static const int8_t oe1[10] = {0}, te[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    static const int8_t o1[4] = {0}, tf1[4] = {0, 1, 2, 3};
+    static const int8_t oe2[10] = {0, 0, 1, 1, 0, 1, 0, 0, 1, 1}, o2[4] = {0, 0, 1, 1}, tf2[4] = {2, 0, 3, 1};
+    static const int8_t oe4[10] = {0, 0, 1, 1, 0, 1, 2, 2, 3, 3}, o4[4] = {0, 1, 2, 3}, tf4[4] = {0, 1, 2, 3};
+    static const int8_t oe6[20] = {0, 5, 0, 5, 1, 5, 1, 5, 4, 5, 4, 5, 2, 5, 2, 5, 3, 5, 3, 5};
+    static const int8_t te6[20] = {0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9};
+    static const int8_t o6[6] = {0, 1, 2, 3, 4, 5}, tf6[6] = {0, 1, 2, 3, -1, 3};
+    int ch = rv->p.ch;
+    const int8_t *oe, *tel, *o, *tf;
+    int ne, nf;
+    switch (ch) {
+    case 1: oe = oe1; tel = te; o = o1; tf = tf1; ne = 10; nf = 4; break;
+    case 2: oe = oe2; tel = te; o = o2; tf = tf2; ne = 10; nf = 4; break;
+    case 4: oe = oe4; tel = te; o = o4; tf = tf4; ne = 10; nf = 4; break;
+    case 6: oe = oe6; tel = te6; o = o6; tf = tf6; ne = 20; nf = 6; break;
+    default: return;
+    }
+    float reverb_gain = q14(rv->p.reverb_gain), late_gain = q14(rv->p.late_gain);
+    float out_gain = q14(rv->p.out_gain), dry_gain = q14(rv->p.dry_gain);
+    for (uint32_t s = 0; s < n; s++) {
+        float ov[6] = {0}, fb[4], fo[4], cin[6];
+        for (int i = 0; i < ne; i++) ov[oe[i]] += dl_tap_unsafe(&rv->pre, rv->early_time[tel[i]], 0) * rv->early_gain[tel[i]];
+        if (ch == 6) ov[5] *= 0.2f;
+        float pre = 0;
+        for (int c = 0; c < ch; c++) { cin[c] = in[c][s] * 64; pre += cin[c] * reverb_gain; }
+        dl_update(&rv->pre, pre);
+        float late = dl_tap(&rv->pre, rv->pre_time) * late_gain;
+        for (int i = 0; i < 4; i++) {
+            fo[i] = dl_read(&rv->fdn[i]) * rv->hf_direct[i] + rv->prev_fb[i] * rv->hf_prev[i];
+            rv->prev_fb[i] = fo[i];
+        }
+        fb[0] = fo[2] + fo[1];
+        fb[1] = -fo[0] - fo[3];
+        fb[2] = fo[0] - fo[3];
+        fb[3] = fo[1] - fo[2];
+        for (int i = 0; i < 4; i++) {
+            fo[i] = dd_update(&rv->decay[i], fb[i] + late);
+            dl_update(&rv->fdn[i], fo[i]);
+        }
+        for (int i = 0; i < nf; i++) if (tf[i] >= 0) ov[o[i]] += fo[tf[i]];
+        if (ch == 6) ov[4] += dl_update(&rv->fc, (fo[2] - fo[3]) * 0.5f);
+        for (int c = 0; c < ch; c++) out[c][s] = (ov[c] * out_gain + cin[c] * dry_gain) / 64;
+    }
+}
+
+struct Effect {
+    uint8_t type, enabled;
+    int32_t mix_id;
+    uint32_t order;
+    Reverb rv;
+};
+
+// Effect slot update from EffectInParameterVersion1 (0xC0 bytes: type, is_new, enabled, mix, buffers, order, data).
+static void effect_update(Effect *fx, const uint8_t *e) {
+    if (fx->type != e[0]) memset(&fx->rv.p, 0, sizeof fx->rv.p), fx->rv.ready = 0;
+    fx->type = e[0];
+    fx->enabled = e[2];
+    memcpy(&fx->mix_id, e + 4, 4);
+    memcpy(&fx->order, e + 0x18, 4);
+    if (fx->type != 4) return;
+    const uint8_t *d = e + 0x20;
+    uint16_t ch_max, ch;
+    memcpy(&ch_max, d + 12, 2);
+    memcpy(&ch, d + 14, 2);
+    if (ch_max != 1 && ch_max != 2 && ch_max != 4 && ch_max != 6) return;
+    if (ch != 1 && ch != 2 && ch != 4 && ch != 6) return;
+    if (e[1] || !fx->rv.ready) {
+        memcpy(fx->rv.raw, d, sizeof fx->rv.raw);
+        memcpy(&fx->rv.p, d, sizeof fx->rv.p);
+        if (getenv("LARECOMP_AUDIO_LOG"))
+            LOG("[audren] reverb init: ch %u rate %d early %d/%d pre %d late %d/%d decay %d hf %d col %d gains %d/%d/%d\n",
+                ch, fx->rv.p.sample_rate, fx->rv.p.early_mode, fx->rv.p.early_gain, fx->rv.p.pre_delay,
+                fx->rv.p.late_mode, fx->rv.p.late_gain, fx->rv.p.decay_time, fx->rv.p.hf_decay_ratio,
+                fx->rv.p.coloration, fx->rv.p.reverb_gain, fx->rv.p.out_gain, fx->rv.p.dry_gain);
+        reverb_init(&fx->rv);
+    } else if (memcmp(fx->rv.raw, d, 0x40)) {  // parameters changed (status byte at 0x40 ignored)
+        memcpy(fx->rv.raw, d, sizeof fx->rv.raw);
+        memcpy(&fx->rv.p, d, sizeof fx->rv.p);
+        reverb_update(&fx->rv);
+    }
+}
+
+static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
+    uint32_t N = r->sample_count;
+    for (uint32_t order = 0; order < r->effects; order++) {
+        for (uint32_t i = 0; i < r->effects; i++) {
+            Effect *fx = &r->fx[i];
+            if (fx->type != 4 || fx->mix_id != mix_id || fx->order != order || !fx->rv.ready) continue;
+            int ch = fx->rv.p.ch;
+            float *in[6], *out[6];
+            int ok = 1;
+            for (int c = 0; c < ch; c++) {
+                if (fx->rv.p.input[c] >= m->bufs || fx->rv.p.output[c] >= m->bufs) ok = 0;
+                in[c] = m->buf + (fx->rv.p.input[c] % MIXBUF_MAX) * N;
+                out[c] = m->buf + (fx->rv.p.output[c] % MIXBUF_MAX) * N;
+            }
+            if (!ok) continue;
+            static int no_reverb = -1;
+            if (no_reverb < 0) no_reverb = getenv("LARECOMP_NO_REVERB") ? 1 : 0;
+            static int toggle = -1;
+            if (toggle < 0) toggle = getenv("LARECOMP_REVERB_TOGGLE") ? atoi(getenv("LARECOMP_REVERB_TOGGLE")) : 0;
+            int off = no_reverb || (toggle && (r->elapsed_frames / toggle) % 2);
+            if (fx->enabled && !off) reverb_process(&fx->rv, in, out, N);
+            else
+                for (int c = 0; c < ch; c++) if (in[c] != out[c]) memcpy(out[c], in[c], N * sizeof(float));
+        }
+    }
+}
+
 static int hf_log = -1;
 static double hf[1024];
 
@@ -284,8 +525,10 @@ static void render_frame(Renderer *r, float *stereo) {
             if (cs->fraction < 0 || cs->fraction >= 1) cs->fraction = 0;
             memcpy(cs->hist, tmp + need, sizeof cs->hist);
             if (hf_log) {
-                double e = 0;
-                for (uint32_t i = 1; i < N; i++) e += (double)(smp[i] - smp[i - 1]) * (smp[i] - smp[i - 1]) * v->volume * v->volume;
+                // Goertzel power around 19.6 kHz (scaled by volume)
+                double w = 2 * M_PI * 19582.0 / r->sample_rate, cw = 2 * cos(w), q1 = 0, q2 = 0;
+                for (uint32_t i = 0; i < N; i++) { double q0 = cw * q1 - q2 + smp[i]; q2 = q1; q1 = q0; }
+                double e = (q1 * q1 + q2 * q2 - q1 * q2 * cw) * v->volume * v->volume / N;
                 hf[vi] += e;
             }
             if (!dst) continue;
@@ -309,7 +552,10 @@ static void render_frame(Renderer *r, float *stereo) {
     if (hf_log && r->elapsed_frames % 200 == 0) {
         LOG("[audren] hf f%llu:", (unsigned long long)r->elapsed_frames);
         for (uint32_t k = 0; k < r->voices; k++)
-            if (hf[k] > 1e6) LOG(" v%u=%.0f(%llx)", k, hf[k] / 1e6, (unsigned long long)r->voice[k].wb[0].addr);
+            if (hf[k] > 1e6)
+                LOG(" v%u=%.0f(%llx bq %d%d %.3f/%.3f fmt %u rate %u pitch %.3f)", k, hf[k] / 1e6,
+                    (unsigned long long)r->voice[k].wb[0].addr, r->voice[k].bq_on[0], r->voice[k].bq_on[1],
+                    r->voice[k].bq[1][0], r->voice[k].bq[1][3], r->voice[k].fmt, r->voice[k].rate, r->voice[k].pitch);
         LOG("\n");
         memset(hf, 0, sizeof hf);
     }
@@ -327,6 +573,7 @@ static void render_frame(Renderer *r, float *stereo) {
         for (uint32_t m = 1; m < r->nmix && m < 64; m++) {
             Mix *s = &r->mix[m];
             if (!s->used || depth[m] != d) continue;
+            apply_effects(r, (int32_t)m, s);
             Mix *t = find_mix(r, s->dest);
             if (!t || t == s) continue;
             for (uint32_t i = 0; i < s->bufs; i++)
@@ -340,6 +587,7 @@ static void render_frame(Renderer *r, float *stereo) {
     }
     // final mix -> device sink (FL FR FC LFE BL BR) -> stereo
     Mix *f = find_mix(r, 0);
+    if (f) apply_effects(r, 0, f);
     for (uint32_t i = 0; i < N; i++) {
         float ch[6] = {0};
         if (f && r->sink_used)
@@ -447,7 +695,14 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) 
     if (p[344]) v->drop = 0;
     for (int f = 0; f < 2; f++) {  // BiquadFilterParameter: enable, reserved, s16 numerator[3], denominator[2] (Q14)
         const uint8_t *b = p + 36 + f * 12;
-        if (b[0] && !v->bq_on[f]) v->bq_reset[f] = 1;
+        if (b[0] && !v->bq_on[f]) {
+            v->bq_reset[f] = 1;
+            if (getenv("LARECOMP_AUDIO_LOG")) {
+                int16_t k[5];
+                memcpy(k, b + 2, 10);
+                LOG("[audren] v%ld biquad%d on: %d %d %d / %d %d\n", (long)(v - r->voice), f, k[0], k[1], k[2], k[3], k[4]);
+            }
+        }
         v->bq_on[f] = b[0];
         int16_t c[5];
         memcpy(c, b + 2, 10);
@@ -480,6 +735,23 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) 
                 wb->loop_start = wb->loop_end = 0;
             }
             wb->sent = 0;
+            static int dumped;
+            if (getenv("LARECOMP_AUDIO_DUMPWB") && !dumped && wb->size > 0x100000 && v->fmt == 6 && v->ds_addr) {
+                dumped = 1;
+                FILE *f = fopen("build/wb_dump.bin", "wb");
+                if (f) {
+                    uint32_t hdr[4] = {(uint32_t)wb->size, wb->start, wb->end, (uint32_t)(wb->ctx != 0)};
+                    fwrite(hdr, 4, 4, f);
+                    fwrite((const void *)(uintptr_t)v->ds_addr, 1, 32, f);
+                    int16_t ctx[3] = {0};
+                    if (wb->ctx) memcpy(ctx, (const void *)(uintptr_t)wb->ctx, 6);
+                    fwrite(ctx, 2, 3, f);
+                    fwrite((const void *)(uintptr_t)wb->addr, 1, wb->size, f);
+                    fclose(f);
+                    LOG("[audren] dumped wave buffer %llx (%llx bytes) ds %llx ctx %d %d %d\n", (unsigned long long)wb->addr,
+                        (unsigned long long)wb->size, (unsigned long long)v->ds_addr, ctx[0], ctx[1], ctx[2]);
+                }
+            }
             static int vlog = -1;
             if (vlog < 0) vlog = getenv("LARECOMP_AUDIO_LOG") ? 1 : 0;
             if (vlog)
@@ -488,6 +760,12 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) 
                     (long)(v - r->voice), i, v->fmt, v->rate, v->chans, v->pitch, v->volume, v->mix_id, v->chan_ids[0],
                     (unsigned long long)wb->addr, (unsigned long long)wb->size, wb->start, wb->end, wb->loop,
                     wb->loop_count, wb->eos, (unsigned long long)wb->ctx, (unsigned long long)v->ds_addr);
+            if (vlog && v->ds_addr) {
+                const int16_t *k = (const int16_t *)(uintptr_t)v->ds_addr;
+                LOG("[audren]   coefs v%ld:", (long)(v - r->voice));
+                for (int j = 0; j < 19; j++) LOG(" %d", k[j]);
+                LOG("\n");
+            }
         }
     }
     // VoiceOutStatus
@@ -578,12 +856,22 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     oh[5] = neffects * 0x10;
     for (uint32_t i = 0; i < neffects && o + 0x10 <= out->size; i++, o += 0x10) {
         const uint8_t *e = ein + i * 0xC0;
-        op[o] = e[2] ? 3 : 4;  // UsageState Enabled / Disabled
+        op[o] = e[2] ? 3 : 4;  // EffectState Enabled / Disabled
+        if (i < r->effects) effect_update(&r->fx[i], e);
         static uint32_t seen_types;
         if (e[0] && e[0] < 32 && !(seen_types & (1u << e[0]))) {
             seen_types |= 1u << e[0];
-            LOG("[audren] effect type %u used (not implemented): slot %u mix %d enabled %u\n", e[0], i,
+            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] == 4 ? "" : " (not implemented)", i,
                 *(const int32_t *)(e + 4), e[2]);
+        }
+        if (e[0] && getenv("LARECOMP_AUDIO_LOG")) {
+            static uint8_t last[16][0xC0];
+            if (i < 16 && memcmp(last[i], e, 0xC0)) {
+                memcpy(last[i], e, 0xC0);
+                LOG("[audren] f%llu effect %u:", (unsigned long long)r->elapsed_frames, i);
+                for (int k = 0; k < 0x70; k += 4) LOG(" %08x", *(const uint32_t *)(e + k));
+                LOG("\n");
+            }
         }
     }
     const uint8_t *min = ein + effects_sz;
@@ -707,6 +995,7 @@ SERVICE("audren:u", audren_u) {
         r->chres = calloc(r->voices, sizeof(ChanRes));
         r->chst = calloc(r->voices, sizeof(ChanState));
         r->mix = calloc(r->nmix, sizeof(Mix));
+        r->fx = calloc(r->effects ? r->effects : 1, sizeof(Effect));
         renderer_open_output(r);
         r->event = kernel_create_event_pair(&r->event_w, &r->event_r);
         pthread_t t;
