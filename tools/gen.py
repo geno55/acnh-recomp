@@ -99,6 +99,31 @@ class Module:
             r = self._jump_table_taken(br_pc, entry, end)
         return r
 
+    def _index_regs(self, start, at, idx):
+        """The index register plus registers it was copied/masked from in start..at (the table
+        index is sometimes recomputed from the source after the bounds check)."""
+        regs = [idx]
+        a = at - 4
+        while a >= start:
+            w = self.word(a)
+            rd, rn = w & 31, bits(w, 5, 5)
+            if rd in regs:
+                src = None
+                if (w & 0x7F800000) == 0x12000000:  # AND (imm)
+                    src = rn
+                elif (w & 0x7FE0FFE0) == 0x2A0003E0:  # MOV (ORR with zr)
+                    src = bits(w, 16, 5)
+                elif (w & 0x7F800000) in (0x53000000, 0x13000000):  # UBFM/SBFM (uxtb, uxth, sxtw...)
+                    src = rn
+                if src is not None and src < 31 and src not in regs:
+                    regs.append(src)
+            a -= 4
+        return regs
+
+    def _set_index(self, mu, regs, i):
+        for r in regs:
+            mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
+
     def _emulate_table(self, br_pc, entry, end, start, idx, count, set_at):
         """Run start..br for each index value (set at address set_at), collect targets."""
         mu = self.emu()
@@ -127,7 +152,7 @@ class Module:
                     a2 += 4
                 if set_at != start and not step_to(start, set_at):
                     return None
-                mu.reg_write(A.UC_ARM64_REG_X0 + idx if idx < 29 else A.UC_ARM64_REG_X29, i)
+                self._set_index(mu, [idx], i)
                 if not step_to(set_at, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
@@ -201,6 +226,7 @@ class Module:
         start = cmp
         while start - 4 >= entry and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):
             start -= 4
+        idx_regs = self._index_regs(start, cmp, idx)
         mu = self.emu()
         targets = []
 
@@ -229,7 +255,7 @@ class Module:
                     a2 += 4
                 if not step_to(start, cmp):
                     return None
-                mu.reg_write(A.UC_ARM64_REG_X0 + idx if idx < 29 else A.UC_ARM64_REG_X29, i)
+                self._set_index(mu, idx_regs, i)
                 if not step_to(cmp, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
