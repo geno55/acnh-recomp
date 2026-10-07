@@ -48,7 +48,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing;
+    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
     uint32_t omap_target, omap_depth;
@@ -929,6 +929,66 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                     sp(&c->body, "      if (ok) *(device uint *)(gmem + ga + %du) = %s;\n", k * 4, R(d == RZ ? RZ : d + k));
         }
         sp(&c->body, "    }\n");
+    } else if (OPM(0x50f8000000000000ull, 0xfff8000000000000ull)) {  // FSWZADD
+        // per quad lane (laneid & 3), 2 bits of the swizzle pick: a+b, b-a, a-b, b
+        uint32_t swz = (uint32_t)bits(w, 28, 8);
+        if (c->stage != STAGE_FRAGMENT) {
+            sprintf(t, "as_type<uint>(%s + %s)", F(R(a)), F(R((int)bits(w, 20, 8))));
+        } else {
+            c->uses_lane = true;
+            sprintf(t, "as_type<uint>(fswzadd(%s, %s, 0x%02xu, lane))", F(R(a)), F(R((int)bits(w, 20, 8))), swz);
+        }
+        set_reg(c, d, t);
+    } else if (OPM(0x5b40000000000000ull, 0xfff0000000000000ull) || OPM(0x4b40000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x3640000000000000ull, 0xfef0000000000000ull) || OPM(0x5340000000000000ull, 0xfff0000000000000ull)) {  // ICMP
+        char cmp[512], cb[256], bb[256];
+        const char *bv, *cv;
+        if (OPM(0x5340000000000000ull, 0xfff0000000000000ull)) {
+            bv = R((int)bits(w, 39, 8));
+            cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb);
+        } else {
+            bv = operand_b(c, w, false, bb);
+            cv = R((int)bits(w, 39, 8));
+        }
+        icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
+        sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
+        set_reg(c, d, t);
+    } else if (OPM(0xef10000000000000ull, 0xfff8000000000000ull)) {  // SHFL
+        int mode = (int)bits(w, 30, 2);
+        char bb[32];
+        const char *bv = bits(w, 28, 1) ? (sprintf(bb, "%uu", (unsigned)bits(w, 20, 5)), bb) : R((int)bits(w, 20, 8));
+        int pd = (int)bits(w, 48, 3);
+        if (c->stage == STAGE_VERTEX) {
+            set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
+        } else if (mode == 3) {
+            bool quad = bits(w, 28, 1) && bits(w, 20, 5) < 4;
+            sprintf(t, quad ? "quad_shuffle_xor(%s, ushort(%s))" : "simd_shuffle_xor(%s, ushort(%s))", R(a), bv);
+            set_reg(c, d, t);
+        } else {
+            static const char *const fn[] = {"simd_shuffle", "simd_shuffle_up", "simd_shuffle_down"};
+            sprintf(t, "%s(%s, ushort(%s))", fn[mode], R(a), bv);
+            set_reg(c, d, t);
+        }
+        if (pd != PT) { c->pred_used[pd] = 1; sp(&c->body, "    p%d = true;\n", pd); }
+    } else if (OPM(0x38f0000000000000ull, 0xfef8000000000000ull) || OPM(0x5cf0000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x4cf0000000000000ull, 0xfff8000000000000ull)) {  // R2P
+        if (bits(w, 40, 1)) { fail(c, "r2p cc"); }
+        int shift = (int)bits(w, 41, 2) * 8;
+        const char *mask = B(false);
+        for (int i = 0; i < 7; i++) {
+            c->pred_used[i] = 1;
+            sp(&c->body, "    if ((%s >> %du) & 1u) p%d = ((%s >> %du) & 1u) != 0u;\n", mask, i, i, R(a), shift + i);
+        }
+    } else if (OPM(0x38e8000000000000ull, 0xfef8000000000000ull) || OPM(0x5ce8000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x4ce8000000000000ull, 0xfff8000000000000ull)) {  // P2R
+        if (bits(w, 40, 1)) { fail(c, "p2r cc"); }
+        int shift = (int)bits(w, 41, 2) * 8;
+        const char *mask = B(false);
+        sp(&c->body, "    { uint pr = 0u;\n");
+        for (int i = 0; i < 7; i++) { c->pred_used[i] = 1; sp(&c->body, "      pr |= (p%d ? 1u : 0u) << %du;\n", i, i); }
+        sp(&c->body, "      uint m = (%s & 0x7Fu) << %du;\n", mask, shift);
+        if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
+        sp(&c->body, "    }\n");
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         sp(&c->body, "    pc = %uu + %s + 0x%08xu; continue;\n", pc + 8, R(a), (uint32_t)sbits(w, 20, 24));
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
@@ -1018,6 +1078,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     sp(&s, "static inline uint bfe_u(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return 0u; return extract_bits(v, pos, min(len, 32u - pos)); }\n");
     sp(&s, "static inline uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(extract_bits(int(v), pos, min(len, 32u - pos))); }\n");
     sp(&s, "static inline uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return insert_bits(base, ins, pos, min(len, 32u - pos)); }\n");
+    sp(&s, "static inline float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n");
     sp(&s, "static inline uint prmt(uint a, uint b, uint sel) { uint r = 0; for (uint i = 0; i < 4; i++) { uint s = (sel >> (i * 4)) & 7u; uint byte = s < 4 ? (a >> (s * 8)) & 0xFFu : (b >> ((s - 4) * 8)) & 0xFFu; r |= byte << (i * 8); } return r; }\n");
 
     // inputs/outputs
@@ -1073,7 +1134,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  out.v%d = float4(0, 0, 0, 1);\n", i);
     } else if (stage == STAGE_FRAGMENT) {
-        sp(&s, "fragment FOut main0(FIn in [[stage_in]], bool front_facing [[front_facing]]%s) {\n", args.buf ? args.buf : "");
+        sp(&s, "fragment FOut main0(FIn in [[stage_in]], bool front_facing [[front_facing]]%s%s) {\n",
+           c->uses_lane ? ", uint lane [[thread_index_in_simdgroup]]" : "", args.buf ? args.buf : "");
     } else {
         sp(&s, "kernel void main0(uint3 tid [[thread_position_in_threadgroup]], uint3 ctaid [[threadgroup_position_in_grid]]%s) {\n",
            args.buf ? args.buf : "");

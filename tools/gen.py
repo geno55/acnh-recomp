@@ -100,25 +100,31 @@ class Module:
         return r
 
     def _index_regs(self, start, at, idx):
-        """The index register plus registers it was copied/masked from in start..at (the table
-        index is sometimes recomputed from the source after the bounds check)."""
-        regs = [idx]
-        a = at - 4
-        while a >= start:
-            w = self.word(a)
-            rd, rn = w & 31, bits(w, 5, 5)
-            if rd in regs:
-                src = None
-                if (w & 0x7F800000) == 0x12000000:  # AND (imm)
-                    src = rn
-                elif (w & 0x7FE0FFE0) == 0x2A0003E0:  # MOV (ORR with zr)
-                    src = bits(w, 16, 5)
-                elif (w & 0x7F800000) in (0x53000000, 0x13000000):  # UBFM/SBFM (uxtb, uxth, sxtw...)
-                    src = rn
-                if src is not None and src < 31 and src not in regs:
-                    regs.append(src)
-            a -= 4
-        return regs
+        """The index register plus registers holding the same value in start..at: sources it was
+        copied/masked from, and copies of those (the table lookup sometimes recomputes the index
+        from another copy after the bounds check)."""
+        def copy_src(w):
+            if (w & 0x7F800000) == 0x12000000:  # AND (imm)
+                return bits(w, 5, 5)
+            if (w & 0x7FE0FFE0) == 0x2A0003E0:  # MOV (ORR with zr)
+                return bits(w, 16, 5)
+            if (w & 0x7F800000) in (0x53000000, 0x13000000):  # UBFM/SBFM (uxtb, uxth, sxtw...)
+                return bits(w, 5, 5)
+            return None
+        regs = {idx}
+        changed = True
+        while changed:
+            changed = False
+            for a in range(start, at, 4):
+                w = self.word(a)
+                rd, src = w & 31, copy_src(w)
+                if src is None or src >= 31 or rd >= 31:
+                    continue
+                for x, y in ((rd, src), (src, rd)):
+                    if x in regs and y not in regs:
+                        regs.add(y)
+                        changed = True
+        return sorted(regs)
 
     def _set_index(self, mu, regs, i):
         for r in regs:
