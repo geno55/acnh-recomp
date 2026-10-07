@@ -717,7 +717,10 @@ SERVICE("audren:u", audren_u) {
 // ------------------------------------------------------------------ audout (buffers released in real time)
 typedef struct {
     uint32_t rate, channels, state;
-    uint64_t tags[64], sizes[64];
+    uint64_t tags[64], sizes[64], datas[64];
+    SDL_AudioStream *stream;
+    FILE *wav;
+    uint32_t wav_bytes;
     int queued, released_n;
     uint64_t released[64];
     uint32_t ev_r, ev_w;
@@ -726,23 +729,41 @@ typedef struct {
     pthread_mutex_t lock;
 } AudioOut;
 
+// Buffers are copied into an SDL stream and released once the stream has drained below its target, so the
+// stream plays the role of the hardware queue. Without a device, buffers are released in real time.
 static void *audout_thread(void *arg) {
     AudioOut *a = arg;
+    uint32_t ch = a->channels ? a->channels : 2;
+    int target = 0;
+    if (a->stream) {
+        SDL_AudioSpec dev;
+        int dev_frames = 0;
+        if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(a->stream), &dev, &dev_frames) || dev_frames <= 0)
+            dev_frames = 1024;
+        target = 2 * dev_frames * 2 * (int)ch;  // bytes of s16 at the source rate (close enough at 48 kHz)
+    }
     for (;;) {
         pthread_mutex_lock(&a->lock);
-        uint64_t size = 0;
-        if (a->state == 0 && a->queued) size = a->sizes[0];
+        uint64_t size = 0, tag = 0, data = 0;
+        if (a->state == 0 && a->queued) { size = a->sizes[0]; tag = a->tags[0]; data = a->datas[0]; }
         pthread_mutex_unlock(&a->lock);
-        if (!size) { struct timespec ts = {0, 2000000}; nanosleep(&ts, NULL); continue; }
-        uint64_t frames = size / (2 * (a->channels ? a->channels : 2));
-        uint64_t ns = frames * 1000000000ull / (a->rate ? a->rate : 48000);
-        struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)};
-        nanosleep(&ts, NULL);
+        if (!size) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); continue; }
+        uint64_t frames = size / (2 * ch);
+        if (a->stream) {
+            if (data) SDL_PutAudioStreamData(a->stream, (const void *)(uintptr_t)data, (int)size);
+            while (SDL_GetAudioStreamQueued(a->stream) > target) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
+        } else {
+            uint64_t ns = frames * 1000000000ull / (a->rate ? a->rate : 48000);
+            struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)};
+            nanosleep(&ts, NULL);
+        }
+        if (a->wav && data) { fwrite((const void *)(uintptr_t)data, 1, size, a->wav); a->wav_bytes += (uint32_t)size; }
         pthread_mutex_lock(&a->lock);
-        if (a->queued) {
+        if (a->queued && a->tags[0] == tag) {
             if (a->released_n < 64) a->released[a->released_n++] = a->tags[0];
             memmove(a->tags, a->tags + 1, (a->queued - 1) * 8);
             memmove(a->sizes, a->sizes + 1, (a->queued - 1) * 8);
+            memmove(a->datas, a->datas + 1, (a->queued - 1) * 8);
             a->queued--;
             a->played += frames;
         }
@@ -756,6 +777,11 @@ static void *audout_thread(void *arg) {
 
 static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
     AudioOut *a = s->state;
+    if (getenv("LARECOMP_AUDIO_LOG") && req->cmd != 3 && req->cmd != 7) {
+        IpcBuf *ob = out_buf(req, 0);
+        LOG("[audout] cmd %u out %llx/%llx\n", req->cmd, ob ? (unsigned long long)ob->addr : 0ull,
+            ob ? (unsigned long long)ob->size : 0ull);
+    }
     switch (req->cmd) {
     case 0: OUT(uint32_t, 0) = a->state; resp_size(resp, 4); break;   // GetAudioOutState
     case 1: a->state = 0; break;                                      // Start
@@ -764,8 +790,20 @@ static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = in_buf(req, 0);
         uint64_t tag = IN(uint64_t, 0);
         uint64_t size = b && b->size >= 0x28 ? ((uint64_t *)(uintptr_t)b->addr)[3] : 0;
+        if (getenv("LARECOMP_AUDIO_LOG") && b)
+            LOG("[audout] append tag %llx buf %llx size %llx: %llx %llx %llx %llx %llx\n", (unsigned long long)tag,
+                (unsigned long long)b->addr, (unsigned long long)b->size, ((unsigned long long *)(uintptr_t)b->addr)[0],
+                ((unsigned long long *)(uintptr_t)b->addr)[1], ((unsigned long long *)(uintptr_t)b->addr)[2],
+                ((unsigned long long *)(uintptr_t)b->addr)[3], ((unsigned long long *)(uintptr_t)b->addr)[4]);
         pthread_mutex_lock(&a->lock);
-        if (a->queued < 64) { a->tags[a->queued] = tag; a->sizes[a->queued] = size ? size : 4096; a->queued++; }
+        // AudioOutBuffer {next, samples, capacity, size, offset}
+        uint64_t data = b && b->size >= 0x28 ? ((uint64_t *)(uintptr_t)b->addr)[1] + ((uint64_t *)(uintptr_t)b->addr)[4] : 0;
+        if (a->queued < 64) {
+            a->tags[a->queued] = tag;
+            a->sizes[a->queued] = size ? size : 4096;
+            a->datas[a->queued] = size ? data : 0;
+            a->queued++;
+        }
         pthread_mutex_unlock(&a->lock);
         break;
     }
@@ -776,7 +814,9 @@ static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
         int n = a->released_n;
         int max = b ? (int)(b->size / 8) : 0;
         if (n > max) n = max;
+        if (b && b->size) memset((void *)(uintptr_t)b->addr, 0, b->size);  // SDK reads entry 0 even when n == 0
         for (int i = 0; i < n; i++) ((uint64_t *)(uintptr_t)b->addr)[i] = a->released[i];
+        if (getenv("LARECOMP_AUDIO_LOG") && n) LOG("[audout] released %d (first %llx)\n", n, (unsigned long long)a->released[0]);
         memmove(a->released, a->released + n, (a->released_n - n) * 8);
         a->released_n -= n;
         pthread_mutex_unlock(&a->lock);
@@ -808,10 +848,19 @@ SERVICE("audout:u", audout_u) {
         AudioOut *a = calloc(1, sizeof *a);
         a->rate = IN(uint32_t, 0) ? IN(uint32_t, 0) : 48000;
         a->channels = IN(uint16_t, 4) ? IN(uint16_t, 4) : 2;
-        if (a->channels > 2) a->channels = 2;
+        if (a->channels != 1 && a->channels != 2 && a->channels != 6) a->channels = 2;
         a->state = 1;
         pthread_mutex_init(&a->lock, NULL);
         a->event = kernel_create_event_pair(&a->ev_w, &a->ev_r);
+        if (getenv("LARECOMP_AUDOUT_WAV")) a->wav = fopen(getenv("LARECOMP_AUDOUT_WAV"), "wb");
+        if (!getenv("LARECOMP_NO_AUDIO") && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->channels, (int)a->rate};
+            a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+            if (a->stream) {
+                if (getenv("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(a->stream, (float)atof(getenv("LARECOMP_AUDIO_GAIN")));
+                SDL_ResumeAudioStreamDevice(a->stream);
+            }
+        }
         pthread_t t;
         pthread_create(&t, NULL, audout_thread, a);
         IpcBuf *b = out_buf(req, 0);

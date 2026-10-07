@@ -159,7 +159,7 @@ static void ok(Cpu *c) { c->x[0] = 0; }
 // ------------------------------------------------------------------ Extractor
 typedef struct {
     AVFormatContext *fmt;
-    int map[16], ntracks;  // exposed track -> stream (video only for now; audio output isn't wired up)
+    int map[16], ntracks;  // exposed track -> stream
     uint64_t selected;  // bitmask of streams
     AVPacket *pkt;
     bool have_pkt, eof;
@@ -189,7 +189,9 @@ static void ex_set_data_source(Cpu *c) {
     e->pkt = av_packet_alloc();
     e->ntracks = 0;
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)
-        if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) e->map[e->ntracks++] = (int)i;
+        if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
+            (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && !getenv("LARECOMP_NO_MOVIE_AUDIO")))
+            e->map[e->ntracks++] = (int)i;
     c->x[0] = 0;
 }
 
@@ -301,12 +303,29 @@ static void movie_log_slot(Cpu *c) {
     c->x[0] = 0;
 }
 
+// The game reads the audio and video tracks from different threads; FFmpeg's demuxer is not thread-safe.
+static pthread_mutex_t ex_lock = PTHREAD_MUTEX_INITIALIZER;
+#define EX_LOCKED(fn) \
+    static void fn##_l(Cpu *c) { pthread_mutex_lock(&ex_lock); fn(c); pthread_mutex_unlock(&ex_lock); }
+EX_LOCKED(ex_dtor)
+EX_LOCKED(ex_get_track_count)
+EX_LOCKED(ex_get_track_config)
+EX_LOCKED(ex_select_track)
+EX_LOCKED(ex_seek)
+EX_LOCKED(ex_get_sample_track)
+EX_LOCKED(ex_read)
+EX_LOCKED(ex_advance)
+EX_LOCKED(ex_get_sample_time)
+EX_LOCKED(ex_cached_duration)
+EX_LOCKED(ex_set_data_source)
+
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
     static uint64_t vt;
     if (!vt) {
-        HostFn f[16] = {ex_dtor, ex_dtor, movie_log_slot, movie_log_slot, ex_get_track_count, ex_get_track_config,
-                        ex_select_track, movie_log_slot, ex_seek, ex_get_sample_track, ex_read, ex_advance,
-                        ex_get_sample_time, movie_log_slot, ex_cached_duration, ex_set_data_source};
+        HostFn f[16] = {ex_dtor_l, ex_dtor_l, movie_log_slot, movie_log_slot, ex_get_track_count_l,
+                        ex_get_track_config_l, ex_select_track_l, movie_log_slot, ex_seek_l, ex_get_sample_track_l,
+                        ex_read_l, ex_advance_l, ex_get_sample_time_l, movie_log_slot, ex_cached_duration_l,
+                        ex_set_data_source_l};
         vt = make_vtable(f, 16, "Extractor");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];
@@ -317,6 +336,7 @@ HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
 // ------------------------------------------------------------------ Decoder
 #define NIN 4
 #define NOUT 6
+#define NPENDING 16
 
 typedef struct {
     int idx;
@@ -341,6 +361,11 @@ typedef struct {
     int width, height, stride, sample_rate, channels;
     struct SwsContext *sws;
     uint8_t *rgba;
+    AVFrame *pending[NPENDING];
+    int64_t pending_time[NPENDING];
+    int npending;
+    bool eos_pending;
+    int64_t eos_time;
     pthread_mutex_t lock;
 } Decoder;
 
@@ -422,7 +447,7 @@ static void dec_acquire_input(Cpu *c) {
     pthread_mutex_lock(&d->lock);
     int out_free = 0;
     for (int i = 0; i < NOUT; i++) if (!d->out_busy[i]) out_free++;
-    if (out_free < 2) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // backpressure
+    if (out_free < 2 || d->npending) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // backpressure
     int idx = -1, free_n = 0;
     for (int i = 0; i < NIN; i++)
         if (!d->in_busy[i]) { if (idx < 0) idx = i; else free_n++; }
@@ -446,7 +471,7 @@ static void dec_get_input_buffer(Cpu *c) {
 }
 
 // Copy a decoded frame into an output slot; caller holds the lock.
-static bool emit_frame(Decoder *d, int64_t time, uint32_t flags) {
+static bool emit_frame(Decoder *d, AVFrame *f, int64_t time, uint32_t flags) {
     int slot = -1;
     for (int i = 0; i < NOUT; i++) if (!d->out_busy[i]) { slot = i; break; }
     if (slot < 0) return false;
@@ -455,7 +480,6 @@ static bool emit_frame(Decoder *d, int64_t time, uint32_t flags) {
     if (flags & MOVIE_EOS) {
         size = 0;
     } else if (d->video) {
-        AVFrame *f = d->frame;
         int h = d->height, w = d->width, uv_off = d->stride * ((h + 15) & ~15);
         for (int y = 0; y < h; y++) memcpy(o + y * d->stride, f->data[0] + y * f->linesize[0], w);
         for (int y = 0; y < h / 2; y++) {  // interleave U and V into NV12
@@ -466,13 +490,17 @@ static bool emit_frame(Decoder *d, int64_t time, uint32_t flags) {
         size = (uint32_t)(uv_off + d->stride * (h / 2));
     } else {
         // planar float -> interleaved s16
-        AVFrame *f = d->frame;
         int ch = f->ch_layout.nb_channels, n = f->nb_samples;
         int16_t *out = (int16_t *)o;
         if ((uint32_t)(n * ch * 2) > d->out_cap) n = (int)(d->out_cap / (ch * 2));
+        // FFmpeg reorders Vorbis 5.1 to FL FR FC LFE BL BR; the game expects Vorbis order (FL FC FR BL BR LFE)
+        // and reorders itself.
+        static const int vorbis51[6] = {0, 2, 1, 4, 5, 3};
+        bool native = ch == 6 && d->ctx->codec_id == AV_CODEC_ID_VORBIS;
         for (int i = 0; i < n; i++)
             for (int k = 0; k < ch; k++) {
-                float s = f->format == AV_SAMPLE_FMT_FLTP ? ((const float *)f->data[k])[i] : 0.0f;
+                int src = native ? vorbis51[k] : k;
+                float s = f->format == AV_SAMPLE_FMT_FLTP ? ((const float *)f->data[src])[i] : 0.0f;
                 if (s > 1.0f) s = 1.0f;
                 if (s < -1.0f) s = -1.0f;
                 out[i * ch + k] = (int16_t)(s * 32767.0f);
@@ -483,6 +511,23 @@ static bool emit_frame(Decoder *d, int64_t time, uint32_t flags) {
     d->out_size[slot] = size;
     d->ready[d->nready++] = (OutReady){slot, time, flags};
     return true;
+}
+
+// Emit queued frames (and a pending end-of-stream marker) into free output slots.
+static bool flush_pending(Decoder *d) {
+    bool any = false;
+    while (d->npending && emit_frame(d, d->pending[0], d->pending_time[0], 0)) {
+        av_frame_free(&d->pending[0]);
+        memmove(d->pending, d->pending + 1, (d->npending - 1) * sizeof d->pending[0]);
+        memmove(d->pending_time, d->pending_time + 1, (d->npending - 1) * sizeof d->pending_time[0]);
+        d->npending--;
+        any = true;
+    }
+    if (!d->npending && d->eos_pending && emit_frame(d, NULL, d->eos_time, MOVIE_EOS)) {
+        d->eos_pending = false;
+        any = true;
+    }
+    return any;
 }
 
 static void dec_send_input(Cpu *c) {
@@ -503,11 +548,20 @@ static void dec_send_input(Cpu *c) {
     bool produced = false;
     while (avcodec_receive_frame(d->ctx, d->frame) == 0) {
         int64_t t = d->frame->pts != AV_NOPTS_VALUE ? d->frame->pts : time;
-        if (!emit_frame(d, t, 0)) LOG("[movie] output buffers full, dropping frame\n");
+        // keep order: queue behind anything already pending
+        if (d->npending || !emit_frame(d, d->frame, t, 0)) {
+            if (d->npending < NPENDING) {
+                d->pending[d->npending] = av_frame_clone(d->frame);
+                d->pending_time[d->npending++] = t;
+            } else {
+                LOG("[movie] output queue full, dropping frame\n");
+            }
+        }
         n_frames++;
         produced = true;
     }
-    if (flags & MOVIE_EOS) { emit_frame(d, time, MOVIE_EOS); produced = true; }
+    if (flags & MOVIE_EOS) { d->eos_pending = true; d->eos_time = time; }
+    produced |= flush_pending(d);
     if (idx >= 0 && idx < NIN) d->in_busy[idx] = false;
     pthread_mutex_unlock(&d->lock);
     signal_guest_event(c, d->events[0]);
@@ -567,7 +621,9 @@ static void dec_release_output(Cpu *c) {
     int i = (int)c->x[1];
     pthread_mutex_lock(&d->lock);
     if (i >= 0 && i < NOUT) d->out_busy[i] = false;
+    bool produced = flush_pending(d);
     pthread_mutex_unlock(&d->lock);
+    if (produced) signal_guest_event(c, d->events[1]);
     c->x[0] = 0;
 }
 
