@@ -450,9 +450,20 @@ static const char *tex_type_name(int t) {
 }
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
-static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs) {
+static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
     sp(&c->body, "    { float4 t = %s;\n", call);
     (void)slot;
+    if (f16) {
+        // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
+        int comps[4], n = 0;
+        for (int comp = 0; comp < 4; comp++) if (mask & (1u << comp)) comps[n++] = comp;
+        char v[4][16];
+        for (int i = 0; i < 4; i++) { if (i < n) sprintf(v[i], "t[%d]", comps[i]); else strcpy(v[i], "0.0f"); }
+        if (d0 != RZ) { c->reg_used[d0] = 1; sp(&c->body, "      r%d = as_type<uint>(half2(half(%s), half(%s)));\n", d0, v[0], v[1]); }
+        if (d1 != RZ) { c->reg_used[d1] = 1; sp(&c->body, "      r%d = as_type<uint>(half2(half(%s), half(%s)));\n", d1, v[2], v[3]); }
+        sp(&c->body, "    }\n");
+        return;
+    }
     int regs[4], n = 0;
     if (texs) {
         // TEXS: up to two components in d0/d0+1, two more in d1/d1+1
@@ -547,7 +558,7 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
         default: fail(c, "tlds info %d", info); return;
         }
     }
-    write_tex_result(c, slot, call, mask, d0, d1, true);
+    write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
@@ -596,7 +607,7 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
                 layer, dref, lod, off);
     else
         sprintf(call, "t%d.sample(s%d, %s(%s)%s%s%s%s)", slot, slot, vec, coords, array ? ", " : "", layer, lod, off);
-    write_tex_result(c, slot, call, mask, d, RZ, false);
+    write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
 // ------------------------------------------------------------------ instruction translation
