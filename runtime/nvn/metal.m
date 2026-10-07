@@ -143,7 +143,9 @@ typedef struct {
     __unsafe_unretained id<MTLTexture> tex;  // retained manually (CFBridgingRetain)
     bool gpu_owned;     // written by the GPU (render target / copy dest): never re-uploaded
     bool uploaded;
-    uint64_t data_hash;
+    bool dynamic;        // contents changed after the first upload: verify fully every frame
+    uint64_t data_hash, sample_hash;
+    uint64_t checked_frame, full_frame;
 } TexBackend;
 
 static MTLTextureType mtl_tex_type(uint32_t target, uint32_t samples) {
@@ -201,6 +203,22 @@ void backend_texture_destroyed(NvnTexture *t) {
     t->backend = NULL;
 }
 
+static uint64_t g_frame_counter;  // presents so far (texture change detection runs once per frame)
+static uint64_t full_hash_budget, full_hash_budget_frame;
+
+static uint64_t hash_full(const uint8_t *p, uint64_t n) {
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+    uint64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h = (h ^ v) * 0x100000001B3ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    return h;
+}
+
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
     // cheap change detector: hash a strided sample of the data
     uint64_t h = 1469598103934665603ull;
@@ -215,8 +233,24 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     const FormatInfo *fi = t->layout.fmt;
     MtlFormat mf = mtl_format(t->format);
     uint64_t total = tegra_total_size(&t->layout);
-    uint64_t h = fnv_sample((const uint8_t *)(uintptr_t)t->addr, total);
+    // CPU-written textures (e.g. font glyph caches) change sparsely, so a strided sample can miss
+    // updates. Check at most once per frame; textures seen changing get a full hash every frame,
+    // the rest a full hash on a rotating ~16 MB/frame budget plus a cheap sample otherwise.
+    if (b->uploaded && b->checked_frame == g_frame_counter) return;
+    b->checked_frame = g_frame_counter;
+    if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 16 << 20; }
+    const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
+    bool full = b->dynamic || !b->uploaded;
+    if (!full && g_frame_counter - b->full_frame >= 30 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
+    if (!full) {
+        uint64_t sh = fnv_sample(mem, total);
+        if (sh == b->sample_hash) return;
+    }
+    uint64_t h = hash_full(mem, total);
+    b->full_frame = g_frame_counter;
+    b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash) return;
+    if (b->uploaded) b->dynamic = true;
     b->data_hash = h;
     b->uploaded = true;
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
@@ -441,6 +475,7 @@ void backend_present(NvnTexture *t) {
     }
     frames++;
     total_frames++;
+    g_frame_counter++;
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
     static long shot_every = -1;
