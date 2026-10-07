@@ -1043,6 +1043,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         else if (dsz == 1) sprintf(t, sat ? (dsg ? "uint(clamp(%s, -32768, 32767))" : "uint(clamp(%s, 0, 65535))") : "(uint(%s) & 0xFFFFu)", src);
         else sprintf(t, "uint(%s)", src);
         set_reg(c, d, t);
+        if (bits(w, 47, 1)) {  // .CC: zero/sign flags of the result
+            c->uses_cc = true;
+            sp(&c->body, "    { uint ccv = %s; ccz = ccv == 0u; ccs = int(ccv) < 0; }\n", t);
+        }
     } else if (OPM(0x5bc0000000000000ull, 0xfff0000000000000ull) || OPM(0x4bc0000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x36c0000000000000ull, 0xfef0000000000000ull) || OPM(0x53c0000000000000ull, 0xfff0000000000000ull)) {  // PRMT
         const char *bv, *cv;
@@ -1153,6 +1157,27 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, "    }\n");
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         sp(&c->body, "    pc = %uu + %s + 0x%08xu; continue;\n", pc + 8, R(a), (uint32_t)sbits(w, 20, 24));
+    } else if (OPM(0x50a0000000000000ull, 0xfff8000000000000ull)) {  // CSETP (zero/sign flags only)
+        int test = (int)bits(w, 8, 5);
+        const char *cond;
+        switch (test) {
+        case 0: cond = "false"; break;
+        case 15: cond = "true"; break;
+        case 2: case 10: cond = "ccz"; break;
+        case 5: case 13: cond = "!ccz"; break;
+        case 1: case 9: cond = "ccs"; break;
+        case 6: case 14: cond = "!ccs"; break;
+        case 4: case 12: cond = "(!ccz && !ccs)"; break;
+        case 3: case 11: cond = "(ccz || ccs)"; break;
+        default: cond = "false"; fail(c, "csetp test %d", test);
+        }
+        c->uses_cc = true;
+        int p = (int)bits(w, 3, 3), q = (int)bits(w, 0, 3), bo = (int)bits(w, 45, 2);
+        const char *pc_ = P((int)bits(w, 39, 3), bits(w, 42, 1));
+        sp(&c->body, "    { bool cmp = %s; bool pp = %s;\n", cond, pc_);
+        if (p != PT) { c->pred_used[p] = 1; sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo)); }
+        if (q != PT) { c->pred_used[q] = 1; sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo)); }
+        sp(&c->body, "    }\n");
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
         fail(c, "cset");
     } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
@@ -1309,7 +1334,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0;\n", i);
     for (int i = 0; i < 7; i++)
         if (c->pred_used[i]) sp(&s, "  bool p%d = false;\n", i);
-    if (c->uses_cc) sp(&s, "  uint cc = 0;\n");
+    if (c->uses_cc) sp(&s, "  uint cc = 0; bool ccz = false, ccs = false;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
         sp(&s, "  bool exit_now = false;\n");

@@ -16,7 +16,7 @@ static id<MTLCommandBuffer> cmdbuf;
 static id<MTLRenderCommandEncoder> enc;
 static id<MTLRenderPipelineState> clear_pipes[64];
 static NSMutableDictionary<NSString *, id> *cache;
-static uint64_t stat_draws, stat_skipped, stat_passes;
+static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches;
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
@@ -71,8 +71,9 @@ const char *renderer_stats(void) {
         for (int i = 0; i < CMD_COUNT; i++) if (op_counts[i]) LOG(" %d:%llu", i, op_counts[i]);
         LOG("\n");
     }
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes", stat_draws, stat_skipped, stat_passes);
-    stat_draws = stat_skipped = stat_passes = 0;
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches", stat_draws, stat_skipped,
+             stat_passes, stat_dispatches);
+    stat_draws = stat_skipped = stat_passes = stat_dispatches = 0;
     return stats_text;
 }
 
@@ -750,6 +751,118 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
     }
 }
 
+
+// ------------------------------------------------------------------ compute
+// Compute driver constants (c0): 0x200 work group counts, 0x210 + 16*i uniform buffers (compute has
+// few hardware cbuf slots, so the compiler reads the rest through global memory), 0x310 + 16*i
+// storage buffers; each table entry is {addr_lo, addr_hi, size, 0}.
+typedef struct { id<MTLComputePipelineState> pipe; ShaderInfo *si; uint32_t local[3]; bool failed; } CsProg;
+
+static CsProg *compute_program(NvnProgram *p) {
+    NvnShaderStage *ss = &p->stages[5];
+    if (!ss->code_addr) return NULL;
+    NSValue *key = [NSValue valueWithPointer:(void *)(uintptr_t)ss->code_addr];
+    static NSMutableDictionary *progs;
+    if (!progs) progs = [NSMutableDictionary new];
+    NSValue *v = progs[key];
+    if (v) { CsProg *cp = v.pointerValue; return cp->failed ? NULL : cp; }
+    CsProg *cp = calloc(1, sizeof *cp);
+    progs[key] = [NSValue valueWithPointer:cp];
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    ShaderKey k = {0};
+    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    if (!cp->si->msl) { LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, ss->code_addr); cp->failed = true; return NULL; }
+    for (int i = 0; i < 3; i++) {
+        cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
+        if (!cp->local[i]) cp->local[i] = 1;
+    }
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(cp->si->msl) options:nil error:&err];
+    id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    cp->pipe = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+    if (!cp->pipe) {
+        LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
+        cp->failed = true;
+        return NULL;
+    }
+    LOG("[compute] program %llx: local size %ux%ux%u, %d cbufs mask %#x\n", ss->code_addr, cp->local[0], cp->local[1],
+        cp->local[2], 0, cp->si->cbuf_mask);
+    return cp;
+}
+
+static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
+    if (!st.program || !gx || !gy || !gz) return;
+    CsProg *cp = compute_program(st.program);
+    if (!cp) return;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("LARECOMP_TRACE_CS") != NULL;
+#define CST(x) do { if (trace) { fprintf(stderr, "[cs] %s\n", x); fflush(stderr); } } while (0)
+    CST("end_pass");
+    end_pass();
+    CST("encoder");
+    id<MTLComputeCommandEncoder> ce = [cb() computeCommandEncoder];
+    CST("pipeline");
+    [ce setComputePipelineState:cp->pipe];
+    ShaderInfo *si = cp->si;
+    for (int k = 0; k < 18; k++) {
+        if (!(si->cbuf_mask & (1u << k))) continue;
+        uint64_t off;
+        if (k == 0) {
+            uint32_t drv[0x500 / 4] = {0};  // tables end at 0x310 + 16 * 16
+            drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
+            for (int i = 0; i < 16; i++) {
+                uint32_t *u = &drv[(0x210 + 16 * i) / 4];
+                if (i < 18) { u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size; }
+                uint32_t *e = &drv[(0x310 + 16 * i) / 4];
+                e[0] = (uint32_t)st.sbuf[5][i].addr; e[1] = (uint32_t)(st.sbuf[5][i].addr >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
+            }
+            off = ring_alloc(drv, sizeof drv);
+        } else if (k == 1) {
+            NvnShaderStage *ss = &st.program->stages[5];
+            uint64_t size = ss->const_size ? ss->const_size : 16;
+            if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
+            off = ring_alloc((void *)(uintptr_t)(ss->code_addr + ss->const_offset), size);
+        } else {
+            int idx = k - cbuf_base;
+            Range r = (idx >= 0 && idx < 18) ? st.ubuf[5][idx] : (Range){0, 0};
+            uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
+            if (r.addr) {
+                if (size > r.size && r.size) size = r.size;
+                if (size < 16) size = 16;
+                off = ring_alloc((void *)(uintptr_t)r.addr, size);
+            } else {
+                static const uint8_t zeros[0x10000];
+                off = ring_alloc(zeros, size);
+            }
+        }
+        [ce setBuffer:ring offset:off atIndex:k];
+    }
+    CST("gmem");
+    if (si->uses_gmem) [ce setBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
+    CST("textures");
+    for (int i = 0; i < si->ntex; i++) {
+        ShaderTexture *st_ = &si->tex[i];
+        int slot = ((int)st_->handle_offset - 0x20) / 8;
+        uint64_t h = (slot >= 0 && slot < 32) ? st.tex[5][slot] : 0;
+        id<MTLTexture> tex = nil;
+        id<MTLSamplerState> smp = nil;
+        uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+        if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+        }
+        if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = sampler_for(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+        [ce setTexture:tex ? tex : dummy_texture(st_->type) atIndex:i];
+        [ce setSamplerState:smp ? smp : default_sampler() atIndex:i];
+    }
+    CST("dispatch");
+    [ce dispatchThreadgroups:MTLSizeMake(gx, gy, gz) threadsPerThreadgroup:MTLSizeMake(cp->local[0], cp->local[1], cp->local[2])];
+    [ce endEncoding];
+    CST("done");
+    stat_dispatches++;
+}
+
 static MTLPrimitiveType prim_type(uint32_t mode, bool *ok) {
     *ok = true;
     switch (mode) {
@@ -1306,6 +1419,7 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH:
+            dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
             if (st.program) {
                 static uint64_t seen[16];
                 static int nseen;

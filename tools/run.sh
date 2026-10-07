@@ -1,9 +1,9 @@
 #!/bin/bash
 # Build, run, and summarize: last log lines + symbolized guest backtrace.
 cd "$(dirname "$0")/.."
-nice -n 15 taskpolicy -b make -j8 2>&1 | grep -E 'error' -A3 && exit 1
+make -j16 2>&1 | grep -E 'error' -A3 && exit 1
 SECS=${SECS:-30}
-${RUNPREFIX:-taskpolicy -b} ./build/larecomp extracted > build/run.log 2>&1 &
+${RUNPREFIX} ./build/larecomp extracted > build/run.log 2>&1 &
 PID=$!
 for i in $(seq 1 $SECS); do sleep 1; kill -0 $PID 2>/dev/null || break; done
 kill -9 $PID 2>/dev/null && echo "(still running after ${SECS}s, killed)"

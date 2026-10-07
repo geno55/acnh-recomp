@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
         static uint8_t buf[0x10000];
         size_t n = fread(buf, 1, sizeof buf, f);
         fclose(f);
-        int stage = strstr(argv[i], "_s1_") ? STAGE_FRAGMENT : STAGE_VERTEX;
+        int stage = strstr(argv[i], "_s1_") ? STAGE_FRAGMENT : strstr(argv[i], "cs_") ? STAGE_COMPUTE : STAGE_VERTEX;
         ShaderKey key = {0};
         key.flip_y = true;
         ShaderInfo *s = maxwell_translate(buf, n, stage, &key);

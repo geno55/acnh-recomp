@@ -245,4 +245,5 @@ void crash_handler_install(void) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
 }

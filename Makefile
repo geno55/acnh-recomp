@@ -40,3 +40,6 @@ gen:
 gen-objs: $(GEN_OBJ)
 
 .PHONY: all gen gen-objs
+
+build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
+	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
