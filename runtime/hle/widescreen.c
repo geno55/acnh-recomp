@@ -84,4 +84,10 @@ void widescreen_backdrop_seen(uint64_t hash) {
         if (known[i] && hash == known[i]) { extern uint64_t renderer_present_count(void); g_backdrop_frame = renderer_present_count(); }
     (void)g_backdrop_hash;
 }
-bool widescreen_frame_boxed(uint64_t frame) { return g_backdrop_frame == frame; }
+bool widescreen_frame_boxed(uint64_t frame) {
+    static bool last;
+    bool b = g_backdrop_frame == frame;
+    if (b != last && getenv("LARECOMP_LOG_INDOOR")) LOG("[widescreen] boxed %d at frame %llu\n", b, (unsigned long long)frame);
+    last = b;
+    return b;
+}

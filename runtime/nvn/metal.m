@@ -224,6 +224,9 @@ static TexBackend *tex_backend(NvnTexture *t) {
     }
     TexBackend *b = calloc(1, sizeof *b);
     b->scalable = tex_scalable(t);
+    if (t->width == 1920 && t->height == 1080 && getenv("LARECOMP_LOG_SCALABLE"))
+        LOG("[scale] 1920x1080 tex %p f%#x flags %#x target %u samples %u levels %u -> scalable %d (%s)\n", (void *)t, t->format,
+            t->flags, t->target, t->samples, t->levels, b->scalable, t->label);
     create_backend_texture(t, b);
     t->backend = b;
     return b;
@@ -671,7 +674,9 @@ void ui_run(void) {
                           reason:@"Game emulation"];
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
-    window = SDL_CreateWindow("Link's Awakening (LARecomp)", 1280, 720, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE |
+    int win_w = 1280, win_h = 720;
+    if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
+    window = SDL_CreateWindow("Link's Awakening (LARecomp)", win_w, win_h, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE |
                                                                        SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     SDL_MetalView view = SDL_Metal_CreateView(window);

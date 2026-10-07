@@ -1290,6 +1290,17 @@ static void draw(CmdRec *r, bool indexed) {
         if (!log_hash && g_debug_frame) LOG("[fshash] fs=%llx hash %016llx\n", fs, last_hash);
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
+        if (last_hash == 0x71fe31bbf03c3515ull && getenv("LARECOMP_LOG_INDOOR")) {
+            static uint64_t lf;
+            extern uint64_t renderer_present_count(void);
+            if (renderer_present_count() != lf) {
+                lf = renderer_present_count();
+                LOG("[backdrop] frame %llu count %llu rt %ux%u vp %.0f %.0f %.0f %.0f scissor %d %d %d %d\n", (unsigned long long)lf, r->x[2],
+                    st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->width : 0, st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->height : 0,
+                    st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], st.scissor[0][0], st.scissor[0][1],
+                    st.scissor[0][2], st.scissor[0][3]);
+            }
+        }
     }
     static int log_rt_w = -1, log_rt_h;
     if (log_rt_w < 0) { const char *e = getenv("LARECOMP_LOG_RT"); log_rt_w = 0; if (e) sscanf(e, "%dx%d", &log_rt_w, &log_rt_h); }
@@ -1471,24 +1482,25 @@ static void draw(CmdRec *r, bool indexed) {
     bind_textures(1, pr->fi);
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
-        // Draws into the swapchain image: the frame's leading run of draws that sample the reshaped scene
-        // is the final composite and keeps the full mapping; everything after it is UI (HUD, text, menus,
-        // some of which sample the blurred scene too) and goes into a centred 16:9 box. A movie frame
-        // doesn't sample the scene, so it is pillarboxed as well.
+        // Draws into the swapchain image: draws that sample the full-size reshaped scene (the final
+        // composite, blurred menu backgrounds) and untextured full-screen fades fill the window; everything
+        // else (HUD, text, menus, movie frames) goes into a centred 16:9 box.
         bool reads_scene = false;  // samples a reshaped texture the size of the framebuffer (the scene itself)
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
             if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
                 tex_wh[1][i][1] == st.rt.color[0]->height)
                 reads_scene = true;
+        // Full-screen overlays without textures (fades, flashes) cover the whole window too.
+        bool fullscreen_fill = pr->fi->ntex == 0 && r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
+                               st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
         extern uint64_t renderer_present_count(void);
-        static uint64_t frame = ~0ull;
-        static bool in_composite;
-        if (frame != renderer_present_count()) { frame = renderer_present_count(); in_composite = true; }
-        if (!reads_scene) in_composite = false;
-        bool composite = in_composite;
-        if (getenv("LARECOMP_LOG_UI") && g_debug_frame)
-            LOG("[ui] fs=%llx count %llu reads_scene %d -> %s\n", st.program->stages[1].code_addr, r->x[2], reads_scene,
-                composite ? "composite" : "ui");
+        static uint64_t wide_frame = ~0ull;  // the latest draw this frame filled the window (nothing boxed since)
+        if (reads_scene) wide_frame = renderer_present_count();
+        bool composite = reads_scene || (fullscreen_fill && wide_frame == renderer_present_count());
+        if (!composite) wide_frame = ~0ull;
+        if (g_debug_frame && getenv("LARECOMP_LOG_UI"))
+            LOG("[ui2] fs=%llx count %llu ntex %d reads_scene %d fill %d -> %d\n", st.program->stages[1].code_addr, r->x[2],
+                pr->fi->ntex, reads_scene, fullscreen_fill, composite);
         if (!composite) {  // centred 16:9 region with a uniform scale
             int pw, ph;
             pass_size(&pw, &ph);
