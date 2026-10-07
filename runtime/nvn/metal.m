@@ -667,6 +667,8 @@ void backend_present(NvnTexture *t) {
     g_frame_counter++;
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
+    extern void save_editor_frame(uint64_t frame);
+    save_editor_frame(total_frames);
     static long shot_every = -1;
     if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
     extern bool g_debug_frame;
