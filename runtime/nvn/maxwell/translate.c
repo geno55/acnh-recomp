@@ -53,6 +53,7 @@ typedef struct {
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
     uint32_t omap_target, omap_depth;
     int tex_slot[8192];           // texture index -> Metal slot + 1
+    bool tex_weak[64];            // slot type only guessed (from a size query): the next sample decides
     bool fail;
     bool branchy;  // program uses the pc state machine
     int ipa_mode;  // interpolation mode of the IPA being translated (-1 for plain loads)
@@ -252,13 +253,173 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
     }
 }
 
+
+// ------------------------------------------------------------------ half precision (SM53)
+// Swizzle: 0 H1_H0 (both halves), 1 F32 (one f32 used for both lanes), 2 H0_H0, 3 H1_H1.
+// Merge: 0 H1_H0 (pack both), 1 F32 (lane 0 as f32), 2 MRG_H0 (replace low half), 3 MRG_H1 (replace high half).
+static const char *hsrc(Ctx *c, const char *v, int swz, bool neg, bool abs_, char *buf) {
+    (void)c;
+    char t[300];
+    sprintf(t, "hx(%s, %du)", v, swz);
+    if (abs_ && neg) sprintf(buf, "(-abs(%s))", t);
+    else if (abs_) sprintf(buf, "abs(%s)", t);
+    else if (neg) sprintf(buf, "(-%s)", t);
+    else strcpy(buf, t);
+    return buf;
+}
+#define HS(v, sw, n, ab) hsrc(c, (v), (sw), (n), (ab), alloca(400))
+
+static void hstore(Ctx *c, int d, const char *expr, int merge, bool sat) {
+    char t[2048], e[1700];
+    if (sat) sprintf(e, "saturate(%s)", expr); else strcpy(e, expr);
+    if (d == RZ) return;
+    c->reg_used[d] = 1;
+    sprintf(t, "hpack(%s, %du, r%d)", e, merge, d);
+    set_reg(c, d, t);
+}
+
+// immediate halves: 9 bits of each half's top (the low 6 mantissa bits are zero) plus separate signs
+static uint32_t himm(uint64_t w) {
+    uint32_t lo = ((uint32_t)bits(w, 20, 9) << 6) | ((uint32_t)bits(w, 29, 1) << 15);
+    uint32_t hi = ((uint32_t)bits(w, 30, 9) << 6) | ((uint32_t)bits(w, 56, 1) << 15);
+    return lo | (hi << 16);
+}
+
+static bool emit_half(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
+    char t[1800], ib[32], cb[256];
+    uint16_t op = (uint16_t)(w >> 48);
+    // ---- HADD2 / HMUL2 (reg 5d10/5d08, cbuf 7a8x/788x, imm 7a0x/780x, 32I 2c/2a)
+    int kind = -1;  // 0 add, 1 mul
+    int form = -1;  // 0 reg, 1 cbuf, 2 imm, 3 32i
+    if ((op & 0xfff8) == 0x5d10) { kind = 0; form = 0; }
+    else if ((op & 0xfff8) == 0x5d08) { kind = 1; form = 0; }
+    else if ((op & 0xfe80) == 0x7a80) { kind = 0; form = 1; }
+    else if ((op & 0xfe80) == 0x7a00) { kind = 0; form = 2; }
+    else if ((op & 0xfe80) == 0x7880) { kind = 1; form = 1; }
+    else if ((op & 0xfe80) == 0x7800) { kind = 1; form = 2; }
+    else if ((op & 0xfe00) == 0x2c00) { kind = 0; form = 3; }
+    else if ((op & 0xfe00) == 0x2a00) { kind = 1; form = 3; }
+    if (kind >= 0) {
+        int merge, swa, swb = 0;
+        bool sat, nega, absa = false, negb = false, absb = false;
+        const char *bv;
+        if (form == 3) {
+            merge = 0; sat = bits(w, 52, 1); swa = (int)bits(w, 53, 2); nega = kind == 0 ? bits(w, 56, 1) : false;
+            sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib;
+        } else {
+            merge = (int)bits(w, 49, 2); swa = (int)bits(w, 47, 2); nega = bits(w, 43, 1); absa = bits(w, 44, 1);
+            if (form == 0) {
+                sat = bits(w, 32, 1); negb = bits(w, 31, 1); absb = bits(w, 30, 1); swb = (int)bits(w, 28, 2);
+                bv = R((int)bits(w, 20, 8));
+            } else if (form == 1) {
+                sat = bits(w, 52, 1); negb = bits(w, 56, 1); absb = bits(w, 54, 1); swb = 1;
+                bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb);
+            } else {
+                sat = bits(w, 52, 1); swb = 0;
+                sprintf(ib, "0x%08xu", himm(w)); bv = ib;
+            }
+        }
+        sprintf(t, kind == 0 ? "(%s + %s)" : "(%s * %s)", HS(R(a), swa, nega, absa), HS(bv, swb, negb, absb));
+        hstore(c, d, t, merge, sat);
+        return true;
+    }
+    // ---- HFMA2 (reg 5d00, cr 70xx|0x80, rc 60xx|0x80, imm 70xx, 32I 28)
+    form = -1;
+    if ((op & 0xfff8) == 0x5d00) form = 0;
+    else if ((op & 0xf880) == 0x7080) form = 1;  // b = cbuf, c = reg
+    else if ((op & 0xf880) == 0x6080) form = 2;  // b = reg, c = cbuf
+    else if ((op & 0xf880) == 0x7000) form = 3;  // b = imm, c = reg
+    else if ((op & 0xfe00) == 0x2800) form = 4;  // 32I: c = d
+    if (form >= 0) {
+        int merge, swa = (int)bits(w, 47, 2), swb = 0, swc = 0;
+        bool sat, negb, negc;
+        const char *bv, *cv;
+        char cb2[256];
+        switch (form) {
+        case 0:
+            merge = (int)bits(w, 49, 2); sat = bits(w, 32, 1); negb = bits(w, 31, 1); negc = bits(w, 30, 1);
+            swb = (int)bits(w, 28, 2); swc = (int)bits(w, 35, 2);
+            bv = R((int)bits(w, 20, 8)); cv = R((int)bits(w, 39, 8));
+            break;
+        case 1:
+            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
+            swb = 1; swc = (int)bits(w, 53, 2);
+            bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); cv = R((int)bits(w, 39, 8));
+            break;
+        case 2:
+            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
+            swb = (int)bits(w, 53, 2); swc = 1;
+            bv = R((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb2);
+            break;
+        case 3:
+            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = false; negc = bits(w, 51, 1);
+            swb = 0; swc = (int)bits(w, 53, 2);
+            sprintf(ib, "0x%08xu", himm(w)); bv = ib; cv = R((int)bits(w, 39, 8));
+            break;
+        default:
+            merge = 0; sat = bits(w, 52, 1); negb = false; negc = bits(w, 56, 1);
+            swa = (int)bits(w, 53, 2); swb = 0; swc = 0;
+            sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib; cv = R(d);
+            break;
+        }
+        sprintf(t, "fma(%s, %s, %s)", HS(R(a), swa, false, false), HS(bv, swb, negb, false), HS(cv, swc, negc, false));
+        hstore(c, d, t, merge, sat);
+        return true;
+    }
+    // ---- HSETP2 / HSET2 (reg forms)
+    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18) {
+        bool setp = (op & 0xfff8) == 0x5d20;
+        const char *x = HS(R(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
+        const char *y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
+        int cop = (int)bits(w, 35, 4), bop = (int)bits(w, 45, 2);
+        const char *pp = P((int)bits(w, 39, 3), bits(w, 42, 1));
+        char lx[512], ly[512];
+        sp(&c->body, "    { float2 hx_ = %s, hy_ = %s; bool pp = %s;\n", x, y, pp);
+        fcmp_expr(lx, cop, "hx_.x", "hy_.x");
+        fcmp_expr(ly, cop, "hx_.y", "hy_.y");
+        sp(&c->body, "      bool l = %s, h = %s;\n", lx, ly);
+        if (setp) {
+            int pa = (int)bits(w, 3, 3), pb = (int)bits(w, 0, 3);
+            bool hand = bits(w, 49, 1);
+            if (hand) sp(&c->body, "      l = l && h; h = !l;\n");
+            if (pa != PT) { c->pred_used[pa] = 1; sp(&c->body, "      p%d = l %s pp;\n", pa, bool_op(bop)); }
+            if (pb != PT) { c->pred_used[pb] = 1; sp(&c->body, "      p%d = h %s pp;\n", pb, bool_op(bop)); }
+        } else {
+            bool bf = bits(w, 49, 1);
+            if (d != RZ) {
+                c->reg_used[d] = 1;
+                sp(&c->body, "      l = l %s pp; h = h %s pp;\n", bool_op(bop), bool_op(bop));
+                sp(&c->body, bf ? "      r%d = (l ? 0x3c00u : 0u) | (h ? 0x3c000000u : 0u);\n"
+                                : "      r%d = (l ? 0xFFFFu : 0u) | (h ? 0xFFFF0000u : 0u);\n", d);
+            }
+        }
+        sp(&c->body, "    }\n");
+        return true;
+    }
+    return false;
+}
+
 // ------------------------------------------------------------------ textures
 static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     if (index >= 8192) return 0;
-    if (c->tex_slot[index]) return c->tex_slot[index] - 1;
+    if (c->tex_slot[index]) {
+        int s = c->tex_slot[index] - 1;
+        if (type >= 0 && c->tex_weak[s]) {
+            ShaderTexture *t = &c->info->tex[s];
+            t->type = (uint8_t)type;
+            t->shadow = shadow;
+            t->is_array = array;
+            c->tex_weak[s] = false;
+        }
+        return s;
+    }
+    bool weak = type < 0;
+    if (weak) type = TEXTYPE_2D;
     int s = c->info->ntex++;
     if (s >= 31) { fail(c, "too many textures"); return 0; }
     c->tex_slot[index] = s + 1;
+    c->tex_weak[s] = weak;
     ShaderTexture *t = &c->info->tex[s];
     t->handle_offset = index * 4;
     t->type = (uint8_t)type;
@@ -512,7 +673,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);
         uint32_t mask = (uint32_t)bits(w, 31, 4);
-        int slot = tex_slot(c, index, TEXTYPE_2D, false, false);
+        int slot = tex_slot(c, index, -1, false, false);  // the type comes from a sample, if any
         if (qt == 1) {  // dimension
             sp(&c->body, "    { uint lv = %s; uint4 q = uint4(t%d.get_width(lv), t%d.get_height(lv), 1, t%d.get_num_mip_levels());\n",
                R(a), slot, slot, slot);
@@ -929,6 +1090,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                     sp(&c->body, "      if (ok) *(device uint *)(gmem + ga + %du) = %s;\n", k * 4, R(d == RZ ? RZ : d + k));
         }
         sp(&c->body, "    }\n");
+    } else if (emit_half(c, w)) {
     } else if (OPM(0x50f8000000000000ull, 0xfff8000000000000ull)) {  // FSWZADD
         // per quad lane (laneid & 3), 2 bits of the swizzle pick: a+b, b-a, a-b, b
         uint32_t swz = (uint32_t)bits(w, 28, 8);
@@ -1017,7 +1179,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     c->ipa_mode = -1;
     const uint8_t *sph = blob + 0x30;
     const uint8_t *code = blob + 0x80;
-    if (stage == STAGE_COMPUTE) { code = blob + 0x30; }
+    // compute programs have no SPH, but their code also starts at +0x80
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
@@ -1079,6 +1241,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     sp(&s, "static inline uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(extract_bits(int(v), pos, min(len, 32u - pos))); }\n");
     sp(&s, "static inline uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return insert_bits(base, ins, pos, min(len, 32u - pos)); }\n");
     sp(&s, "static inline float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n");
+    sp(&s, "static inline float2 hx(uint v, uint swz) { if (swz == 1u) return float2(as_type<float>(v)); float2 h = float2(as_type<half2>(v)); return swz == 2u ? h.xx : swz == 3u ? h.yy : h; }\n");
+    sp(&s, "static inline uint hpack(float2 r, uint merge, uint old) { if (merge == 1u) return as_type<uint>(r.x); uint lo = uint(as_type<ushort>(half(r.x))), hi = uint(as_type<ushort>(half(r.y))); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n");
     sp(&s, "static inline uint prmt(uint a, uint b, uint sel) { uint r = 0; for (uint i = 0; i < 4; i++) { uint s = (sel >> (i * 4)) & 7u; uint byte = s < 4 ? (a >> (s * 8)) & 0xFFu : (b >> ((s - 4) * 8)) & 0xFFu; r |= byte << (i * 8); } return r; }\n");
 
     // inputs/outputs
