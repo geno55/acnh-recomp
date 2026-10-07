@@ -3,7 +3,7 @@
 python3 -c "
 import random, os
 random.seed(int(os.environ.get('SEED','1')))
-f=3500; s='400:A:6,520:A:6,900:ZL:8,900:ZR:8,1300:A:6,1600:A:6,1900:A:6,2200:A:6,3200:STICK_DOWN:80,3290:STICK_RIGHT:45,3345:STICK_DOWN:120'
+f=3200; s='400:A:6,520:A:6,900:ZL:8,900:ZR:8,1300:A:6,1600:A:6,1900:A:6,2200:A:6'
 dirs=['STICK_LEFT','STICK_DOWN','STICK_RIGHT','STICK_UP']
 d=random.choice(dirs)
 for i in range(int(os.environ.get('STEPS','80'))):

@@ -223,6 +223,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
 
 static Service *open_host_fs(const char *sub) {
     HostFs *fs = calloc(1, sizeof *fs);
+    if (getenv("LARECOMP_SAVE_DIR")) g_save_dir = getenv("LARECOMP_SAVE_DIR");  // test runs use a scratch copy
     snprintf(fs->root, sizeof fs->root, "%s/%s", g_save_dir, sub);
     char cmd[1200];
     snprintf(cmd, sizeof cmd, "%s", fs->root);
