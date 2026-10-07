@@ -1,4 +1,5 @@
 // Executes recorded NVN command lists with Metal.
+#include <pthread.h>
 #import <Metal/Metal.h>
 #include <mach/mach_time.h>
 #include <stdlib.h>
@@ -122,19 +123,54 @@ static void end_pass(void) {
 }
 
 static void ring_reset(void);
-void renderer_flush(void) {
+// Submitted work runs asynchronously; last_cb is the most recently committed command buffer (the queue
+// executes in order, so waiting for it waits for everything before it). Other guest threads (nvnSyncWait)
+// read last_cb, so it is guarded by cb_lock; everything else here runs on the submitting thread.
+static id<MTLCommandBuffer> last_cb;
+static pthread_mutex_t cb_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void wait_cb(id<MTLCommandBuffer> c) {
+    if (!c) return;
+    uint64_t t0 = mach_absolute_time();
+    [c waitUntilCompleted];
+    stat_wait_ns += (mach_absolute_time() - t0);
+}
+
+// Commit recorded work without waiting.
+void renderer_submit(void) {
     end_pass();
     if (cmdbuf) {
-        uint64_t t0 = mach_absolute_time();
-        [cmdbuf commit];
-        [cmdbuf waitUntilCompleted];
-        stat_wait_ns += (mach_absolute_time() - t0);
-        stat_gpu_s += cmdbuf.GPUEndTime - cmdbuf.GPUStartTime;
-        stat_flushes++;
-        if (cmdbuf.error) LOG("[metal] command buffer error: %s\n", cmdbuf.error.localizedDescription.UTF8String);
+        id<MTLCommandBuffer> c = cmdbuf;
         cmdbuf = nil;
+        [c addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            stat_gpu_s += done.GPUEndTime - done.GPUStartTime;
+            if (done.error) LOG("[metal] command buffer error: %s\n", done.error.localizedDescription.UTF8String);
+        }];
+        [c commit];
+        pthread_mutex_lock(&cb_lock);
+        last_cb = c;
+        pthread_mutex_unlock(&cb_lock);
+        stat_flushes++;
     }
+}
+
+// Finish all recorded GPU work (the CPU is about to read GPU results, or reuse the ring).
+void renderer_flush(void) {
+    renderer_submit();
+    pthread_mutex_lock(&cb_lock);
+    id<MTLCommandBuffer> c = last_cb;
+    pthread_mutex_unlock(&cb_lock);
+    wait_cb(c);
     ring_reset();
+}
+
+// Wait for submitted work without committing anything new (nvnSyncWait / QueueFinish).
+// Callable from any thread: everything submitted so far was committed by renderer_submit.
+void renderer_sync(void) {
+    pthread_mutex_lock(&cb_lock);
+    id<MTLCommandBuffer> c = last_cb;
+    pthread_mutex_unlock(&cb_lock);
+    wait_cb(c);
 }
 
 // ------------------------------------------------------------------ textures with views
@@ -353,7 +389,8 @@ static uint64_t ring_alloc(const void *data, uint64_t size) {
     if (!ring) ring = [dev newBufferWithLength:RING_SIZE options:MTLResourceStorageModeShared];
     uint64_t aligned = (ring_off + 255) & ~255ull;
     if (aligned + size > RING_SIZE) {
-        renderer_flush();  // the ring resets after the GPU has caught up
+        // Start a fresh ring; command buffers in flight keep the old one alive until they complete.
+        ring = [dev newBufferWithLength:(size > RING_SIZE ? size : RING_SIZE) options:MTLResourceStorageModeShared];
         aligned = 0;
     }
     memcpy((uint8_t *)ring.contents + aligned, data, size);
@@ -1872,6 +1909,9 @@ static void exec_list(uint64_t handle, int depth) {
 void backend_execute(uint64_t handle) {
     @autoreleasepool {
         exec_list(handle, 0);
-        renderer_flush();  // the guest may reuse memory as soon as the submit returns
+        static int sync_submit = -1;
+        if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
+        if (sync_submit) renderer_flush();  // old behaviour: finish the GPU work before returning
+        else renderer_submit();  // the guest fences (nvnSyncWait) before reusing memory the GPU reads
     }
 }

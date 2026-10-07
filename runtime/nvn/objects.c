@@ -6,6 +6,8 @@
 #include "../kernel.h"
 #include "nvn.h"
 
+void renderer_sync(void);
+
 static uint64_t next_debug_id = 1;
 
 // ================================================================== device
@@ -116,7 +118,7 @@ NVN(nvnQueueSubmitCommands) {
     for (int i = 0; i < n; i++) backend_execute(handles[i]);
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; }
+NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -137,6 +139,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     if (flush) renderer_flush();
+    else renderer_sync();  // fences are reported signaled at submit; make that true before the CPU proceeds
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }

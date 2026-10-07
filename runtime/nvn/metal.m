@@ -462,7 +462,8 @@ static uint64_t frames, total_frames;
 static double last_fps_time;
 
 void backend_present(NvnTexture *t) {
-    renderer_flush();
+    extern void renderer_submit(void);
+    renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
