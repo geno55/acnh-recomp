@@ -309,11 +309,11 @@ static void dump_program(NvnProgram *p) {
     for (int s = 0; s < 6; s++) {
         if (!(p->stage_mask & (1u << s))) continue;
         char path[256];
-        snprintf(path, sizeof path, "build/shaders/p%03d_s%d_code.bin", n, s);
+        snprintf(path, sizeof path, "build/shaders/%llx_s%d_code.bin", p->stages[s].code_addr, s);
         FILE *f = fopen(path, "wb");
         fwrite((void *)(uintptr_t)p->stages[s].code_addr, 1, 0x10000, f);
         fclose(f);
-        snprintf(path, sizeof path, "build/shaders/p%03d_s%d_ctrl.bin", n, s);
+        snprintf(path, sizeof path, "build/shaders/%llx_s%d_ctrl.bin", p->stages[s].code_addr, s);
         f = fopen(path, "wb");
         fwrite(p->stages[s].control, 1, 0x4000, f);
         fclose(f);
@@ -550,7 +550,9 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
         f = fopen(path, "w"); fputs(pr->fi->msl, f); fclose(f);
     }
     NSError *err = nil;
-    id<MTLLibrary> vl = [dev newLibraryWithSource:@(pr->vi->msl) options:nil error:&err];
+    static MTLCompileOptions *vopts;
+    if (!vopts) { vopts = [MTLCompileOptions new]; vopts.preserveInvariance = YES; }
+    id<MTLLibrary> vl = [dev newLibraryWithSource:@(pr->vi->msl) options:vopts error:&err];
     if (!vl) { LOG("[shader] VS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->vi->msl); pr->failed = true; return nil; }
     id<MTLLibrary> fl = [dev newLibraryWithSource:@(pr->fi->msl) options:nil error:&err];
     if (!fl) { LOG("[shader] FS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->fi->msl); pr->failed = true; return nil; }
@@ -581,7 +583,7 @@ static id<MTLSamplerState> sampler_for(NvnSamplerDesc *d) {
     sd.lodMinClamp = d->lod_min;
     sd.lodMaxClamp = d->lod_max > 1000 ? FLT_MAX : d->lod_max;
     if (d->max_aniso > 1) sd.maxAnisotropy = (NSUInteger)fminf(d->max_aniso, 16);
-    if (d->compare_mode) sd.compareFunction = compare_fn((uint8_t)d->compare_func);
+    if (d->compare_mode) sd.compareFunction = getenv("LARECOMP_NO_SHADOW") ? MTLCompareFunctionAlways : compare_fn((uint8_t)d->compare_func);
     sd.supportArgumentBuffers = NO;
     id<MTLSamplerState> s = [dev newSamplerStateWithDescriptor:sd];
     d->backend = (void *)CFBridgingRetain(s);
@@ -668,8 +670,12 @@ static id<MTLTexture> sampled_texture(NvnTexture *t, const NvnTextureView *v, bo
             tex = [tex newTextureViewWithPixelFormat:tex.pixelFormat textureType:MTLTextureType2DArray levels:NSMakeRange(0, tex.mipmapLevelCount) slices:NSMakeRange(0, 1)];
         else if (want == MTLTextureTypeCube && tex.textureType == MTLTextureType2DArray && tex.arrayLength >= 6)
             tex = [tex newTextureViewWithPixelFormat:tex.pixelFormat textureType:MTLTextureTypeCube levels:NSMakeRange(0, tex.mipmapLevelCount) slices:NSMakeRange(0, 6)];
-        else
+        else {
+            static int nlog;
+            if (nlog++ < 30) LOG("[tex] type mismatch: want %lu have %lu (%ux%ux%u target %u fmt %#x arr %lu)\n", (unsigned long)want,
+                                 (unsigned long)tex.textureType, t->width, t->height, t->depth, t->target, t->format, (unsigned long)tex.arrayLength);
             return dummy_texture(want_type);
+        }
     }
     return tex;
 }
@@ -774,6 +780,7 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
             else [enc setFragmentBuffer:ring offset:off atIndex:k];
             continue;
         }
+        if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;  // indexed: whole buffer
         if (size > r.size && r.size) size = r.size;
         if (size < 16) size = 16;
         uint64_t off = ring_alloc((void *)(uintptr_t)r.addr, size);  // snapshot, as later CPU writes must not leak in
@@ -859,6 +866,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             Range r = (idx >= 0 && idx < 18) ? st.ubuf[5][idx] : (Range){0, 0};
             uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
             if (r.addr) {
+                if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
                 if (size > r.size && r.size) size = r.size;
                 if (size < 16) size = 16;
                 off = ring_alloc((void *)(uintptr_t)r.addr, size);
@@ -945,6 +953,9 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     for (int s = 0; s < 2; s++)
         for (int i = 0; i < 18; i++)
             if (st.ubuf[s][i].addr) LOG(" %c%d(%llx,%llu)", s ? 'f' : 'v', i, st.ubuf[s][i].addr, st.ubuf[s][i].size);
+    LOG(" | fubo0:");
+    for (int i = 0; i < 6; i++)
+        if (st.ubuf[1][i].addr) { const float *f = (const float *)(uintptr_t)st.ubuf[1][i].addr; LOG(" f%d=[%g %g %g %g]", i, f[0], f[1], f[2], f[3]); }
     LOG(" | ssbo:");
     for (int sg = 0; sg < 2; sg++)
         for (int i = 0; i < 16; i++)
@@ -956,7 +967,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         if (!st.tex[1][i]) continue;
         uint32_t tic = st.tex[1][i] & 0xFFFFF;
         NvnTexture *t = st.tpool && tic < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[tic].tex : NULL;
-        if (t) LOG(" %d=[%ux%u f%#x fl%#x %s]", i, t->width, t->height, t->format, t->flags, t->label);
+        if (t) LOG(" %d=[%ux%ux%u t%u f%#x fl%#x %s]", i, t->width, t->height, t->depth, t->target, t->format, t->flags, t->label);
         else LOG(" %d=%llx", i, st.tex[1][i]);
     }
     LOG(" | rt %d", st.rt.ncolor);

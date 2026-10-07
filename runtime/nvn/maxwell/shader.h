@@ -30,6 +30,7 @@ typedef struct {
     char *msl;              // complete MSL source, entry point "main0"
     uint32_t cbuf_mask;     // hardware constant buffers read
     uint32_t cbuf_size[18];
+    uint32_t cbuf_dynamic;  // cbufs indexed with a register: bind the whole buffer
     int ntex;
     ShaderTexture tex[64];
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings

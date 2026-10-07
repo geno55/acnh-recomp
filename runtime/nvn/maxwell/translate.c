@@ -103,6 +103,7 @@ static const char *pred(Ctx *c, int p, bool neg, char *buf) {
 static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char *buf) {
     c->info->cbuf_mask |= 1u << idx;
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
+    if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
@@ -308,12 +309,15 @@ static bool emit_half(Ctx *c, uint64_t w) {
             merge = 0; sat = bits(w, 52, 1); swa = (int)bits(w, 53, 2); nega = kind == 0 ? bits(w, 56, 1) : false;
             sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib;
         } else {
+            // field layout per Ryujinx's InstDecoders (InstHadd2*/InstHmul2*)
             merge = (int)bits(w, 49, 2); swa = (int)bits(w, 47, 2); nega = bits(w, 43, 1); absa = bits(w, 44, 1);
             if (form == 0) {
-                sat = bits(w, 32, 1); negb = bits(w, 31, 1); absb = bits(w, 30, 1); swb = (int)bits(w, 28, 2);
+                sat = bits(w, 32, 1); absb = bits(w, 30, 1); swb = (int)bits(w, 28, 2);
+                if (kind == 0) negb = bits(w, 31, 1);
+                else { nega = bits(w, 31, 1); negb = false; }  // HMUL2 reg: the negate bit is A's at 31
                 bv = R((int)bits(w, 20, 8));
             } else if (form == 1) {
-                sat = bits(w, 52, 1); negb = bits(w, 56, 1); absb = bits(w, 54, 1); swb = 1;
+                sat = bits(w, 52, 1); negb = kind == 0 ? bits(w, 56, 1) : false; absb = bits(w, 54, 1); swb = 1;
                 bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb);
             } else {
                 sat = bits(w, 52, 1); swb = 0;
@@ -336,30 +340,30 @@ static bool emit_half(Ctx *c, uint64_t w) {
         bool sat, negb, negc;
         const char *bv, *cv;
         char cb2[256];
-        switch (form) {
+        switch (form) {  // field layout per Ryujinx's InstDecoders (InstHfma2*); NegA is applied to B (same product)
         case 0:
             merge = (int)bits(w, 49, 2); sat = bits(w, 32, 1); negb = bits(w, 31, 1); negc = bits(w, 30, 1);
             swb = (int)bits(w, 28, 2); swc = (int)bits(w, 35, 2);
             bv = R((int)bits(w, 20, 8)); cv = R((int)bits(w, 39, 8));
             break;
-        case 1:
-            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
+        case 1:  // b = cbuf, c = reg
+            merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
             swb = 1; swc = (int)bits(w, 53, 2);
             bv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb); cv = R((int)bits(w, 39, 8));
             break;
-        case 2:
-            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
+        case 2:  // b = reg (field at 39), c = cbuf
+            merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = bits(w, 56, 1); negc = bits(w, 51, 1);
             swb = (int)bits(w, 53, 2); swc = 1;
             bv = R((int)bits(w, 39, 8)); cv = cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb2);
             break;
-        case 3:
-            merge = (int)bits(w, 57, 2); sat = bits(w, 52, 1); negb = false; negc = bits(w, 51, 1);
+        case 3:  // b = imm, c = reg
+            merge = (int)bits(w, 49, 2); sat = bits(w, 52, 1); negb = false; negc = bits(w, 51, 1);
             swb = 0; swc = (int)bits(w, 53, 2);
             sprintf(ib, "0x%08xu", himm(w)); bv = ib; cv = R((int)bits(w, 39, 8));
             break;
-        default:
-            merge = 0; sat = bits(w, 52, 1); negb = false; negc = bits(w, 56, 1);
-            swa = (int)bits(w, 53, 2); swb = 0; swc = 0;
+        default:  // 32I: c = d
+            merge = 0; sat = false; negb = false; negc = bits(w, 51, 1);
+            swa = (int)bits(w, 47, 2); swb = 0; swc = 0;
             sprintf(ib, "0x%08xu", (uint32_t)bits(w, 20, 32)); bv = ib; cv = R(d);
             break;
         }
@@ -663,7 +667,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         for (int i = 0; i < n; i++) attr_store(c, d + i, addr + 4 * i);
     } else if (OPM(0xef90000000000000ull, 0xfff8000000000000ull)) {  // LD c[idx][reg + imm]
         int idx = (int)bits(w, 36, 5);
-        int64_t off = sbits(w, 20, 16);
+        int64_t off = (int64_t)bits(w, 20, 16);  // unsigned (Ryujinx InstLdc.CbufOffset)
         int sz = (int)bits(w, 48, 3);
         int n = sz == 5 ? 2 : 1;
         char rb[16];
@@ -1294,7 +1298,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             sp(&s, "  %s4 a%d [[attribute(%d)]];\n", kind == 1 ? "int" : kind == 2 ? "uint" : "float", i, i);
         }
         sp(&s, "};\n");
-        sp(&s, "struct VOut {\n  float4 pos [[position]];\n");
+        sp(&s, "struct VOut {\n  float4 pos [[position, invariant]];\n");  // depth pre-pass + EQUAL test needs identical positions
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  float4 v%d [[user(locn%d)]];\n", i, i);
         if (info->writes_point_size) sp(&s, "  float psize [[point_size]];\n");
