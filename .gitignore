@@ -17,3 +17,5 @@ save_backup_*/
 # local settings / reference clones
 /larecomp.ini
 /third_party/LAS-Randomizer-dev/
+# Python virtual environments (machine-specific)
+venv/
