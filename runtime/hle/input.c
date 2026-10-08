@@ -70,9 +70,12 @@ void input_reset(void) {
     recompute_keyboard();
 }
 
+volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+
 void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         recompute_keyboard();
         break;
@@ -90,9 +93,9 @@ void input_handle_event(const SDL_Event *e) {
 }
 
 // Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
-// MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT).
+// MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT).
 static _Atomic uint64_t script_buttons;
-static _Atomic int32_t script_lx, script_ly;
+static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
 static uint64_t g_pad_obj;
 void input_frame(uint64_t frame) {
@@ -116,7 +119,7 @@ void input_frame(uint64_t frame) {
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
                                         "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
     uint64_t b = 0;
-    int32_t lx = 0, ly = 0;
+    int32_t lx = 0, ly = 0, rx = 0, ry = 0;
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", spec);
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
@@ -128,12 +131,30 @@ void input_frame(uint64_t frame) {
         else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
         else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
         else if (!strcmp(name, "STICK_RIGHT")) lx = 32767;
+        else if (!strcmp(name, "RSTICK_UP")) ry = 32767;
+        else if (!strcmp(name, "RSTICK_DOWN")) ry = -32767;
+        else if (!strcmp(name, "RSTICK_LEFT")) rx = -32767;
+        else if (!strcmp(name, "RSTICK_RIGHT")) rx = 32767;
         for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
+    }
+    {  // test hooks steering the stick (runtime/hle/doorjump.c LARECOMP_DOORJUMP_TEST)
+        extern int32_t g_test_lx, g_test_ly;
+        extern uint64_t g_test_stick_until;
+        if (frame < g_test_stick_until) { lx = g_test_lx; ly = g_test_ly; }
+        extern uint64_t g_test_buttons, g_test_buttons_until;  // (LARECOMP_PLACE action script)
+        if (frame < g_test_buttons_until) b |= g_test_buttons;
     }
     script_buttons = b;
     script_lx = lx;
     script_ly = ly;
+    script_rx = rx;
+    script_ry = ry;
 }
+
+volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip the opening on rando seeds)
+
+// Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
+uint64_t input_buttons_now(void) { return key_buttons | pad_buttons | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -147,6 +168,12 @@ static void fill_state(Cpu *c) {
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
     if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
+    extern void warp_game_tick(Cpu *c);
+    warp_game_tick(c);  // game main thread, once per frame: apply a queued warp
+    { extern void give_item_tick(Cpu *c, uint64_t frame); extern uint64_t renderer_present_count(void);
+      give_item_tick(c, renderer_present_count());
+      extern void chamber_game_tick(Cpu *c, uint64_t frame);
+      chamber_game_tick(c, renderer_present_count()); }
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
@@ -159,8 +186,22 @@ static void fill_state(Cpu *c) {
     extern bool menu_is_open(void);
     bool menu = menu_is_open();  // the overlay menu has the controls
     uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
+    {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
+        extern uint64_t renderer_present_count(void);
+        static uint64_t until;
+        if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
+        if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
+    }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
-    int32_t rx = menu ? 0 : clamp_axis(key_rx + pad_rx), ry = menu ? 0 : clamp_axis(key_ry + pad_ry);
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
+    {   // door jumps stop Link for a moment before moving him (runtime/hle/doorjump.c): stick + d-pad released
+        extern uint64_t g_stick_freeze_until;
+        extern uint64_t renderer_present_count(void);
+        if (renderer_present_count() < g_stick_freeze_until) {
+            lx = ly = 0;
+            b &= ~(0xfull << 12);
+        }
+    }
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;
@@ -176,6 +217,7 @@ static void fill_state(Cpu *c) {
     last_b = b;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;
+    { extern void input_note_rstick(int32_t ry); input_note_rstick(ry); }
     *(int32_t *)(s + 24) = rx;
     *(int32_t *)(s + 28) = ry;
     *(uint32_t *)(s + 32) = 1;  // IsConnected

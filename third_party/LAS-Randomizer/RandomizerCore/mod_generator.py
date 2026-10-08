@@ -1856,7 +1856,8 @@ class ModsProcess(QtCore.QThread):
 
         enemy_settings = {
             'types': self.settings['randomize-enemies'],
-            'sizes':self.settings['randomize-enemy-sizes']
+            'sizes':self.settings['randomize-enemy-sizes'],
+            'minibosses': self.settings.get('enemy-minibosses', False)  # LARecomp
         }
 
         levels_path = f'{self.rom_path}/region_common/level'

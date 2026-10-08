@@ -113,6 +113,15 @@ static Region regions[1024];
 static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
+// Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
+int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
+    int n = 0;
+    for (int i = 0; i < nregions && n < max; i++)
+        if ((regions[i].perm & 2) && regions[i].type != 0xB && regions[i].type != 0xC) {
+            addr[n] = regions[i].addr; size[n] = regions[i].size; n++;
+        }
+    return n;
+}
 
 static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
     if (nregions == 1024) FATAL("too many regions\n");

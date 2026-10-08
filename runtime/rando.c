@@ -28,7 +28,11 @@ static char g_seed_dir[512];
 static bool g_active;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
-const char *rando_seed_dir(void) { return g_active ? g_seed_dir : NULL; }
+void rando_init(void);
+const char *rando_seed_dir(void) {
+    rando_init();  // (lazy: callers can run before anything else touched the seed, e.g. the launch movie)
+    return g_active ? g_seed_dir : NULL;
+}
 
 static void apply_data(uint64_t img_off, const uint8_t *bytes, size_t n) {
     uint8_t *p = (uint8_t *)(uintptr_t)(MAIN_BASE + img_off);
@@ -115,4 +119,12 @@ bool rando_romfs_override(const char *path, char *out, size_t cap) {
     snprintf(out, cap, "%s/romfs/%s", g_seed_dir, path);
     struct stat sb;
     return stat(out, &sb) == 0 && S_ISREG(sb.st_mode);
+}
+
+// Items page: hide the item explanation text in randomizer seeds (tools/patches.py ITEM_EXPLANATION_SITE); it
+// overlaps the inventory overlay's dungeon-key / trade rows and the player knows the items.
+int rt_hide_item_explanation(void) {
+    static int env = -1;  // LARECOMP_SHOW_ITEM_TEXT=1 keeps it
+    if (env < 0) env = getenv("LARECOMP_SHOW_ITEM_TEXT") != NULL;
+    return !env && rando_seed_dir() != NULL;
 }

@@ -19,8 +19,8 @@ IMGUI    := third_party/imgui
 UI_SRC   := $(wildcard runtime/ui/*.mm)
 UI_OBJ   := $(patsubst runtime/%.mm,build/rt/%.o,$(UI_SRC))
 IMGUI_OBJ := build/imgui/imgui.o build/imgui/imgui_draw.o build/imgui/imgui_tables.o build/imgui/imgui_widgets.o \
-             build/imgui/imgui_impl_metal.o
-CXXFLAGS := -O2 -g -std=c++17 -fobjc-arc -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(SDL)/include
+             build/imgui/imgui_impl_metal.o build/imgui/imgui_impl_sdl3.o
+CXXFLAGS := -O2 -g -std=c++17 -fobjc-arc -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -I$(SDL)/include -I$(FFMPEG)/include
 
 all: build/larecomp
 
@@ -44,6 +44,10 @@ build/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
 	clang++ $(CXXFLAGS) -c $< -o $@
 
 build/imgui/%.o: $(IMGUI)/%.cpp
+	@mkdir -p $(dir $@)
+	clang++ $(CXXFLAGS) -c $< -o $@
+
+build/imgui/imgui_impl_sdl3.o: $(IMGUI)/backends/imgui_impl_sdl3.cpp
 	@mkdir -p $(dir $@)
 	clang++ $(CXXFLAGS) -c $< -o $@
 

@@ -187,6 +187,7 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 
 // ---- crash reporting
 #include <dlfcn.h>
+#include <errno.h>
 #include <signal.h>
 #include <sys/ucontext.h>
 
@@ -196,6 +197,8 @@ uint64_t g_watch_lo, g_watch_hi;
 static uint64_t watch_page;
 static void *watch_thread(void *a) {
     (void)a;
+    int r = mprotect((void *)watch_page, 0x4000, PROT_NONE);
+    fprintf(stderr, "[watch] page %llx protect -> %d (errno %d)\n", (unsigned long long)watch_page, r, r ? errno : 0);
     for (;;) { mprotect((void *)watch_page, 0x4000, PROT_NONE); usleep(100); }
     return NULL;
 }

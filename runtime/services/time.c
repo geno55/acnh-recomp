@@ -20,6 +20,7 @@ static void write_system_context(uint8_t *p) {  // SystemClockContext (0x20)
 
 static void time_shmem_map(KSharedMem *s) {
     uint8_t *m = (uint8_t *)(uintptr_t)s->guest_addr;
+    LOG("[time] shared memory mapped at %llx\n", (unsigned long long)s->guest_addr);
     // 0x00: LockFreeAtomicType<SteadyClockContext{u64 internal_offset, uuid}>
     *(uint32_t *)m = 0;
     *(uint64_t *)(m + 0x08) = 0;
@@ -115,3 +116,14 @@ static void static_service(Service *s, IpcReq *req, IpcResp *resp) {
 SERVICE("time:u", time_u) { static_service(s, req, resp); }
 SERVICE("time:a", time_a) { static_service(s, req, resp); }
 SERVICE("time:s", time_s) { static_service(s, req, resp); }
+
+// nn::time::StandardUserSystemClock::GetCurrentTime(PosixTime*): answered directly from the host clock. The SDK's
+// shared-memory path aborts (svcBreak via nn::diag::Abort, result 0xcc74) if the local clock's source id ever
+// differs from the steady clock's; that happened once in the room sweep on an autosave (entering Eagle's Tower) and
+// could not be reproduced, so the date stamp no longer depends on it.
+HLE_FUNC("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", time_std_user_now) {
+    static int n;
+    if (n++ < 3) LOG("[time] StandardUserSystemClock::GetCurrentTime (host clock)\n");
+    if (c->x[0]) *(int64_t *)(uintptr_t)c->x[0] = unix_now();
+    c->x[0] = 0;  // ResultSuccess
+}

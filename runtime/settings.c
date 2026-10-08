@@ -15,6 +15,9 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .show_fps = false,
+    .inv_keys = true,
+    .tracker = true,
+    .diff_damage = 1.0f,
 };
 
 void settings_load(void) {
@@ -39,6 +42,14 @@ void settings_load(void) {
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+        else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
+        else if (!strcmp(key, "tracker")) g_settings.tracker = atoi(val) != 0;
+        else if (!strcmp(key, "cheat_hearts")) g_settings.cheat_hearts = atoi(val) != 0;
+        else if (!strcmp(key, "cheat_ammo")) g_settings.cheat_ammo = atoi(val) != 0;
+        else if (!strcmp(key, "cheat_rupees")) g_settings.cheat_rupees = atoi(val) != 0;
+        else if (!strcmp(key, "diff_damage")) g_settings.diff_damage = (float)atof(val);
+        else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
+        else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
     }
     fclose(f);
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -56,6 +67,12 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
+    fprintf(f, "tracker = %d\n", g_settings.tracker);
+    fprintf(f, "cheat_hearts = %d\ncheat_ammo = %d\ncheat_rupees = %d\n", g_settings.cheat_hearts, g_settings.cheat_ammo,
+            g_settings.cheat_rupees);
+    fprintf(f, "diff_damage = %.2f\ndiff_ohko = %d\ndiff_hero = %d\n", g_settings.diff_damage, g_settings.diff_ohko,
+            g_settings.diff_hero);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);
 }

@@ -11,6 +11,7 @@
 //   15 ReleaseOutputBufferIndex(int), 18 GetOutputBufferFormat(int, MediaData*).
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/time.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 #include <pthread.h>
@@ -164,9 +165,35 @@ typedef struct {
     uint64_t selected;  // bitmask of streams
     AVPacket *pkt;
     bool have_pkt, eof;
+    bool skippable;  // the launch opening on a randomizer seed: A / B / + ends it
 } Extractor;
 
 static void ex_fill(Extractor *e) {
+    if (e->skippable && !e->eof) {
+        // the game skips the opening with Plus; on randomizer seeds A and B do too (we press Plus for it)
+        extern uint64_t input_buttons_now(void);
+        extern volatile int g_inject_plus;
+        static bool held;
+        static double pressed_at;
+        bool now = (input_buttons_now() & ((1u << 0) | (1u << 1))) != 0;
+        if (now && !held) {
+            LOG("[movie] opening: A/B -> Plus (skip)\n");
+            g_inject_plus = 1;
+            if (!pressed_at) pressed_at = av_gettime_relative() / 1e6;
+        }
+        held = now;
+        // With no save file yet the game ignores Plus (first viewing can't be skipped): if the movie still plays
+        // half a second after the press, jump to its last half second so it ends the normal way (ending the
+        // stream outright makes the game restart it).
+        if (pressed_at && av_gettime_relative() / 1e6 - pressed_at > 0.5 && e->fmt->duration > 1000000) {
+            pressed_at = 0;
+            int64_t to = e->fmt->duration - 500000;
+            if (av_seek_frame(e->fmt, -1, to, AVSEEK_FLAG_BACKWARD) >= 0) {
+                if (e->have_pkt) { av_packet_unref(e->pkt); e->have_pkt = false; }
+                LOG("[movie] opening: still playing -> seek to the end\n");
+            }
+        }
+    }
     while (!e->have_pkt && !e->eof) {
         if (av_read_frame(e->fmt, e->pkt) < 0) { e->eof = true; break; }
         if (e->selected & (1ull << e->pkt->stream_index)) e->have_pkt = true;
@@ -189,6 +216,10 @@ static void ex_set_data_source(Cpu *c) {
     }
     e->pkt = av_packet_alloc();
     e->ntracks = 0;
+    {   // randomizer seeds: the shipwreck opening at launch can be skipped (LARECOMP_SKIP_OPENING=1 forces it on)
+        extern const char *rando_seed_dir(void);
+        e->skippable = rel && strstr(rel, "movie/opening.webm") && (rando_seed_dir() || getenv("LARECOMP_SKIP_OPENING"));
+    }
     for (unsigned i = 0; i < e->fmt->nb_streams && e->ntracks < 16; i++)
         if (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
             (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && g_settings.movie_audio && !getenv("LARECOMP_NO_MOVIE_AUDIO")))

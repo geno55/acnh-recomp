@@ -1,5 +1,6 @@
 // LARecomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <libgen.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <crt_externs.h>
@@ -70,10 +71,33 @@ void rt_restart(void) {
     LOG("[main] restart failed\n");
 }
 
+// Back to the start screen (runtime/ui/launcher.mm): the same restart without --play / LARECOMP_NO_LAUNCHER.
+void rt_restart_to_title(void) {
+    static char *av[64];
+    int n = 0;
+    for (int i = 0; g_argv[i] && n < 63; i++)
+        if (strcmp(g_argv[i], "--play")) av[n++] = g_argv[i];
+    av[n] = NULL;
+    unsetenv("LARECOMP_NO_LAUNCHER");
+    LOG("[main] back to the title screen\n");
+    fflush(stderr);
+    execv(av[0], av);
+    LOG("[main] restart failed\n");
+}
+
 int main(int argc, char **argv) {
     g_argv = argv;
     setvbuf(stderr, NULL, _IOLBF, 0);
-    const char *root = argc > 1 ? argv[1] : "extracted";
+    const char *root = "extracted";
+    bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (argv[i][0] != '-') root = argv[i];
+    }
+    if (!skip_launcher) {  // start screen (runtime/ui/launcher.mm): game files setup, seed choice, settings
+        extern void launcher_run(const char *root);
+        launcher_run(root);
+    }
     char exefs[1024], romfs[1024], npdm_path[1024];
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
     snprintf(romfs, sizeof romfs, "%s/romfs", root);

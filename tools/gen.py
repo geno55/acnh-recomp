@@ -355,6 +355,7 @@ class Module:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
             return out
+        out.append(f'    FN_ENTER({hx(entry)});')
         batch = []
         refs = set()
 
@@ -473,6 +474,18 @@ if _os.path.exists(_rv):
         RANDO_CODE[int(_a, 16)] = [int(_w, 16) for _w in _ws]
 
 
+def write_if_changed(path, text):
+    """Leaves unchanged chunks untouched so make only recompiles what a patch affected."""
+    try:
+        with open(path) as f:
+            if f.read() == text:
+                return
+    except FileNotFoundError:
+        pass
+    with open(path, 'w') as f:
+        f.write(text)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('name')
@@ -560,16 +573,14 @@ def main():
             refs |= getattr(m, '_refs', set())
             m._refs = set()
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
-        with open(path, 'w') as f:
-            f.write('#include "cpu.h"\n')
-            for r in sorted(refs):
-                f.write(f'void {fname(r)}(Cpu *c);\n')
-            for a in sorted(set(hle) & set(order[ci:ci + args.chunk])):
-                f.write(f'void {sanitize(hle[a])}(Cpu *c);\n')
-            f.write('\n'.join(body))
-            f.write('\n')
+        text = ['#include "cpu.h"\n']
+        text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
+        text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(order[ci:ci + args.chunk]))]
+        text += ['\n'.join(body), '\n']
+        write_if_changed(path, ''.join(text))
         nchunks += 1
-    with open(os.path.join(args.outdir, f'{args.name}_table.c'), 'w') as f:
+    import io
+    with io.StringIO() as f:
         f.write('#include "cpu.h"\n')
         for a in order:
             f.write(f'void {fname(a)}(Cpu *c);\n')
@@ -580,6 +591,7 @@ def main():
         f.write(',\n'.join(fname(a) for a in order))
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+        write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 
 

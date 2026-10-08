@@ -1,5 +1,6 @@
 // Widescreen: the camera code's 16:9 aspect literal loads are patched (tools/patches.py) to call
 // rt_aspect_site(); the renderer sets the wide factor (output aspect / 16:9) each frame.
+#include <string.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -85,10 +86,32 @@ void widescreen_backdrop_seen(uint64_t hash) {
         if (known[i] && hash == known[i]) { extern uint64_t renderer_present_count(void); g_backdrop_frame = renderer_present_count(); }
     (void)g_backdrop_hash;
 }
+// Interiors and dungeons only render their 16:9 centre. Besides the backdrop detection, the game's current level
+// decides: in play and not on the overworld ("Field") -> boxed. That also covers fades and loading frames, where
+// no backdrop is drawn and the sides would show stale pixels.
+static bool level_is_interior(void) {
+    extern int game_in_play(void);
+    if (!game_in_play()) return false;
+    uint64_t ps = LD64(MAIN_BASE + 0x1CC1368);  // PlayerStatus*: current level name at +0
+    if (!ps) return false;
+    const char *lv = (const char *)(uintptr_t)ps;
+    return lv[0] && strcmp(lv, "Field") != 0;
+}
+
 bool widescreen_frame_boxed(uint64_t frame) {
     static bool last;
-    bool b = g_backdrop_frame == frame;
+    static uint64_t interior_until;  // keep boxing briefly after leaving: the first (dark) frames still show stale sides
+    bool in = level_is_interior();
+    if (in) interior_until = frame + 8;
+    bool b = g_backdrop_frame == frame || in || frame < interior_until;
     if (b != last && getenv("LARECOMP_LOG_INDOOR")) LOG("[widescreen] boxed %d at frame %llu\n", b, (unsigned long long)frame);
     last = b;
     return b;
+}
+
+// Current level name for logs ("-" when not in play).
+const char *game_level_name(void) {
+    extern int game_in_play(void);
+    uint64_t ps = LD64(MAIN_BASE + 0x1CC1368);
+    return game_in_play() && ps && *(const char *)(uintptr_t)ps ? (const char *)(uintptr_t)ps : "-";
 }

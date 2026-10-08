@@ -586,6 +586,13 @@ class ItemShuffler(QtCore.QThread):
             else:
                 item_pool = [s for s in items if len(s) >= 2 and s[-2:] == f'D{i}']
 
+            # LARecomp keysanity: these dungeon items go to the general pool (anywhere) instead of their own dungeon
+            ks = self.settings.get('keysanity', 'off')
+            ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
+                       'all': ('key-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(ks, ())
+            if ks_free:
+                item_pool = [s for s in item_pool if not s.startswith(ks_free)]
+
             location_pool = [s for s in locations if len(s) >= 2 and s[:2] == f'D{i}']
             random.shuffle(location_pool)
             
@@ -762,6 +769,16 @@ class ItemShuffler(QtCore.QThread):
         for loc in locs:
             placements['indexes'][loc] = indexes_available[placements[loc]].pop(0)
         
+        # LARecomp keysanity: a dungeon item outside its own dungeon carries its dungeon (upstream dev convention:
+        # 0-7 = D1-D8, 9 = Color Dungeon); the runtime AddItem hook (runtime/hle/keysanity.c) credits that dungeon.
+        # Items in their own dungeon keep index -1 (the game adds them to the current dungeon).
+        for key in [k for k in placements if k not in ('settings', 'indexes') and isinstance(placements.get(k), str)
+                    and placements[k].startswith(('compass', 'map', 'stone-beak', 'key-', 'nightmare-key'))
+                    and placements[k][-2:-1] == 'D' and placements[k][-1].isdigit()]:
+            n = int(placements[key][-1])
+            if key.startswith(f'D{n}-'):
+                continue
+            placements['indexes'][key] = 9 if n == 0 else n - 1
         # dungeon_indexes = [k for k in placement_tracker if placements[k].startswith(('compass', 'map', 'stone', 'key', 'nightmare'))]
         # for key in dungeon_indexes:
         #     # if key in placements['indexes']:

@@ -1,6 +1,8 @@
 // Randomizer tab: choose / generate LAS-Randomizer seeds (rando/<seed>/). Switching seeds restarts the game
 // (game data is read at boot); each seed keeps its own save slots.
 #include <dirent.h>
+#include <ftw.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -49,6 +51,16 @@ static std::string json_str(const std::string &j, const char *key) {
     return e == std::string::npos ? "" : j.substr(p, e - p);
 }
 
+// Deletes rando/<name> (the seed's game files, spoiler and its save slots).
+static int rm_entry(const char *path, const struct stat *, int, struct FTW *) { return remove(path); }
+static bool delete_seed(const std::string &name) {
+    if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos) return false;
+    std::string dir = "rando/" + name;
+    bool ok = nftw(dir.c_str(), rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0;
+    LOG("[rando] deleted seed %s: %s\n", name.c_str(), ok ? "ok" : strerror(errno));
+    return ok;
+}
+
 static void scan(void) {
     g_seeds.clear();
     DIR *d = opendir("rando");
@@ -74,12 +86,24 @@ static void scan(void) {
 // ---- generation (background process)
 static pid_t g_gen_pid;
 static std::string g_gen_seed, g_gen_status;
+static float g_gen_frac;
+static double g_gen_start;
 static bool g_gen_failed;
+
+static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "Yellow", "Pink", "Teal", "Sky",
+                                      "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
 
 struct GenOpts {
     char seed[64] = "";
     int logic = 0;            // basic advanced glitched hell none
     int dungeon_items = 3;    // none stone-beak mc mcb
+    int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
+    bool bomb_bag = false, powder_bag = false;  // shuffle-bombs / shuffle-powder
+    bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets
+    bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk)
+    bool enemy_minibosses = false;  // enemy-minibosses (needs Randomize enemies)
+    int tunic = 0;            // tunic-color: index into kTunics (tools/rando/cosmetics.py COLOURS)
+    bool inc_fishing = false, inc_rapids = false, inc_dampe = false, inc_trade = false, inc_blue = false;
     int traps = 1;            // none few several many trapsanity
     int seashells = 2;        // max reward included: none 5 15 30 40 50
     bool shuffle_instruments = false, shuffle_dungeons = false, randomize_enemies = false, randomize_music = false;
@@ -125,6 +149,20 @@ static void start_generation(void) {
             g_opts.open_mabe ? "true" : "false", g_opts.fast_songs ? "true" : "false", g_opts.ohko ? "true" : "false",
             g_opts.boss_cutscenes ? "true" : "false", g_opts.spoiler ? "true" : "false");
     fprintf(f, " \"starting-rupees\": %d, \"blur-removal\": false,\n", g_opts.start_rupees);
+    fprintf(f, " \"pots\": %s,\n", g_opts.pots ? "true" : "false");
+    fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
+               " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
+            g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
+    fprintf(f, " \"shuffle-bombs\": %s, \"unlocked-bombs\": %s, \"shuffle-powder\": %s,\n", g_opts.bomb_bag ? "true" : "false",
+            g_opts.bomb_bag ? "false" : "true", g_opts.powder_bag ? "true" : "false");
+    fprintf(f, " \"randomize-environments\": %s, \"bad-pets\": %s,\n", g_opts.environments ? "true" : "false",
+            g_opts.pets_in_dungeons ? "true" : "false");
+    fprintf(f, " \"skip-story-events\": %s, \"tunic-color\": \"%s\", \"enemy-minibosses\": %s,\n",
+            g_opts.skip_story ? "true" : "false", kTunics[g_opts.tunic],
+            g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
+    static const char *ks[] = {"off", "keys", "keys+nk", "all"};
+    fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
+    fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"include\": [\"5-seashell-reward\", \"15-seashell-reward\", \"30-seashell-reward\", \"40-seashell-reward\", \"50-seashell-reward\"],\n");
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
@@ -140,17 +178,23 @@ static void start_generation(void) {
     posix_spawn_file_actions_destroy(&fa);
     g_gen_seed = g_opts.seed;
     g_gen_failed = rc != 0;
-    g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Shuffling items...";
+    g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Starting...";
+    g_gen_frac = 0;
+    g_gen_start = ImGui::GetTime();
     if (rc) g_gen_pid = 0;
 }
 
 static void poll_generation(void) {
     if (!g_gen_pid) return;
     std::string log = read_file("rando/" + g_gen_seed + "/generate.log");
-    size_t p = log.rfind("progress ");
-    if (log.find("placements ready") != std::string::npos)
-        g_gen_status = p != std::string::npos ? "Building game files... " + log.substr(p + 9, log.find('\n', p) - p - 9) + " / 257"
-                                              : "Building game files...";
+    size_t p = log.rfind("\nstage ");  // `stage <fraction> <label>` lines from tools/rando/las_headless.py
+    if (p != std::string::npos) {
+        size_t e = log.find('\n', p + 1);
+        std::string line = log.substr(p + 7, e == std::string::npos ? std::string::npos : e - p - 7);
+        g_gen_frac = (float)atof(line.c_str());
+        size_t sp = line.find(' ');
+        if (sp != std::string::npos) g_gen_status = line.substr(sp + 1) + "...";
+    }
     int st;
     if (waitpid(g_gen_pid, &st, WNOHANG) == g_gen_pid) {
         g_gen_pid = 0;
@@ -191,9 +235,18 @@ static void section(const char *t) {
     ImGui::Separator();
 }
 
+bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.mm
+static std::string g_spoiler_seed;  // seed whose spoiler page is open
+
 extern "C" void rando_tab_draw(float scale) {
     (void)scale;
     if (!g_scanned) scan();
+    static bool spoiler_test;  // LARECOMP_SPOILER_TEST=<seed>: open that seed's spoiler page (test hook)
+    if (!spoiler_test && getenv("LARECOMP_SPOILER_TEST")) { spoiler_test = true; g_spoiler_seed = getenv("LARECOMP_SPOILER_TEST"); }
+    if (!g_spoiler_seed.empty()) {  // the spoiler page replaces the tab until Back
+        if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
+        return;
+    }
     static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1: generate a seed as soon as the tab is shown (test hook)
     if (!test_once && getenv("LARECOMP_RANDO_GEN_TEST")) { test_once = true; strlcpy(g_opts.seed, "MenuTest", sizeof g_opts.seed); start_generation(); }
     poll_generation();
@@ -215,12 +268,20 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::TextDisabled("Each seed has its own save files. Randomizer by Owen-Splat and contributors (LAS-Randomizer).");
     ImGui::PopTextWrapPos();
 
+    ImGui::Checkbox("Show dungeon keys on the Items screen", &g_settings.inv_keys);
+    if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
+    ImGui::SameLine();
+    ImGui::Checkbox("Check tracker on the Map screen", &g_settings.tracker);
+    if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
+
     section("Seeds");
     if (g_seeds.empty()) ImGui::TextDisabled("No seeds yet: make one below.");
     if (ImGui::BeginTable("##seeds", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
         ImGui::TableSetupColumn("Seed", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Logic", ImGuiTableColumnFlags_WidthFixed, 180 * scale);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 360 * scale);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 560 * scale);
+        static std::string confirm_delete;  // seed whose Delete was pressed once (asks again before deleting)
+        std::string to_delete;
         for (size_t i = 0; i < g_seeds.size(); i++) {
             const Seed &s = g_seeds[i];
             ImGui::PushID((int)i);
@@ -240,13 +301,32 @@ extern "C" void rando_tab_draw(float scale) {
                 rt_restart();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Spoiler")) {
-                std::string cmd = "open \"" + s.spoiler + "\"";
-                system(cmd.c_str());
+            if (ImGui::Button("Spoiler")) g_spoiler_seed = s.name;
+            ImGui::SameLine();
+            if (is_active) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Delete");
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Switch to another seed or vanilla first");
+            } else if (confirm_delete == s.name) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.2f, 0.2f, 1));
+                if (ImGui::Button("Delete seed + saves")) to_delete = s.name;
+                ImGui::PopStyleColor(2);
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) confirm_delete.clear();
+            } else if (ImGui::Button("Delete")) {
+                confirm_delete = s.name;
             }
             ImGui::PopID();
         }
         ImGui::EndTable();
+        if (!to_delete.empty()) {
+            delete_seed(to_delete);
+            confirm_delete.clear();
+            scan();
+        }
     }
 
     section("New seed");
@@ -258,6 +338,12 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::InputTextWithHint("##seed", "random", g_opts.seed, sizeof g_opts.seed);
     combo("Logic", &g_opts.logic, logic, 5);
     combo("Dungeon items", &g_opts.dungeon_items, ditems, 4);
+    static const char *ksn[] = {"Off (in their own dungeon)", "Small keys anywhere", "Small + Nightmare keys anywhere",
+                                "All dungeon items anywhere"};
+    combo("Keysanity", &g_opts.keysanity, ksn, 4);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Dungeon keys can be found anywhere in the world (with logic). A key always opens doors in the\n"
+                          "dungeon it belongs to; the Items screen shows each dungeon's keys.");
     combo("Traps", &g_opts.traps, traps, 5);
     combo("Seashell Mansion rewards", &g_opts.seashells, shells, 6);
     if (ImGui::BeginTable("##opts", 2)) {
@@ -270,23 +356,74 @@ extern "C" void rando_tab_draw(float scale) {
         for (auto &x : o) { ImGui::TableNextColumn(); ImGui::Checkbox(x.n, x.v); }
         ImGui::EndTable();
     }
+    // "Mini-bosses among overworld enemies" (enemy-minibosses): wired in LAS enemies.py, hidden until a mini-boss
+    // actually fights outside its arena (they wait for their dungeon start event; notes/PLAN.md 2026-10-08)
+    ImGui::Checkbox("Bombs must be found first", &g_opts.bomb_bag);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Bombs are an item in the pool; until you find them, shops don't sell bombs and none drop.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Magic Powder must be found first", &g_opts.powder_bag);
+    ImGui::Checkbox("Randomize environments", &g_opts.environments);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each area gets another area's lighting / atmosphere (cosmetic).");
+    ImGui::SameLine();
+    ImGui::Checkbox("Companions allowed in dungeons", &g_opts.pets_in_dungeons);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("BowWow, the Rooster etc. follow Link into dungeons; the logic then counts what they can do there\n"
+                          "(e.g. the Rooster carrying Link over gaps).");
+    ImGui::Checkbox("Skip story scenes", &g_opts.skip_story);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("No Owl talks and no kids running up about BowWow; their flags are set as if you'd seen them.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220);
+    ImGui::Combo("Tunic colour", &g_opts.tunic, kTunics, IM_ARRAYSIZE(kTunics));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Recolours Link's green tunic and cap (cosmetic). The red and blue tunics keep their colours.");
+    ImGui::TextDisabled("Extra checks (off = those spots give junk):");
+    if (ImGui::BeginTable("##incl", 3)) {
+        struct { const char *n; bool *v; const char *tip; } o[] = {
+            {"Fishing prizes", &g_opts.inc_fishing, "Prizes of the fishing pond"},
+            {"Rapids race prizes", &g_opts.inc_rapids, "Prizes of the Rapids Ride race"},
+            {"Dampe's rewards", &g_opts.inc_dampe, "Chamber Dungeon challenge rewards"},
+            {"Trade quest gifts", &g_opts.inc_trade, "Gifts from the trade quest NPCs"},
+            {"Blue rupees", &g_opts.inc_blue, "Every hidden blue rupee holds an item"},
+        };
+        for (auto &x : o) {
+            ImGui::TableNextColumn();
+            ImGui::Checkbox(x.n, x.v);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", x.tip);
+        }
+        ImGui::EndTable();
+    }
     label("Starting rupees");
     ImGui::SliderInt("##rup", &g_opts.start_rupees, 0, 999, "%d", ImGuiSliderFlags_AlwaysClamp);
 
-    section("LARecomp additions (in development)");
-    static const char *ent[] = {"Off", "Dungeon entrances", "+ Single-exit interiors", "+ Connectors / caves", "Full"};
-    combo("Entrance randomizer", &g_opts.entrances, ent, 5, false);
-    ImGui::BeginDisabled(true);
-    ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled); ImGui::SameLine();
-    ImGui::Checkbox("Pots hold items", &g_opts.pots); ImGui::SameLine();
-    ImGui::Checkbox("Grass holds items", &g_opts.grass);
+    section("LARecomp additions");
+    ImGui::Checkbox("Pots hold items", &g_opts.pots);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every liftable pot in houses, caves and dungeons hides an item from the pool (about 400 more checks).\n"
+                          "Unchecked pots are golden. Lift, smash or throw a pot to reveal its item.");
+    static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
+    combo("Entrance randomizer", &g_opts.entrances, ent, 3);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Houses & caves: the 43 single-entrance interiors are shuffled among themselves (with logic).\n"
+                          "Marin & Tarin's house, water entrances and caves only reached through other caves stay vanilla.");
+    ImGui::BeginDisabled(g_opts.entrances < 2);
+    ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leaving a house puts you outside a different door than the one you came in by.");
     ImGui::EndDisabled();
-
+    ImGui::Spacing();
+    ImGui::TextDisabled("In development: connector caves in the entrance pool, grass holds items.");
     ImGui::Spacing();
     ImGui::BeginDisabled(g_gen_pid != 0);
     if (ImGui::Button(g_gen_pid ? "Generating..." : "Generate seed", ImVec2(320 * scale, 0))) start_generation();
     ImGui::EndDisabled();
-    if (!g_gen_status.empty()) {
+    if (g_gen_pid) {  // progress bar with the current step and elapsed time
+        char over[160];
+        int secs = (int)(ImGui::GetTime() - g_gen_start);
+        snprintf(over, sizeof over, "%s  %d:%02d", g_gen_status.c_str(), secs / 60, secs % 60);
+        ImGui::SameLine();
+        ImGui::ProgressBar(g_gen_frac > 0.005f ? g_gen_frac : -0.3f * (float)ImGui::GetTime(), ImVec2(-1, 0), over);
+    } else if (!g_gen_status.empty()) {
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
         if (g_gen_failed) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());

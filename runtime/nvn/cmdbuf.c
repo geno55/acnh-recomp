@@ -310,7 +310,20 @@ NVN(nvnCommandBufferClearTexture) { clear_texture(c, 0); }
 NVN(nvnCommandBufferClearTexturei) { clear_texture(c, 1); }
 NVN(nvnCommandBufferClearTextureui) { clear_texture(c, 2); }
 PLAIN(nvnCommandBufferClearBuffer, CMD_CLEAR_BUFFER)
-NVN(nvnCommandBufferDiscardColor) { (void)c; }
+// DiscardColor(cmdbuf, index): the target's contents become undefined. On the Switch a discarded (compressed)
+// target reads back cleared; areas the game then leaves undrawn (e.g. a pit after a floor tile falls away) stay
+// black there. Treated as a clear to (0,0,0,0) (LARECOMP_KEEP_DISCARD=1: old no-op behaviour).
+NVN(nvnCommandBufferDiscardColor) {
+    static int keep = -1, logged;
+    if (keep < 0) keep = getenv("LARECOMP_KEEP_DISCARD") != NULL;
+    if (logged < 5) { logged++; LOG("[nvn] DiscardColor index %llu%s\n", (unsigned long long)c->x[1], keep ? " (kept)" : " -> clear"); }
+    if (keep) return;
+    Snap s = snap(c);
+    CmdRec *r = record(c, CMD_CLEAR_COLOR, 16, &s);
+    memset(r->extra, 0, 16);
+    r->x[2] = 0xF;  // all channels
+    r->x[5] = 0;    // float clear
+}
 NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
 
 // ---- draws (all integer arguments fit in x1..x7)

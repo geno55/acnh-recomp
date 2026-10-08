@@ -1,6 +1,12 @@
 import random
 from RandomizerCore.randomizer_data import ENEMY_DATA
 
+# LARecomp: mini-bosses that work as overworld enemies (spawn and fight normally outside their dungeon arena;
+# tested one by one on Field_04P). id -> leb parameters. Only replaces 'land' enemies on the Field, at most one
+# per room, with MINIBOSS_CHANCE per land enemy (setting 'enemy-minibosses').
+FIELD_MINIBOSSES = {}
+MINIBOSS_CHANCE = 0.08
+
 
 
 def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy_settings: dict, rand_state: tuple):
@@ -33,6 +39,8 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
     fly_bombs = (0x26, 0x3E, 0x48) # vires, zirros, bone-putters
     blocking = (0x8, 0x9, 0x13, 0x14, 0x2E, 0x2F, 0x30, 0x35, 0x36, 0x41, 0x4D) # shield/spear, mimics, color dungeon orbs
     
+    room_has_miniboss = False
+
     # iterate through each actor
     for e, act in enumerate(room_data.actors):
         if act.type not in total_ids or e in excluded_actors: # check for valid enemy actors
@@ -45,8 +53,15 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
             if act.type in restr:
                 restr.remove(act.type)
             
+            mini = None
+            if (enemy_settings.get('minibosses') and FIELD_MINIBOSSES and folder == 'Field' and enemy_type == 'land'
+                    and not room_has_miniboss and random.random() < MINIBOSS_CHANCE):
+                mini = random.choice(sorted(FIELD_MINIBOSSES))
+                room_has_miniboss = True
+                new_enemy = mini
+
             # keep shuffling each actor until it is a valid enemy
-            while new_enemy in restr:
+            while new_enemy in restr and mini is None:
                 if enemy_type == 'land':
                     new_enemy = random.choice(enemy_ids['land'])
                 elif enemy_type == 'air':
@@ -72,6 +87,16 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
             elif new_enemy in blocking:
                 restr.extend(blocking)
             
+            if mini is not None:
+                params = [bytes(p, 'utf-8') if isinstance(p, str) else p for p in FIELD_MINIBOSSES[mini]]
+                act.type = mini
+                act.parameters = (params + [b''] * 8)[:8]
+                act.relationships.e = 1
+                act.rotY = 0
+                act.scaleX = act.scaleY = act.scaleZ = 1.0
+                edited_room = True
+                continue
+
             # change the enemy data into the new enemy
             if act.type != new_enemy:
                 act.type = new_enemy

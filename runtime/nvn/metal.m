@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "ui/menu.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
+#include <sys/stat.h>
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -89,7 +90,9 @@ static MtlFormat mtl_format(uint32_t f) {
     case 0x49: return (MtlFormat){MTLPixelFormatBC4_RUnorm};
     case 0x4A: return (MtlFormat){MTLPixelFormatBC4_RSnorm};
     case 0x4B: return (MtlFormat){MTLPixelFormatBC5_RGUnorm};
-    case 0x4C: return (MtlFormat){MTLPixelFormatBC5_RGSnorm};
+    // 0x4C = signed RGTC2 (interior normal maps break if decoded unsigned). LARECOMP_BC5_UNORM=1 decodes it
+    // unsigned: that removes the overworld grass hatch/moire (see notes/PLAN.md) but wrecks interiors.
+    case 0x4C: return (MtlFormat){getenv("LARECOMP_BC5_UNORM") ? MTLPixelFormatBC5_RGUnorm : MTLPixelFormatBC5_RGSnorm};
     case 0x4D: return (MtlFormat){MTLPixelFormatBC7_RGBAUnorm};
     case 0x4E: return (MtlFormat){MTLPixelFormatBC7_RGBAUnorm_sRGB};
     case 0x4F: return (MtlFormat){MTLPixelFormatBC6H_RGBFloat};
@@ -152,6 +155,8 @@ typedef struct {
     bool scalable;       // screen-shaped render target: allocated at the output resolution
     bool presented;      // has been shown by backend_present (a swapchain image)
     uint64_t touched_frame;  // last frame it was written (cleared at the first write of a frame when reshaped)
+    uint32_t level_gen;      // g_level_gen when last used as a render target
+    uint64_t frame_cleared;  // LARECOMP_FRAME_CLEAR: frame it was last cleared at first use
     float sx, sy;        // allocation scale relative to the guest's size
 } TexBackend;
 
@@ -181,6 +186,49 @@ bool renderer_texture_first_write(NvnTexture *t) {
     if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == total_frames + 1) return false;
     b->touched_frame = total_frames + 1;
     return true;
+}
+
+// A new level gets fresh render-target memory on the Switch (black); ours keep the previous level's pixels, which
+// show wherever a level never draws (the phone booth's surroundings). Render targets are cleared at their first
+// use after a level change (LARECOMP_KEEP_TARGETS=1 disables).
+static uint32_t g_level_gen = 1;
+static void level_change_check(void) {
+    extern const char *game_level_name(void);
+    static char last[64];
+    const char *lv = game_level_name();
+    if (strncmp(lv, last, sizeof last - 1) != 0) {
+        strlcpy(last, lv, sizeof last);
+        // only levels that never draw their surroundings: clearing everywhere also wipes targets other rooms
+        // carry over (a house lost a band of its walls)
+        if (!strncmp(lv, "TelephoneBox", 12) || getenv("LARECOMP_CLEAR_ALL_LEVELS")) g_level_gen++;
+    }
+}
+// Scene render targets are cleared to transparent black at their first use in each frame (LARECOMP_NO_FRAME_CLEAR=1
+// disables): pixels a frame never draws (inside pits, around generated rooms) otherwise keep older frames' content
+// and smear (moving enemies over a pit left trails, the pit rim repeated downwards). Verified 2026-10-08 on
+// rando/DevGen3 Tail Cave 07D: clean dark pit, no trails; overworld / dungeon rooms otherwise unchanged.
+bool renderer_texture_frame_fresh(NvnTexture *t) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
+    b->frame_cleared = total_frames + 1;
+    return true;
+}
+
+bool renderer_texture_level_fresh(NvnTexture *t) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    static int keep = -1;
+    if (keep < 0) keep = getenv("LARECOMP_KEEP_TARGETS") != NULL;
+    if (!b || keep || b->level_gen == g_level_gen) return false;
+    if (!b->scalable) { b->level_gen = g_level_gen; return false; }  // scene buffers only: UI textures the game draws once
+                                                                       // and reuses (rupee counter) must keep their contents
+    bool fresh = b->level_gen != 0;  // first use ever: nothing stale to hide
+    b->level_gen = g_level_gen;
+    if (fresh && getenv("LARECOMP_LOG_LEVELCLEAR"))
+        LOG("[levelclear] gen %u frame %llu tex %p %ux%u fmt %#x addr %llx\n", g_level_gen, (unsigned long long)total_frames, (void *)t,
+            t->width, t->height, t->format, (unsigned long long)t->addr);
+    return fresh;
 }
 
 void renderer_texture_mark_presented(NvnTexture *t) {
@@ -314,6 +362,8 @@ static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
 // Upload all levels/layers from block-linear guest memory.
 static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncoder> blit) {
     if (!t->addr || t->target == 10) return;
+    if (b->uploaded && b->checked_frame == g_frame_counter) return;  // (fast exits before any layout math)
+    if (b->uploaded && !b->dynamic && ((g_frame_counter + ((uintptr_t)b >> 6)) & 7)) return;
     const FormatInfo *fi = t->layout.fmt;
     MtlFormat mf = mtl_format(t->format);
     uint64_t total = tegra_total_size(&t->layout);
@@ -321,7 +371,14 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     // updates. Check at most once per frame; textures seen changing get a full hash every frame,
     // the rest a full hash on a rotating ~16 MB/frame budget plus a cheap sample otherwise.
     if (b->uploaded && b->checked_frame == g_frame_counter) return;
+    // Textures that have never changed since upload (almost all: loaded from files) are re-checked every 8th
+    // frame, staggered per texture; ones seen changing (glyph caches, video...) every frame.
+    if (b->uploaded && !b->dynamic && ((g_frame_counter + ((uintptr_t)b >> 6)) & 7)) return;
     b->checked_frame = g_frame_counter;
+    // linear textures are the CPU-written kind (the font glyph cache, 1024x2048 R8, video): checked in full every
+    // frame from the start - a strided sample missed newly rasterized glyphs, so characters of new text popped in
+    // seconds later (user 2026-10-08: file select "P ease se e t a i e.")
+    if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != g_frame_counter) { full_hash_budget_frame = g_frame_counter; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
@@ -359,6 +416,14 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             }
             uint8_t *data = lin;
             uint32_t out_row = row;
+            static int bc5log;  // LARECOMP_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
+            if ((t->format == 0x4B || t->format == 0x4C) && lv == 0 && bc5log < 12 && getenv("LARECOMP_LOG_BC5")) {
+                bc5log++;
+                int hist[4] = {0};
+                for (uint64_t i = 0; i + 16 <= sz; i += 16) { hist[lin[i] >> 6]++; hist[lin[i + 8] >> 6]++; }
+                LOG("[bc5] fmt %#x %ux%u endpoint0 quartiles (0-63,64-127,128-191,192-255): %d %d %d %d\n", t->format, l.w, l.h,
+                    hist[0], hist[1], hist[2], hist[3]);
+            }
             if (mf.expand_rgb && fi->bpb == 3) {  // RGB8 -> RGBA8
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
                 data = malloc(n * 4);
@@ -559,7 +624,17 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
 
 static double last_fps_time;
 
+static NvnTexture *g_last_presented;
+void backend_present(NvnTexture *t);
+// Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
+// keeps drawing and taking input.
+void backend_represent(void) {
+    if (g_last_presented) backend_present(g_last_presented);
+    else SDL_Delay(16);
+}
+
 void backend_present(NvnTexture *t) {
+    g_last_presented = t;
     extern void renderer_submit(void);
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
@@ -667,6 +742,13 @@ void backend_present(NvnTexture *t) {
     g_frame_counter++;
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
+    static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    if (slow_ms > 0 && total_frames > 2600) usleep((useconds_t)slow_ms * 1000);
+    extern void fnprof_frame(uint64_t frame);
+    fnprof_frame(total_frames);
+    extern void warp_frame(uint64_t frame);
+    warp_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     static long shot_every = -1;
@@ -674,37 +756,49 @@ void backend_present(NvnTexture *t) {
     extern bool g_debug_frame;
     static long debug_at = -1;
     if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
+    level_change_check();
+    extern volatile int g_debug_frame_request;
+    if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", total_frames);
-    if (shot_every && b && b->tex && total_frames % shot_every == 0) {
+    static long shot_from = -1;  // LARECOMP_SCREENSHOT_FROM=<frame>: periodic shots start there (into build/frames/)
+    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
+    if (shot_every && b && b->tex && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
         char path[256];
-        snprintf(path, sizeof path, "build/frame_%05llu.png", total_frames);
+        if (shot_from) mkdir("build/frames", 0755);
+        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png", total_frames);
         save_png(b->tex, path);
         if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
-    if (now - last_fps_time >= 2.0) {
-        if (last_fps_time > 0) LOG("[metal] %.1f fps (%s)\n", frames / (now - last_fps_time), renderer_stats());
+    static double fps_iv = -1, prev_present, max_gap;  // LARECOMP_FPS_INTERVAL=<s>: fps line period (default 2)
+    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
+    if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
+    prev_present = now;
+    if (now - last_fps_time >= fps_iv) {
+        extern const char *game_level_name(void);
+        if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
+                                   frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        max_gap = 0;
         frames = 0;
         last_fps_time = now;
     }
 }
 
 // ================================================================== UI thread
-void ui_run(void) {
-    // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
-    // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
-    static id activity;
-    activity = [[NSProcessInfo processInfo]
-        beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
-                          reason:@"Game emulation"];
+// The window + Metal layer, created once: by the launcher (runtime/ui/launcher.mm, start screen before the game
+// boots) or by ui_run; the game reuses the launcher's window.
+void ui_window_init(void) {
+    if (window) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     settings_load();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
-    window = SDL_CreateWindow("Link's Awakening (LARecomp)", win_w, win_h, SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE |
-                                                                       SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    // LARECOMP_HIDDEN=1: never shown (automated test runs render off screen without taking the user's focus)
+    SDL_WindowFlags wflags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
+    window = SDL_CreateWindow("Link's Awakening (LARecomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
@@ -712,6 +806,20 @@ void ui_run(void) {
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
+}
+
+SDL_Window *ui_window(void) { return window; }
+void *ui_metal_layer(void) { return (__bridge void *)layer; }
+void *ui_metal_device(void) { return (__bridge void *)dev; }
+
+void ui_run(void) {
+    // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
+    // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
+    static id activity;
+    activity = [[NSProcessInfo processInfo]
+        beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
+                          reason:@"Game emulation"];
+    ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
         SDL_Event e;

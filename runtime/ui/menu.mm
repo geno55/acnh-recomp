@@ -17,8 +17,12 @@ extern "C" {
 #include "menu.h"
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
+extern "C" int game_in_play(void);  // hle/warp.c
 void save_editor_on_open(void);
 void rando_tab_draw(float scale);
+bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
+extern "C" void cheats_draw(float scale);  // cheats.mm
+extern "C" void difficulty_draw(float scale);  // difficulty.mm
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -110,8 +114,28 @@ static ImGuiKey key_from_pad(Uint8 b) {
     }
 }
 
+// ---- software keyboard (runtime/hle/swkbd.c: the game's name entry etc.) --------------------------------------
+// The game thread waits in menu_keyboard_run (re-presenting the last frame); this dialog takes the text: typed
+// directly when the player last used a keyboard, an on-screen keyboard (d-pad + A, B deletes, Start / + OK) when
+// they last used a controller.
+static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
+static std::atomic<bool> g_last_pad{false};
+static char g_kbd_text[96];
+static int g_kbd_max = 8;
+static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
+    if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
+    if (g_kbd.load() == 1 && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
+        if (e->key.scancode == SDL_SCANCODE_RETURN || e->key.scancode == SDL_SCANCODE_KP_ENTER) { g_kbd = 2; return true; }
+        if (e->key.scancode == SDL_SCANCODE_ESCAPE) { g_kbd = 3; return true; }
+    }
+    if (g_kbd.load() == 1 && e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
+        g_kbd = 2;
+        return true;
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
@@ -129,7 +153,7 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         /* fallthrough */
     case SDL_EVENT_KEY_UP: {
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         bool down = e->type == SDL_EVENT_KEY_DOWN;
         if (down && e->key.scancode == SDL_SCANCODE_ESCAPE) {  // Esc: back out of popups, else close
             QEvent q = {};
@@ -142,7 +166,7 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     }
     case SDL_EVENT_TEXT_INPUT:
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         { QEvent q = {}; q.kind = QEvent::TEXT; strlcpy(q.text, e->text.text, sizeof q.text); push(q); }
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
@@ -153,13 +177,13 @@ bool menu_handle_event(const SDL_Event *e) {
             set_open(!g_open.load());
             return true;
         }
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         ImGuiKey k = key_from_pad(e->gbutton.button);
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         float v = e->gaxis.value / 32767.0f;
         QEvent q = {};
         q.kind = QEvent::ANALOG;
@@ -179,11 +203,11 @@ bool menu_handle_event(const SDL_Event *e) {
         return true;
     }
     case SDL_EVENT_MOUSE_MOTION:
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density; push(q); }
         return true;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         {
             QEvent q = {};
             q.kind = QEvent::MOUSE_BUTTON;
@@ -193,7 +217,7 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         return true;
     case SDL_EVENT_MOUSE_WHEEL:
-        if (!g_open.load()) return false;
+        if (!capturing()) return false;
         { QEvent q = {}; q.kind = QEvent::WHEEL; q.x = e->wheel.x; q.y = e->wheel.y; push(q); }
         return true;
     default:
@@ -205,7 +229,7 @@ void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
-    bool want_text = g_open.load();
+    bool want_text = capturing();
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
@@ -257,6 +281,8 @@ static void style_init(void) {
     c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
     c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
 }
+
+extern "C" void rt_restart_to_title(void);  // runtime/main.c: back to the start screen
 
 static void init(id<MTLDevice> dev) {
     IMGUI_CHECKVERSION();
@@ -387,9 +413,109 @@ static void tab_about(void) {
     ImGui::TextUnformatted("Move WASD   A K   B J   X L   Y I   L Q   R E   ZL 1   ZR 3   + Enter   - Backspace");
 }
 
+extern "C" bool inventory_overlay_wanted(void);
+extern "C" bool tracker_overlay_wanted(void);
+extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font);
+extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
+
+// Toasts: short notices any thread can post (e.g. keysanity "Small Key - Key Cavern"), shown top-centre ~3.5 s.
+static pthread_mutex_t g_toast_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_toast[160];
+static double g_toast_at = -100;
+extern "C" void ui_toast(const char *text) {
+    pthread_mutex_lock(&g_toast_lock);
+    strlcpy(g_toast, text, sizeof g_toast);
+    g_toast_at = SDL_GetTicks() / 1000.0;
+    pthread_mutex_unlock(&g_toast_lock);
+}
+static bool toast_active(void) { return SDL_GetTicks() / 1000.0 - g_toast_at < 3.5; }
+
+static void keyboard_draw(ImGuiIO &io, float scale) {
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
+    float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
+    ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                    ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushFont(g_font_big);
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Enter your name");
+    ImGui::PopFont();
+    static bool was_open;
+    bool appearing = !was_open;
+    was_open = true;
+    int len = (int)strlen(g_kbd_text);
+    if (!g_last_pad.load()) {  // keyboard: type straight into the field
+        if (appearing) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::PushFont(g_font_big);
+        ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
+                         ImGuiInputTextFlags_CallbackCharFilter,
+                         [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
+        ImGui::PopFont();
+        if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
+        ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+    } else {  // controller: on-screen keyboard
+        static bool upper = true;
+        ImGui::PushFont(g_font_big);
+        ImGui::Text("%s_", g_kbd_text);
+        ImGui::PopFont();
+        static const char *rows_u[] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-.'!", "0123456789"};
+        static const char *rows_l[] = {"abcdefghij", "klmnopqrst", "uvwxyz-.'!", "0123456789"};
+        const char **rows = upper ? rows_u : rows_l;
+        float k = 70 * scale;
+        for (int r = 0; r < 4; r++) {
+            for (int i = 0; rows[r][i]; i++) {
+                if (i) ImGui::SameLine();
+                char lbl[8] = {rows[r][i], 0};
+                if (appearing && r == 0 && i == 0) ImGui::SetKeyboardFocusHere();
+                if (ImGui::Button(lbl, ImVec2(k, k)) && len < g_kbd_max) { g_kbd_text[len] = rows[r][i]; g_kbd_text[len + 1] = 0; }
+            }
+        }
+        if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(k * 2, k))) upper = !upper;
+        ImGui::SameLine();
+        if (ImGui::Button("Space", ImVec2(k * 3, k)) && len < g_kbd_max && len > 0) { g_kbd_text[len] = ' '; g_kbd_text[len + 1] = 0; }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(k * 2.5f, k)) && len > 0) g_kbd_text[len - 1] = 0;
+        ImGui::SameLine();
+        if (ImGui::Button("OK", ImVec2(k * 2.5f, k))) g_kbd = 2;
+        // B deletes (Start / + confirms, see menu_handle_event)
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) && (len = (int)strlen(g_kbd_text)) > 0) g_kbd_text[len - 1] = 0;
+        ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+    }
+    ImGui::End();
+    if (g_kbd.load() != 1) was_open = false;
+}
+
+// Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
+// Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
+extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap) {
+    extern void backend_represent(void);
+    snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+    g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
+    input_reset();
+    g_kbd = 1;
+    // (test) LARECOMP_KBD_AUTO=<text>: answer at once
+    if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    while (g_kbd.load() == 1) {  // ~60 Hz
+        uint64_t t0 = SDL_GetTicks();
+        backend_represent();
+        uint64_t dt = SDL_GetTicks() - t0;
+        if (dt < 16) SDL_Delay((uint32_t)(16 - dt));
+    }
+    bool ok = g_kbd.load() == 2 && g_kbd_text[0];
+    if (ok) snprintf(out, cap, "%s", g_kbd_text);
+    g_kbd = 0;
+    input_reset();
+    return ok;
+}
+
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
     bool open = g_open.load();
-    if (!open && !g_settings.show_fps) {
+    bool toast = toast_active();
+    bool inv = !open && inventory_overlay_wanted();
+    bool trk = !open && tracker_overlay_wanted();
+    bool kbd = g_kbd.load() == 1;
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !toast) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -432,6 +558,28 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         ImGui::End();
     }
 
+    if (toast && !open) {
+        char t[160];
+        pthread_mutex_lock(&g_toast_lock);
+        strlcpy(t, g_toast, sizeof t);
+        double age = SDL_GetTicks() / 1000.0 - g_toast_at;
+        pthread_mutex_unlock(&g_toast_lock);
+        float a = age < 0.25 ? (float)(age / 0.25) : age > 3.0 ? (float)((3.5 - age) / 0.5) : 1.0f;
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 90 * scale), 0, ImVec2(0.5f, 0));
+        ImGui::SetNextWindowBgAlpha(0.72f * a);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
+        ImGui::Begin("##toast", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.45f, 1), "%s", t);
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+
+    if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
+    if (inv) {
+        inventory_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
+    }
+
     if (open) {
         // dim the game behind the menu
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
@@ -445,13 +593,24 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("  LARecomp");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 520 * scale);
+        if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) ImGui::OpenPopup("##totitle");
         ImGui::SameLine(ImGui::GetWindowWidth() - 260 * scale);
         if (ImGui::Button("Resume game", ImVec2(230 * scale, 0))) set_open(false);
+        if (ImGui::BeginPopupModal("##totitle", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+            ImGui::Text("Return to the title screen? Progress since your last save is lost.");
+            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) rt_restart_to_title();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(230 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
 
         // L/R (or Q/E) switch tabs; B / Esc with nothing to back out of closes the menu
         if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
-        static const char *tabs[] = {"Display", "Audio", "Save Editor", "Randomizer", "Controls"};
-        const int ntabs = 5;
+        static const char *tabs[] = {"Display", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
+                                     "Controls"};
+        const int ntabs = 8;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
@@ -468,9 +627,15 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
                     switch (i) {
                     case 0: tab_display(); break;
                     case 1: tab_audio(); break;
-                    case 2: save_editor_draw(scale); break;
+                    case 2:
+                        if (game_in_play()) save_editor_draw(scale);
+                        else ImGui::TextDisabled("Load a save file and get into the game to edit it.");
+                        break;
                     case 3: rando_tab_draw(scale); break;
-                    case 4: tab_about(); break;
+                    case 4: if (warp_tab_draw(scale)) set_open(false); break;
+                    case 5: cheats_draw(scale); break;
+                    case 6: difficulty_draw(scale); break;
+                    case 7: tab_about(); break;
                     }
                     ImGui::EndChild();
                     ImGui::EndTabItem();
@@ -487,6 +652,7 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         ImGui::End();
     }
 
+    if (kbd) keyboard_draw(io, scale);
     ImGui::Render();
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);

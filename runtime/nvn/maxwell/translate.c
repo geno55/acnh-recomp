@@ -1470,6 +1470,13 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         sp(&args, ", constant float4 *rscale [[buffer(18)]]");
         info->uses_rscale = true;
     }
+    // Runtime highlight (e.g. golden unchecked pots): fragment shaders writing a float color target 0 get a
+    // per-draw tint, float4 [0] = colour.rgb + strength, [1] = added glow.rgb (strength 0 = untouched).
+    bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
+    if (tint) {
+        sp(&args, ", constant float4 *ltint [[buffer(19)]]");
+        info->uses_tint = true;
+    }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
         const char *tn = tex_type_name(t->type);
@@ -1532,6 +1539,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                 r++;
             }
         }
+        if (tint)
+            sp(&s, "  if (ltint[0].w > 0.0f) { float3 g = o.c0.rgb; float l = dot(g, float3(0.299f, 0.587f, 0.114f));\n"
+                   "    o.c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
         if (c->omap_depth) {
             if (c->reg_used[r + 1]) sp(&s, "  o.depth = as_type<float>(r%d);\n", r + 1);
             else sp(&s, "  o.depth = in.pos.z;\n");

@@ -125,7 +125,10 @@ static NvnSync *sync_of(uint64_t guest) {
     if (!s) { s = calloc(1, sizeof *s); SET_HOST(guest, s); }
     return s;
 }
-NVN(nvnQueueFenceSync) { sync_of(A(1))->signaled = 1; }  // work is executed at submit time
+uint64_t renderer_fence_seq(void);
+void renderer_wait_seq(uint64_t seq);
+NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
@@ -138,8 +141,11 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     static uint64_t n;
     if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
+    if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
     if (flush) renderer_flush();
-    else renderer_sync();  // fences are reported signaled at submit; make that true before the CPU proceeds
+    else if (whole) renderer_sync();
+    else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }

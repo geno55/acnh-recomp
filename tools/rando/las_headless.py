@@ -93,14 +93,25 @@ def default_settings(seed):
         'seashells-important': True, 'trade-important': False, 'randomize-music': False, 'open-mabe': False,
         'boss-cutscenes': True, 'randomize-enemies': False, 'randomize-enemy-sizes': False, 'shuffle-dungeons': False,
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
-        'stealing': 'always', 'fast-chests': True, 'fast-keys': True,
+        'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
+        'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False,
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
 
 
+import time as _time
+_T0 = _time.time()
+
+
+def stage(label, frac):
+    """Progress line for the in-game menu (runtime/ui/rando_tab.mm): `stage <fraction> <label>`."""
+    print(f'stage {frac:.3f} {label}', flush=True)
+
+
 def main():
     romfs, out_dir, settings_file = ARGS
+    stage('Preparing', 0.01)
     with open(settings_file) as f:
         user = json.load(f)
     settings = default_settings(str(user.get('seed', 'LARecomp')))
@@ -112,14 +123,117 @@ def main():
         else:
             settings[k] = v
     settings['excluded-locations'] = set(settings['excluded-locations'])
+    # optional location groups (Randomizer tab): included = real checks with logic instead of junk
+    groups = {'include-fishing': rd.FISHING_REWARDS, 'include-rapids': rd.RAPIDS_REWARDS,
+              'include-dampe': rd.DAMPE_REWARDS, 'include-trade-gifts': rd.TRADE_GIFT_LOCATIONS,
+              'include-blue-rupees': rd.BLUE_RUPEES}
+    for k, locs in groups.items():
+        if user.get(k):
+            settings['excluded-locations'].difference_update(locs)
+    if user.get('include-blue-rupees'):
+        settings['blupsanity'] = True
     logic_defs = yaml.safe_load(rd.LOGIC_RAW)
     import copy
     item_defs = copy.deepcopy(rd.ITEM_DEFS)
     os.makedirs(out_dir, exist_ok=True)
+    import shutil
+    if os.path.isdir(os.path.join(out_dir, 'romfs')):  # regenerating into the same folder: start from vanilla files
+        shutil.rmtree(os.path.join(out_dir, 'romfs'))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from RandomizerCore.Tools import leb
+
+    # keysanity: the freed dungeon items must be placed with logic (LAS only logic-checks 'important' items)
+    ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
+               'all': ('key-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(settings.get('keysanity', 'off'), ())
+    for k, d in item_defs.items():
+        if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
+            d['type'] = 'important'
+
+    pot_locs = {}
+    if settings.get('pots'):
+        import pots as pots_mod
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'entrance_data.yml')) as f:
+            entrance_data = yaml.safe_load(f)
+        import random as _rnd
+        pot_locs, skipped = pots_mod.add_to_logic(pots_mod.scan(romfs, leb), logic_defs, item_defs, entrance_data,
+                                                  settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
+        print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
+              flush=True)
+
+    # ---- LARecomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
+    tier = int(settings.get('entrance-tier', 0))
+    ent = None
+    if tier >= 1:
+        settings['shuffle-dungeons'] = True
+    if tier >= 2:
+        import random as _random
+        import entrance_logic as el
+        ent_doors = el.pool(el.load())
+        ent_entry, ent_exit = el.shuffle(ent_doors, bool(settings.get('entrance-decoupled', False)),
+                                         _random.Random(f"{settings['seed']}-entrances"))
+        extra = {}
+        lv_door = {d['dest_level']: d['id'] for d in ent_doors}
+        for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
+            if p['level'] in lv_door:
+                extra.setdefault(lv_door[p['level']], []).append((name, 'break-pot'))
+        moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
+        ent = (ent_doors, ent_entry, ent_exit)
+        print('entrances:', len(ent_entry), 'doors shuffled,', moved, 'locations moved', flush=True)
 
     result = {}
     errors = []
+    stage('Shuffling items', 0.04)
     sh = ItemShuffler(out_dir, settings['seed'], settings['logic'], settings, item_defs, copy.deepcopy(logic_defs))
+    # Speed: LAS rebuilds each condition with regexes and eval()s the string on every check (millions of times
+    # per seed). Same semantics, compiled once: condition string -> code object evaluated with the same locals.
+    _code = {}
+    _parse = sh.parseCondition
+
+    def compiled(cond):
+        c = _code.get(cond)
+        if c is None:
+            c = _code[cond] = compile(_parse(cond), '<logic>', 'eval')
+        return c
+
+    def check_access(newCheck, access, logic):
+        no_params = re.match('[a-zA-Z0-9-]+', newCheck).group(0)
+        if logic == 'none':
+            return True
+        defs = sh.logic_defs
+        env = {'self': sh, 'access': access}
+        if defs[no_params]['type'] == 'enemy':
+            param = re.search('\\[([a-z]+)\\]', newCheck)
+            if param:
+                return eval(compiled(defs[no_params]['condition-basic']), env) or \
+                    eval(compiled(defs[no_params]['condition-' + param.group(1)]), env)
+            return eval(compiled(defs[no_params]['condition-basic']), env)
+        node = defs[newCheck]
+        if node['type'] in ('item', 'follower') and not sh.hasAccess(access, node['region']):
+            return False
+        if 'condition-basic' in node and eval(compiled(node['condition-basic']), env):
+            return True
+        if 'condition-basic' not in node:
+            return True
+        for lv, allowed in (('advanced', ('advanced', 'glitched', 'hell')), ('glitched', ('glitched', 'hell')), ('hell', ('hell',))):
+            if 'condition-' + lv in node and logic in allowed and eval(compiled(node['condition-' + lv]), env):
+                return True
+        return False
+
+    if not os.environ.get('LAS_ORIGINAL_EVAL'):  # LAS_ORIGINAL_EVAL=1: LAS's own (slow) evaluation, for comparisons
+        sh.checkAccess = check_access
+    _reach = sh.canReachLocation
+    _last = [0.0]
+
+    def reach_with_progress(to_reach, placements, *a, **k):
+        now = _time.time()
+        if now - _last[0] > 0.5:
+            _last[0] = now
+            locs = [l for l, v in sh.logic_defs.items() if v.get('type') == 'item']
+            done = sum(1 for l in locs if placements.get(l) is not None)
+            stage(f'Shuffling items ({done}/{len(locs)} placed)', 0.04 + 0.62 * done / max(1, len(locs)))
+        return _reach(to_reach, placements, *a, **k)
+
+    sh.canReachLocation = reach_with_progress
     sh.give_placements.connect(lambda p: result.update(placements=p[0], randstate=p[1]))
     sh.error.connect(lambda e: errors.append(e))
     sh.start()
@@ -127,14 +241,57 @@ def main():
         print('SHUFFLE ERROR', errors, file=sys.stderr)
         sys.exit(1)
     print('placements ready', flush=True)
+    with open(os.path.join(out_dir, 'logic.json'), 'w') as f:  # the seed's final logic (tracker: tools/rando/tracker.py)
+        json.dump({k: {kk: vv for kk, vv in v.items() if kk in ('type', 'subtype', 'region', 'content') or kk.startswith('condition-')}
+                   for k, v in sh.logic_defs.items() if not v.get('_check_only')}, f)
+    stage('Checking the seed is beatable', 0.67)
+    # Independent playthrough check: from nothing, keep collecting whatever is reachable.
+    pl = result['placements']
+    access = {k: 1 for k, v in settings.items() if v is True}
+    for it in settings.get('starting-items', []):
+        access[it] = access.get(it, 0) + 1
+    # LAS logic.yml (also upstream) never defines rooms D6-4D / D6-2A, so LAS treats the Face Shrine boss,
+    # instrument and rapids-south-island as unreachable (conservative for placement). The check only needs
+    # the vanilla instrument there, so approximate them from the neighbouring room here (check only).
+    aliases = {'D6-4D': 'D6-5D', 'D6-2A': 'D6-4D'}
+    for k, v in aliases.items():
+        sh.logic_defs.setdefault(k, {'type': 'room', 'condition-basic': v, '_check_only': True})
+    import playthrough
+    sph, access, seen = playthrough.spheres(sh.logic_defs, pl, access,
+                                            lambda k, acc: sh.checkAccess(k, acc, settings['logic']))
+    with open(os.path.join(out_dir, 'spheres.json'), 'w') as f:  # walkthrough for the readable spoiler
+        json.dump(sph, f)
+    for k in [k for k, v in sh.logic_defs.items() if v.get('_check_only')]:
+        del sh.logic_defs[k]
+    missing = [i for i in playthrough.INSTRUMENTS if not access.get(i)]
+    locs = [k for k, v in sh.logic_defs.items() if v.get('type') == 'item']
+    unreached = [k for k in locs if k not in seen]
+    print('playthrough:', 'all instruments reachable' if not missing else f'MISSING {missing}',
+          f'- {len(locs) - len(unreached)}/{len(locs)} item locations reachable', flush=True)
+    if os.environ.get('LAS_DEBUG_PLAYTHROUGH'):
+        print('  have:', sorted(k for k in access if k in sh.item_defs), flush=True)
+        print('  regions:', sorted(k for k in seen if sh.logic_defs[k].get('type') == 'region'), flush=True)
+        import re as _re
+        for k in [k for k in locs if k not in seen and k.startswith(('D6-','dampe','rapids-south'))][:6]:
+            c = sh.logic_defs[k].get('condition-basic', '')
+            toks = set(_re.findall(r'[a-zA-Z0-9\-\[\]]+', c or ''))
+            print('  ', k, 'region', sh.logic_defs[k]['region'], 'cond', c, '| missing', [t for t in toks if not access.get(t)], flush=True)
+    if unreached:
+        print('  unreachable:', ', '.join(sorted(unreached)[:30]), flush=True)
+    if missing:
+        print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
+        sys.exit(3)
 
+    if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
+        print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
     def progress(n):
-        if n - last[0] >= 25:
+        if n - last[0] >= 5:
             last[0] = n
             print('progress', n, flush=True)
+            stage(f'Building game files ({n} tasks)', 0.72 + 0.2 * min(1.0, n / 280))
 
     mods.progress_update.connect(progress)
     mods.error.connect(lambda e: errors.append(e))
@@ -142,16 +299,16 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
-    # ---- LARecomp entrance randomizer (post-pass over the room files)
-    tier = int(settings.get('entrance-tier', 0))
-    if tier > 0:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import random as _random
-        import entrance_rando as er
-        from RandomizerCore.Tools import leb
-        doors = er.load_doors()
-        rng = _random.Random(f"{settings['seed']}-entrances")
-        entry_map, exit_map = er.shuffle(doors, tier, bool(settings.get('entrance-decoupled', False)), rng)
+    if pot_locs:
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        stage('Hiding items in pots', 0.93)
+        lines = pots_mod.apply(pot_locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, las_data)
+        with open(os.path.join(out_dir, f'pots_{settings["seed"]}.txt'), 'w') as f:
+            f.write('Pots:\n' + '\n'.join(lines) + '\n')
+        print('pots placed:', len(lines), flush=True)
+        print('pots.tsv:', pots_mod.write_tsv(out_dir, leb), flush=True)
+    if ent:
         lvl_out = os.path.join(out_dir, 'romfs', 'region_common', 'level')
 
         def room_path(name, base):
@@ -171,15 +328,31 @@ def main():
             with open(p, 'wb') as f:
                 f.write(room.repack())
 
-        n = er.apply(doors, entry_map, exit_map, read_room, write_room)
+        stage('Shuffling entrances', 0.97)
+        n = el.apply_rooms(*ent, read_room, write_room)
         with open(os.path.join(out_dir, f'entrances_{settings["seed"]}.txt'), 'w') as f:
-            f.write(er.spoiler(doors, entry_map, exit_map) + '\n')
-        print('entrances shuffled:', len(entry_map), 'doors,', n, 'rooms edited', flush=True)
+            f.write(el.spoiler(*ent) + '\n')
+        print('entrance rooms edited:', n, flush=True)
 
+    import seed_tables
+    from RandomizerCore.Tools import oead_tools as _ot
+    print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
         json.dump(s, f, indent=1)
+    stage('Building the check tracker', 0.99)
+    import tracker
+    if settings.get('randomize-environments'):
+        import environments
+        print('environments:', environments.apply(out_dir, romfs, settings['seed']), 'levels', flush=True)
+    if settings.get('tunic-color', 'default') != 'default':
+        import cosmetics
+        print('tunic:', cosmetics.apply(out_dir, romfs, settings['seed'], settings['tunic-color']), flush=True)
+    print('tracker:', tracker.build(out_dir, romfs), flush=True)
+    import spoiler_view  # readable spoiler + walkthrough for the in-game Spoiler page
+    print('spoiler view:', spoiler_view.build(out_dir), 'lines', flush=True)
+    stage('Done', 1.0)
     print('done', flush=True)
 
 

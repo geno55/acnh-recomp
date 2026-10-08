@@ -8,6 +8,9 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "item_names.h"
+
+extern "C" void give_item_request(int id, int count, int index);
 
 extern "C" {
 #include "../hle.h"
@@ -293,6 +296,25 @@ extern "C" void save_editor_draw(float scale) {
         }
         ImGui::PopID();
     }
+    section("Give any item");
+    {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
+        static int item = 0, count = 1, index = -1;
+        ImGui::PushID("give");
+        label("Item");
+        if (ImGui::BeginCombo("##item", kItemNames[item])) {
+            for (int i = 0; i < (int)(sizeof kItemNames / sizeof kItemNames[0]); i++)
+                if (ImGui::Selectable(kItemNames[i], i == item)) item = i;
+            ImGui::EndCombo();
+        }
+        slider("Count", &count, 1, 99);
+        label("Index (-1 = any)");
+        ImGui::InputInt("##idx", &index);
+        ImGui::Spacing();
+        if (ImGui::Button("Give")) give_item_request(item, count, index);
+        ImGui::SameLine();
+        ImGui::TextDisabled("Heart pieces, seashells, golden leaves etc. use their index.");
+        ImGui::PopID();
+    }
     (void)scale;
     sync_header();
 }
@@ -302,7 +324,23 @@ extern "C" void save_editor_file_read(const char *path, uint64_t addr, int64_t o
     (void)path; (void)addr; (void)off; (void)size;
 }
 
+extern "C" void cheats_frame(void);      // cheats.mm
+extern "C" void difficulty_frame(void);  // difficulty.mm
 extern "C" void save_editor_frame(uint64_t frame) {
+    cheats_frame();
+    difficulty_frame();
+    static int watch = -1;  // LARECOMP_WATCH_SAVE=<lo>,<hi> (save offsets): log code touching that range
+    if (watch < 0) {
+        watch = 0;
+        unsigned lo, hi;
+        if (getenv("LARECOMP_WATCH_SAVE") && sscanf(getenv("LARECOMP_WATCH_SAVE"), "%x,%x", &lo, &hi) == 2) {
+            extern uint64_t g_watch_lo, g_watch_hi;
+            g_watch_lo = LIVE_SAVE + lo;
+            g_watch_hi = LIVE_SAVE + hi;
+            extern void watch_arm(void);
+            watch_arm();
+        }
+    }
     static long test_at = -2;  // LARECOMP_SAVE_MAX_AT=<frame>: press "Max out everything" (test hook)
     if (test_at == -2) test_at = getenv("LARECOMP_SAVE_MAX_AT") ? atol(getenv("LARECOMP_SAVE_MAX_AT")) : -1;
     if (test_at >= 0 && (long)frame == test_at && loaded()) {
@@ -312,6 +350,51 @@ extern "C" void save_editor_frame(uint64_t frame) {
         F<uint32_t>(KEYITEMS) |= 0x7FFF; F<uint8_t>(SENSOR) |= 1; F<int16_t>(HP) = (int16_t)max_hp();
         sync_header();
         LOG("[save] test: maxed out\n");
+    }
+    static long poke_done;  // LARECOMP_POKE_SAVE=off=val,...: write live-save bytes (hex offsets) once after load
+    if (!poke_done && loaded() && getenv("LARECOMP_POKE_SAVE") && frame > 2600) {
+        poke_done = 1;
+        for (const char *p = getenv("LARECOMP_POKE_SAVE"); *p;) {
+            unsigned off = 0, val = 0;
+            if (sscanf(p, "%x=%x", &off, &val) == 2 && off < 0x5EE0) *(uint8_t *)(uintptr_t)(LIVE_SAVE + off) = (uint8_t)val;
+            while (*p && *p != ',') p++;
+            if (*p) p++;
+        }
+        LOG("[save] poked %s\n", getenv("LARECOMP_POKE_SAVE"));
+    }
+    if (loaded()) {  // LARECOMP_LOG_FLAGS: log event-flag bit changes; LARECOMP_SET_FLAGS=i,j,..: force those bits on
+        static uint8_t prev[256];
+        static bool have_prev;
+        uint8_t *fl = (uint8_t *)(uintptr_t)(LIVE_SAVE + 0x5DC0);
+        if (const char *sf = getenv("LARECOMP_SET_FLAGS")) {
+            for (const char *p = sf; *p;) {
+                int i = atoi(p);
+                if (i >= 0 && i < 2048 && !(fl[i >> 3] & (1 << (i & 7)))) {
+                    fl[i >> 3] |= (uint8_t)(1 << (i & 7));
+                    LOG("[flags] forced %d on\n", i);
+                }
+                while (*p && *p != ',') p++;
+                if (*p) p++;
+            }
+        }
+        if (getenv("LARECOMP_LOG_FLAGS")) {
+            if (have_prev)
+                for (int i = 0; i < 2048; i++)
+                    if ((fl[i >> 3] ^ prev[i >> 3]) & (1 << (i & 7)))
+                        LOG("[flags] frame %lu: flag %d -> %d\n", (unsigned long)frame, i, (fl[i >> 3] >> (i & 7)) & 1);
+            memcpy(prev, fl, 256);
+            have_prev = true;
+        }
+    }
+    if (getenv("LARECOMP_FIND_FLAGS") && frame == 3000) {  // locate the event-flag bitfield (ptr, byte capacity)
+        for (uint64_t a = 0x7001C00000ull; a < 0x7001D00000ull; a += 8) {
+            uint64_t v = *(uint64_t *)(uintptr_t)a;
+            if (v >= LIVE_SAVE && v < LIVE_SAVE + 0x5EE0) {
+                uint32_t cap = *(uint32_t *)(uintptr_t)(a + 8);
+                if (cap > 16 && cap < 0x1000) LOG("[flags] ptr at %llx -> save+%#llx, next u32 %u\n", (unsigned long long)a,
+                                                  (unsigned long long)(v - LIVE_SAVE), cap);
+            }
+        }
     }
     static long at = -2;
     if (at == -2) at = getenv("LARECOMP_SAVE_DUMP_AT") ? atol(getenv("LARECOMP_SAVE_DUMP_AT")) : -1;

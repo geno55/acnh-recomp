@@ -54,6 +54,16 @@ def editConditions(condition, settings):
         condition['conditions'].pop(0)
         return
     
+    # LARecomp skip-story-events: no kids running up to Link after the Full Moon Cello (Quadruplet 'detain'): the
+    # panicking kid only spawns with RescueBowWow, and BowWow gets kidnapped from the Cello itself instead of from
+    # the flag that scene sets (BowWowEvent; only these two conditions read it)
+    if condition['symbol'] == 'RescueBowWow' and settings.get('skip-story-events', True):
+        condition['conditions'] = [{'category': 9, 'parameter': 'false'}]
+        return
+    if condition['symbol'] == 'BowWowKidnap' and settings.get('skip-story-events', True):
+        condition['conditions'][0] = {'category': 2, 'parameter': 'FullMoonCello'}
+        return
+
     if condition['symbol'] == 'BowWowMissionStart': # Remove BoyA condition
         condition['conditions'].pop(0)
         return
