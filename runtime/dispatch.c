@@ -1,10 +1,8 @@
-#include <pthread.h>
-#include <unistd.h>
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
-#include <execinfo.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
+#include <unistd.h>
 
 #include "rt.h"
 
@@ -28,14 +26,22 @@ static int override_count;
 
 // Host implementations registered by name (runtime/hle/*.c fill this via HLE_FUNC)
 typedef struct { const char *name; HostFn fn; } HleImpl;
+#ifdef __APPLE__
 extern const HleImpl __start_hle_impls[] __asm__("section$start$__DATA$__hle_impls");
 extern const HleImpl __stop_hle_impls[] __asm__("section$end$__DATA$__hle_impls");
+#else
+// PE/COFF: the linker sorts .hle$a < .hle$m (entries, hle.h) < .hle$z by the text after '$'.
+__attribute__((section(".hle$a"), used)) static const HleImpl __start_hle_impls[1];
+__attribute__((section(".hle$z"), used)) static const HleImpl __stop_hle_impls[1];
+#endif
 
 HostFn hle_lookup_impl(const char *name) {
     const char *skip = getenv("LARECOMP_HLE_SKIP");  // debugging: disable HLE for names containing this
     if (skip && strstr(name, skip)) return NULL;
-    for (const HleImpl *p = __start_hle_impls; p < __stop_hle_impls; p++)
-        if (!strcmp(p->name, name)) return p->fn;
+    const HleImpl *start = __start_hle_impls, *stop = __stop_hle_impls;
+    __asm__("" : "+r"(start), "+r"(stop));  // separate objects: keep the compiler from reasoning about them
+    for (const HleImpl *p = start; p < stop; p++)
+        if (p->name && !strcmp(p->name, name)) return p->fn;
     return NULL;
 }
 
@@ -92,6 +98,7 @@ void *hle_alloc(uint64_t size) {
     next += (size + 63) & ~63ull;
     if (next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
     pthread_mutex_unlock(&m);
+    plat_commit(a, size);
     memset((void *)a, 0, size);
     return (void *)a;
 }
@@ -159,12 +166,48 @@ void guest_call(Cpu *c, uint64_t addr) {
     c->x[30] = lr;
 }
 
+// Host pc -> recompiled guest function containing it ("f_<addr>"), for hosts without symbol lookup.
+static int cmp_host(const void *a, const void *b) {
+    uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
+    return x < y ? -1 : x > y;
+}
+const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
+    static uint64_t (*byhost)[2];  // {host address, guest address}, sorted by host address
+    static uint64_t n;
+    static __thread char name[32];
+    if (!byhost) {
+        uint64_t total = tables[0].count + tables[1].count, k = 0;
+        uint64_t (*v)[2] = malloc(total * sizeof *v);
+        if (!v) return NULL;
+        for (int t = 0; t < 2; t++)
+            for (uint64_t i = 0; i < tables[t].count; i++) {
+                v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
+                v[k++][1] = tables[t].addrs[i];
+            }
+        qsort(v, k, sizeof *v, cmp_host);
+        n = k;
+        byhost = v;
+    }
+    uint64_t lo = 0, hi = n;  // last entry with host address <= pc
+    while (lo < hi) {
+        uint64_t mid = (lo + hi) / 2;
+        if (byhost[mid][0] <= pc) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!lo || pc - byhost[lo - 1][0] > 0x100000) return NULL;
+    snprintf(name, sizeof name, "f_%llx", (unsigned long long)byhost[lo - 1][1]);
+    if (offset) *offset = pc - byhost[lo - 1][0];
+    return name;
+}
+
+static const char *host_sym(uint64_t pc, uint64_t *offset) {
+    const char *s = plat_symbol(pc, offset);
+    return s ? s : rt_host_fn_name(pc, offset);
+}
+
 void rt_fatal_trace(void) {
-    void *bt[64];
-    int n = backtrace(bt, 64);
-    char **syms = backtrace_symbols(bt, n);
     fprintf(stderr, "host backtrace (guest functions are f_<addr>):\n");
-    for (int i = 0; i < n; i++) fprintf(stderr, "  %s\n", syms[i]);
+    plat_print_backtrace();
     Cpu *c = kernel_current_cpu();
     if (c) {
         fprintf(stderr, "guest: sp=%llx lr=%llx\n", c->sp, c->x[30]);
@@ -186,10 +229,6 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 }
 
 // ---- crash reporting
-#include <dlfcn.h>
-#include <errno.h>
-#include <signal.h>
-#include <sys/ucontext.h>
 
 // Debug data watchpoint: the page is protected; accesses in [lo, hi) are attributed to the host
 // function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
@@ -197,56 +236,43 @@ uint64_t g_watch_lo, g_watch_hi;
 static uint64_t watch_page;
 static void *watch_thread(void *a) {
     (void)a;
-    int r = mprotect((void *)watch_page, 0x4000, PROT_NONE);
-    fprintf(stderr, "[watch] page %llx protect -> %d (errno %d)\n", (unsigned long long)watch_page, r, r ? errno : 0);
-    for (;;) { mprotect((void *)watch_page, 0x4000, PROT_NONE); usleep(100); }
+    int r = plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
+    fprintf(stderr, "[watch] page %llx protect -> %d\n", (unsigned long long)watch_page, r);
+    for (;;) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
     return NULL;
 }
 void watch_arm(void) {
     if (!g_watch_lo || watch_page) return;
-    watch_page = g_watch_lo & ~0x3FFFull;
+    watch_page = g_watch_lo & ~(PLAT_PAGE - 1);
     pthread_t t;
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
-static void crash_handler(int sig, siginfo_t *si, void *ctx) {
-    ucontext_t *uc = ctx;
-    uint64_t fa = (uint64_t)si->si_addr;
-    if (watch_page && fa >= watch_page && fa < watch_page + 0x4000) {
-        if (fa >= g_watch_lo && fa < g_watch_hi) {
-            static char seen[64][48];
-            static int nseen;
-            Dl_info wi = {0};
-            dladdr((void *)uc->uc_mcontext->__ss.__pc, &wi);
-            const char *nm = wi.dli_sname ? wi.dli_sname : "?";
-            bool found = false;
-            for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], nm);
-            if (!found && nseen < 64) {
-                snprintf(seen[nseen++], 48, "%s", nm);
-                fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
-            }
+bool rt_fault_watch(uint64_t fa, uint64_t pc) {
+    if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
+    if (fa >= g_watch_lo && fa < g_watch_hi) {
+        static char seen[64][48];
+        static int nseen;
+        const char *nm = host_sym(pc, NULL);
+        if (!nm) nm = "?";
+        bool found = false;
+        for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], nm);
+        if (!found && nseen < 64) {
+            snprintf(seen[nseen++], 48, "%s", nm);
+            fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
         }
-        mprotect((void *)watch_page, 0x4000, PROT_READ | PROT_WRITE);
-        return;
     }
-    uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
-    Dl_info di = {0}, dl = {0};
-    dladdr((void *)pc, &di);
-    dladdr((void *)lr, &dl);
-    fprintf(stderr, "\n*** signal %d accessing %p\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", sig,
-            si->si_addr, pc, di.dli_sname ? di.dli_sname : "?", pc - (uint64_t)di.dli_saddr, lr,
-            dl.dli_sname ? dl.dli_sname : "?");
+    plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
+    return true;
+}
+
+void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
+    uint64_t po = 0, lo = 0;
+    const char *ps = host_sym(pc, &po), *ls = host_sym(lr, &lo);
+    fprintf(stderr, "\n*** %s accessing %#llx\n    host pc %llx (%s+%llx)\n    host lr %llx (%s)\n", what,
+            (unsigned long long)fa, (unsigned long long)pc, ps ? ps : "?", (unsigned long long)po,
+            (unsigned long long)lr, ls ? ls : "?");
     rt_fatal_trace();
 }
 
-void crash_handler_install(void) {
-    stack_t ss = {.ss_sp = malloc(1 << 20), .ss_size = 1 << 20};
-    sigaltstack(&ss, NULL);
-    struct sigaction sa = {0};
-    sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGILL, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-}
+void crash_handler_install(void) { plat_crash_handler_install(); }

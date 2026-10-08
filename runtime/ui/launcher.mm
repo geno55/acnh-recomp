@@ -11,10 +11,8 @@
 #include <SDL3/SDL.h>
 #include <dirent.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <string>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <vector>
 
 #include "imgui.h"
@@ -25,12 +23,12 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include "platform.h"
 #include "settings.h"
 void ui_window_init(void);
 SDL_Window *ui_window(void);
 void *ui_metal_layer(void);
 void *ui_metal_device(void);
-extern char **environ;
 }
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -89,20 +87,12 @@ static void set_job(const std::string &s, bool failed = false) {
 }
 
 static int run(const std::vector<std::string> &args, const std::string &log) {
-    std::vector<char *> av;
-    for (auto &a : args) av.push_back((char *)a.c_str());
+    std::vector<const char *> av;
+    for (auto &a : args) av.push_back(a.c_str());
     av.push_back(NULL);
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    posix_spawn_file_actions_adddup2(&fa, 1, 2);
-    pid_t pid;
-    int rc = posix_spawn(&pid, av[0], &fa, NULL, av.data(), environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc) return -1;
-    int st = 0;
-    waitpid(pid, &st, 0);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    PlatProc p = plat_spawn(av.data(), log.c_str(), true);
+    if (!p) return -1;
+    return plat_proc_wait(p, true);
 }
 
 static std::string largest_with(const std::string &dir, const char *ext) {
@@ -125,7 +115,7 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     dump = g_dump, keys = g_keys;
     pthread_mutex_unlock(&g_lock);
-    std::string hactool = "tools/hactool/hactool", tmp = g_root + "/.extract", log = g_root + "/extract.log";
+    std::string hactool = "tools/hactool/hactool" PLAT_EXE_SUFFIX, tmp = g_root + "/.extract", log = g_root + "/extract.log";
     mkdir(g_root.c_str(), 0755);
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
@@ -165,7 +155,7 @@ static void *extract_thread(void *) {
         set_job(why.empty() ? "Game files ready." : why, !why.empty());
     }
 done:
-    run({"/bin/rm", "-rf", tmp}, "/dev/null");
+    plat_remove_tree(tmp.c_str());
     pthread_mutex_lock(&g_lock);
     g_busy = false;
     pthread_mutex_unlock(&g_lock);

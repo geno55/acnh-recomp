@@ -66,9 +66,17 @@ static void to_calendar(int64_t t, IpcResp *resp, int utc) {
     o[4] = (uint8_t)tm.tm_hour; o[5] = (uint8_t)tm.tm_min; o[6] = (uint8_t)tm.tm_sec;
     *(uint32_t *)(o + 8) = (uint32_t)tm.tm_wday;
     *(uint32_t *)(o + 12) = (uint32_t)tm.tm_yday;
+#ifdef _WIN32  // no tm_zone / tm_gmtoff: offset = local broken-down time read back as UTC, minus now
+    struct tm g;
+    gmtime_r(&tt, &g);
+    long gmtoff = (long)difftime(_mkgmtime(&tm), _mkgmtime(&g));
+    memcpy(o + 16, utc ? "UTC" : "LCL", 4);
+#else
+    long gmtoff = tm.tm_gmtoff;
     memcpy(o + 16, utc ? "UTC" : tm.tm_zone, 4);
+#endif
     *(uint32_t *)(o + 24) = (uint32_t)tm.tm_isdst;
-    *(int32_t *)(o + 28) = utc ? 0 : (int32_t)tm.tm_gmtoff;
+    *(int32_t *)(o + 28) = utc ? 0 : (int32_t)gmtoff;
     resp_size(resp, 0x20);
 }
 

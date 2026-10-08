@@ -1,16 +1,12 @@
 // Randomizer tab: choose / generate LAS-Randomizer seeds (rando/<seed>/). Switching seeds restarts the game
 // (game data is read at boot); each seed keeps its own save slots.
 #include <dirent.h>
-#include <ftw.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -23,7 +19,6 @@ extern "C" {
 #include "../settings.h"
 void rt_restart(void);
 extern const char *g_romfs_dir;
-extern char **environ;
 }
 
 struct Seed { std::string name, logic, spoiler; long mtime; };
@@ -52,11 +47,10 @@ static std::string json_str(const std::string &j, const char *key) {
 }
 
 // Deletes rando/<name> (the seed's game files, spoiler and its save slots).
-static int rm_entry(const char *path, const struct stat *, int, struct FTW *) { return remove(path); }
 static bool delete_seed(const std::string &name) {
-    if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos) return false;
+    if (name.empty() || name == "." || name == ".." || name.find_first_of("/\\") != std::string::npos) return false;
     std::string dir = "rando/" + name;
-    bool ok = nftw(dir.c_str(), rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0;
+    bool ok = plat_remove_tree(dir.c_str());
     LOG("[rando] deleted seed %s: %s\n", name.c_str(), ok ? "ok" : strerror(errno));
     return ok;
 }
@@ -84,7 +78,7 @@ static void scan(void) {
 }
 
 // ---- generation (background process)
-static pid_t g_gen_pid;
+static PlatProc g_gen_pid;
 static std::string g_gen_seed, g_gen_status;
 static float g_gen_frac;
 static double g_gen_start;
@@ -167,15 +161,11 @@ static void start_generation(void) {
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
     std::string log = dir + "/generate.log";
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    posix_spawn_file_actions_adddup2(&fa, 1, 2);
-    std::string py = "third_party/LAS-Randomizer/venv/bin/python";
+    std::string py = "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON;
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
     const char *argv[] = {py.c_str(), "tools/rando/las_headless.py", romfs.c_str(), dir.c_str(), req.c_str(), NULL};
-    int rc = posix_spawn(&g_gen_pid, py.c_str(), &fa, NULL, (char *const *)argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
+    g_gen_pid = plat_spawn(argv, log.c_str(), false);
+    int rc = !g_gen_pid;
     g_gen_seed = g_opts.seed;
     g_gen_failed = rc != 0;
     g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Starting...";
@@ -195,10 +185,10 @@ static void poll_generation(void) {
         size_t sp = line.find(' ');
         if (sp != std::string::npos) g_gen_status = line.substr(sp + 1) + "...";
     }
-    int st;
-    if (waitpid(g_gen_pid, &st, WNOHANG) == g_gen_pid) {
+    int st = plat_proc_wait(g_gen_pid, false);
+    if (st >= 0) {
         g_gen_pid = 0;
-        g_gen_failed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        g_gen_failed = st != 0;
         g_gen_status = g_gen_failed ? "Generation failed: see rando/" + g_gen_seed + "/generate.log" : "Seed \"" + g_gen_seed + "\" ready.";
         g_scanned = false;
         g_opts.seed[0] = 0;

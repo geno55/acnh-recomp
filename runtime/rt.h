@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "cpu.h"
+#include "platform.h"
 
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 #define FATAL(...) (fprintf(stderr, "FATAL: " __VA_ARGS__), rt_fatal_trace())

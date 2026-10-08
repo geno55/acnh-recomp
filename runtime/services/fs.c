@@ -279,7 +279,14 @@ static void directory(Service *s, IpcReq *req, IpcResp *resp) {
         struct dirent *e;
         while (n < max && (e = readdir(d->d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+#ifdef _WIN32  // no d_type
+            char full[2048];
+            struct stat es;
+            snprintf(full, sizeof full, "%s/%s", d->path, e->d_name);
+            bool isdir = !stat(full, &es) && S_ISDIR(es.st_mode);
+#else
             bool isdir = e->d_type == DT_DIR;
+#endif
             if ((isdir && !(d->mode & 1)) || (!isdir && !(d->mode & 2))) continue;
             uint8_t *ent = out + n * 0x310;
             memset(ent, 0, 0x310);

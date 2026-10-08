@@ -13,7 +13,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 
 #include "hle.h"
@@ -37,7 +36,7 @@ const char *rando_seed_dir(void) {
 static void apply_data(uint64_t img_off, const uint8_t *bytes, size_t n) {
     uint8_t *p = (uint8_t *)(uintptr_t)(MAIN_BASE + img_off);
     uintptr_t page = (uintptr_t)p & ~0x3FFFull;
-    mprotect((void *)page, ((uintptr_t)p + n - page + 0x3FFF) & ~0x3FFFull, PROT_READ | PROT_WRITE);
+    plat_protect(page, ((uintptr_t)p + n - page + 0x3FFF) & ~0x3FFFull, PLAT_PROT_RW);
     memcpy(p, bytes, n);
 }
 

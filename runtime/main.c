@@ -1,14 +1,7 @@
 // LARecomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
-#include <libgen.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <crt_externs.h>
-#include <mach-o/dyld.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 #include "hle.h"
 #include "kernel.h"
@@ -39,12 +32,7 @@ static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
-    mach_vm_address_t a = GUEST_LO;
-    if (mach_vm_allocate(mach_task_self(), &a, GUEST_HI - GUEST_LO, VM_FLAGS_FIXED) == KERN_SUCCESS) {
-        // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
-        // Untouched pages cost nothing.
-        return;
-    }
+    if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
     const char *tries = getenv("LARECOMP_REEXEC");
     int n = tries ? atoi(tries) : 0;
     if (n >= 20) {
@@ -54,9 +42,7 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
     char buf[16];
     snprintf(buf, sizeof buf, "%d", n + 1);
     setenv("LARECOMP_REEXEC", buf, 1);
-    char path[4096];
-    uint32_t len = sizeof path;
-    if (_NSGetExecutablePath(path, &len) == 0) execv(path, *_NSGetArgv());
+    plat_exec(NULL);
     perror("re-exec");
     exit(1);
 }
@@ -67,7 +53,7 @@ static char **g_argv;
 void rt_restart(void) {
     LOG("[main] restarting\n");
     fflush(stderr);
-    execv(g_argv[0], g_argv);
+    plat_exec(g_argv);
     LOG("[main] restart failed\n");
 }
 
@@ -81,12 +67,13 @@ void rt_restart_to_title(void) {
     unsetenv("LARECOMP_NO_LAUNCHER");
     LOG("[main] back to the title screen\n");
     fflush(stderr);
-    execv(av[0], av);
+    plat_exec(av);
     LOG("[main] restart failed\n");
 }
 
 int main(int argc, char **argv) {
     g_argv = argv;
+    plat_init();
     setvbuf(stderr, NULL, _IOLBF, 0);
     const char *root = "extracted";
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in

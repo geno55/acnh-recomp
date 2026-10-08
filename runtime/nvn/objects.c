@@ -1,5 +1,4 @@
 // NVN objects, builders, and state objects (everything except command recording).
-#include <mach/mach_time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,9 +44,7 @@ NVN(nvnDeviceFinalize) { (void)c; }
 NVN(nvnDeviceSetDebugLabel) { (void)c; }
 NVN(nvnDeviceGetInteger) { *(int32_t *)AP(2) = (int32_t)device_integer((uint32_t)A(1)); }
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    RET(mach_absolute_time() * tb.numer / tb.denom);
+    RET(plat_now_ns());
 }
 NVN(nvnDeviceGetTimestampInNanoseconds) { RET(G(uint64_t, A(1), 8)); }  // counter.timestamp (ticks == ns here)
 NVN(nvnDeviceSetIntermediateShaderCache) { (void)c; }
