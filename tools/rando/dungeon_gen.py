@@ -578,30 +578,42 @@ def _roof_variants(romfs):
     return _roof_cache
 
 
-def _roof_for(romfs, level, missing, own_fade=None):
+def _roof_for(romfs, level, missing, own_fade=None, corners=()):
     """Darkness cover (roof actor 0x1B6 params: model file, roof model, fade model) for a cell whose sides
-    `missing` (subset of 'UDLR', in that order) have no room: the generic 'DungeonRoof_ex<missing>' models cover
-    the neighbour cells that exist (181/200 rooms of the original game follow this). A moved room's own cover was
-    made for its old surroundings (user saw blacked-out areas). Prefers the level's own roof file.
-    own_fade = (file, fade model): a multi-cell room's own fade, kept with a generic roof from the same file
-    (None if that file has no matching roof: the room keeps its own cover)."""
-    roof = 'DungeonRoof_ex' + missing if missing else 'DungeonRoof'
-    fade = 'DungeonFade_ex' + missing if missing else 'DungeonFade'
+    `missing` (subset of 'UDLR', in that order) have no room. The roof is the black lid over the cell while Link is
+    elsewhere; 'DungeonRoof_ex<sides>' lids reach 4.5 past the cell on those sides (over the void: 181/200 rooms of
+    the original game extend over exactly their missing sides). A moved room's own cover was made for its old
+    surroundings (user saw blacked-out areas). Two extended sides also cover the corner between them: with a room
+    on that diagonal (`corners`, e.g. 'UL') the lid blacked out a corner of it (user 2026-10-09, Madness seed: a black
+    box in a visited room) - such pairs aren't both extended. Sides whose model isn't in any file stay unextended
+    (an isolated cell: no 'exUDLR' exists, it kept its old lid). Prefers the level's own roof file.
+    own_fade = (file, fade model): a multi-cell room's own fade, kept with a roof from the same file."""
+    import itertools
     files = _roof_variants(romfs)
-    if own_fade:
-        return (own_fade[0], roof, own_fade[1]) if roof in files.get(own_fade[0], ()) else None
     own = 'map/DungeonRoofLv%d.bfres' % int(level[2:4])
     order = ([own] if own in files else []) + [f for f in files if f != own]
-    for f in order:  # a file with both matching models first, then roof only
-        if roof in files[f] and fade in files[f]:
-            return f, roof, fade
-    for f in order:
-        if roof in files[f]:
-            return f, roof, 'DungeonFade' if 'DungeonFade' in files[f] else fade
+    pairs = [('U', 'L', 'UL'), ('U', 'R', 'UR'), ('D', 'L', 'DL'), ('D', 'R', 'DR')]
+    for n in range(len(missing), -1, -1):  # as many extended sides as possible
+        for ext in itertools.combinations(missing, n):
+            if any(a in ext and b in ext and c in corners for a, b, c in pairs):
+                continue
+            ext = ''.join(ext)
+            roof = 'DungeonRoof_ex' + ext if ext else 'DungeonRoof'
+            fade = 'DungeonFade_ex' + ext if ext else 'DungeonFade'
+            if own_fade:
+                if roof in files.get(own_fade[0], ()):
+                    return own_fade[0], roof, own_fade[1]
+                continue
+            for f in order:  # a file with both matching models first, then roof only
+                if roof in files[f] and fade in files[f]:
+                    return f, roof, fade
+            for f in order:
+                if roof in files[f]:
+                    return f, roof, 'DungeonFade' if 'DungeonFade' in files[f] else fade
     return None
 
 
-def _fix_room(romfs, out, cell, src, zone_id, flags=None, missing=None, unit_whole=False):
+def _fix_room(romfs, out, cell, src, zone_id, flags=None, missing=None, unit_whole=False, corners=()):
     """Every actor records the camera zone it belongs to (actor +0x10 'roomID' = zone id): stamp the cell's new
     zone (stale ids -> the room isn't drawn: black screen). Warp pads are removed (their partner start in the
     old dungeon is gone -> std::out_of_range on load). unit_whole: the cell is part of a multi-cell room whose
@@ -624,7 +636,8 @@ def _fix_room(romfs, out, cell, src, zone_id, flags=None, missing=None, unit_who
             generic_fade = own[2] == 'DungeonFade' or own[2].startswith('DungeonFade_ex')
             if unit_whole and not generic_roof:
                 continue
-            cover = _roof_for(romfs, rooms.level_of(cell), missing, (own[0], own[2]) if unit_whole and not generic_fade else None)
+            cover = _roof_for(romfs, rooms.level_of(cell), missing, (own[0], own[2]) if unit_whole and not generic_fade else None,
+                              corners)
             if cover:
                 a.parameters = [cover[0].encode(), cover[1].encode(), cover[2].encode()] + list(a.parameters[3:])
     for a in r.actors:
@@ -1079,7 +1092,10 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         sc, sr = cell_pos(src)
         whole = len(unit) > 1 and all(layout.get(cell_name(level, c0 + cell_pos(u)[0] - sc, r0 + cell_pos(u)[1] - sr)) == u
                                       for u in unit)
-        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], None if keep else flags, missing, whole)
+        corners = [k for k, (dc, dr) in (('UL', (-1, -1)), ('UR', (1, -1)), ('DL', (-1, 1)), ('DR', (1, 1)))
+                   if (c0 + dc, r0 + dr) in here]
+        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], None if keep else flags, missing, whole,
+                  corners)
         area, own = _source_records(romfs, src)
         r = {'name': cell, 'unit': zone_ids[cell], 'area_data': area, 'zone_data': own if own_zones else home_zone}
         if keep and own:  # own camera zone (boss arenas...) under its own id; cells sharing it stay one zone
