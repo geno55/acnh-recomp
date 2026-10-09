@@ -613,7 +613,8 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Bushes hold items", &g_opts.bushes);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
+        ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 310 more checks; bushes over a hole and tall\n"
+                          "grass stay as they are).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
     ImGui::Checkbox("Boss souls", &g_opts.boss_souls);
     if (ImGui::IsItemHovered())

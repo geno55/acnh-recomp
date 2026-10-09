@@ -189,7 +189,7 @@ def build(seed_dir, romfs):
     if os.path.exists(tsv):
         import bushes as bushes_mod
         names = {}
-        for b in bushes_mod.scan(romfs, leb):
+        for b in bushes_mod.scan(romfs, leb, pits=True):  # (older seeds hid items over pits too)
             r = room_file(b['room'])
             a = next((a for a in r.actors if a.key == b['key']), None) if r else None
             if a:
