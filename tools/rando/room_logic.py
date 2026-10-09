@@ -45,6 +45,7 @@ IMPASSABLE = {'blocked:statue', 'blocked:chest'}
 STEP = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}
 OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 MAX_TERMS = 48
+EXIT_REQ = {}  # catalog room -> frozenset of atoms leaving it needs (mini-boss souls: tools/rando/souls.py exit_req)
 
 
 # location subtypes LAS shuffles (shuffler.py: every other item location keeps its vanilla content)
@@ -405,6 +406,10 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
         if layout.get(ca) == a and layout.get(cb) == b:  # (stairs rooms stay home)
             edges[ca].append((cb, frozenset()))
             edges[cb].append((ca, frozenset()))
+    for cell, room in layout.items():  # leaving a mini-boss room (not into its own unit): its soul (EXIT_REQ)
+        if EXIT_REQ.get(room):
+            edges[cell] = [(t, r if EXIT_REQ.get(layout.get(t)) == EXIT_REQ[room] else r | EXIT_REQ[room])
+                           for t, r in edges[cell]]
     return edges, locks
 
 
