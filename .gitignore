@@ -19,3 +19,6 @@ save_backup_*/
 /third_party/LAS-Randomizer-dev/
 # Python virtual environments (machine-specific)
 venv/
+
+notes/
+CLAUDE.md
