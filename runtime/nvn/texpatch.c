@@ -35,7 +35,7 @@
 #include "../../third_party/imgui/imstb_truetype.h"
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8 };
-enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET };
+enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -76,6 +76,9 @@ static int role_of(const char *name) {
         {"BtnA_", R_A}, {"BtnB_", R_B}, {"BtnX_", R_X}, {"BtnY_", R_Y}, {"BtnL_", R_L}, {"BtnR_", R_R},
         {"BtnZL_", R_ZL}, {"BtnZR_", R_ZR}, {"BtnPlus_", R_PLUS}, {"BtnMinus_", R_MINUS},
         {"Spicy_00^t", R_HERO},  // Ld_Spicy (StartUp.arc): the HUD's Hero Mode icon (the file select uses Spicy_00^f)
+        // the empty bottle's item icon and its 3D model's colour map (ItemBottle.bfres): identified only, never edited
+        // (the gold Escape Bottle's draws are tinted: runtime/hle/escape.c)
+        {"ItemBottle_00^w", R_BOTTLE}, {"MI_bottle_alb", R_BOTTLE_MODEL},
     };
     for (unsigned i = 0; i < sizeof m / sizeof *m; i++)
         if (!strncmp(name, m[i].prefix, strlen(m[i].prefix))) return m[i].role;
@@ -143,22 +146,34 @@ static void load_refs(void) {
     scan_sarc("regionUS/common/ui/GameRegionCommon.arc");
     scan_sarc("regionEU/common/ui/GameRegionCommon.arc");
     size_t len;
-    uint8_t *f = read_all("region_common/ui/pictogram.bffnt", &len);  // message icons: one RGBA8 sheet in a BNTX
+    uint8_t *f = read_all("region_common/actor/ItemBottle.bfres", &len);  // (its textures: one BNTX inside)
+    if (f) {
+        for (size_t i = 0; i + 8 < len; i += 4)
+            if (!memcmp(f + i, "BNTX\0\0\0\0", 8)) { scan_bntx(f + i, len - i, false); break; }
+        free(f);
+    }
+    f = read_all("region_common/ui/pictogram.bffnt", &len);  // message icons: one RGBA8 sheet in a BNTX
     if (f) {
         for (size_t i = 0; i + 8 < len; i += 4)
             if (!memcmp(f + i, "BNTX\0\0\0\0", 8)) { scan_bntx(f + i, len - i, true); break; }
         free(f);
     }
-    LOG("[texpatch] %d known UI textures (button glyphs, pictogram sheet, Hero Mode icon)\n", g_nrefs);
+    LOG("[texpatch] %d known textures (button glyphs, pictogram sheet, Hero Mode icon, bottle icon / model)\n", g_nrefs);
+}
+
+int texpatch_bottle_kind(int id) {
+    if (id < 0 || id >= g_nrefs) return 0;
+    return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : 0;
 }
 
 int texpatch_identify(const NvnTexture *t) {
     pthread_once(&g_once, load_refs);
-    if (!t->addr || t->depth > 1 || t->levels > 1) return -1;
+    if (!t->addr || t->depth > 1) return -1;
     uint64_t total = tegra_total_size(&t->layout);
     for (int i = 0; i < g_nrefs; i++) {
         const Ref *r = &g_refs[i];
-        if (r->w != t->width || r->h != t->height) continue;
+        // (only the bottle model's map has mip levels: compared in full, all levels)
+        if (r->w != t->width || r->h != t->height || (t->levels > 1) != (r->role == R_BOTTLE_MODEL)) continue;
         uint64_t n = r->size < total ? r->size : total;
         if (!memcmp((const void *)(uintptr_t)t->addr, r->data, n)) {
             static int nlog;
@@ -726,6 +741,7 @@ void texpatch_apply(int id, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t ro
     if (id < 0 || id >= g_nrefs) return;
     const Ref *r = &g_refs[id];
     if (r->w != w || r->h != h) return;
+    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL) return;
     if (r->role == R_HERO) {  // fully transparent (BC5 blocks of zeros)
         if (hide_hero()) for (uint32_t y = 0; y < (h + 3) / 4; y++) memset(blocks + y * row, 0, (w + 3) / 4 * 16);
         return;

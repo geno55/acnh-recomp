@@ -347,7 +347,7 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
         ], after)
         
     ### Boss souls (LAS Recomp, tools/rando/souls.py): not an inventory item - the flag of the same name lets the boss appear
-    if item.startswith('BossSoul'):
+    if item.startswith(('BossSoul', 'MinibossSoul')):
         return event_tools.createActionChain(flowchart, before, [
             ('EventFlags', 'SetFlag', {'symbol': item, 'value': True}),
             ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': item})
@@ -366,7 +366,7 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
 def insertItemWithoutAnimation(item, index):
     """Same as insertItemGetAnimation but without the Generic ItemGet animation"""
 
-    if item.startswith('BossSoul'):
+    if item.startswith(('BossSoul', 'MinibossSoul')):
         return [('EventFlags', 'SetFlag', {'symbol': item, 'value': True})]
     
     if item == 'PowerBraceletLv1':

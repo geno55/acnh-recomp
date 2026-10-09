@@ -95,7 +95,7 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
-        'bushes': False, 'boss-souls': False,
+        'bushes': False, 'boss-souls': False, 'miniboss-souls': False,
         'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
@@ -216,11 +216,14 @@ def main():
         if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
             d['type'] = 'important'
 
-    if settings.get('boss-souls'):  # boss souls: a boss only appears once its soul is found (tools/rando/souls.py)
-        import souls as souls_mod
+    import souls as souls_mod  # boss / mini-boss souls: it only appears once its soul is found (tools/rando/souls.py)
+    soul_kinds = souls_mod.enabled(settings)
+    soul_cat = None
+    if soul_kinds:
         from RandomizerCore.Randomizers import chests as las_chests
-        print('boss souls:', souls_mod.add_to_logic(logic_defs, item_defs), 'in the pool', flush=True)
-        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(b[1]) for b in souls_mod.BOSSES]
+        soul_cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
+        print('souls:', souls_mod.add_to_logic(logic_defs, item_defs, soul_kinds, soul_cat), 'in the pool', flush=True)
+        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(s[1], s[0]) for s in souls_mod.souls(soul_kinds)]
 
     pot_locs = {}
     if settings.get('pots'):
@@ -351,6 +354,12 @@ def main():
                 if k in logic_defs:
                     print(k, '=', logic_defs[k].get('condition-basic'), flush=True)
             sys.exit(0)
+    if 'mini' in soul_kinds:  # mini-boss rooms of vanilla-layout dungeons: what lies behind needs the soul
+        import dungeon_gen
+        vanilla = [lv for lv in dungeon_gen.ENTRANCES if not room_plan or lv not in room_plan[0]]
+        print('mini-boss souls on vanilla dungeons:', souls_mod.vanilla_gate(
+            soul_cat, romfs, logic_defs, vanilla, {n: p['room'] for n, p in pot_locs.items() if p.get('room')}),
+            'conditions', flush=True)
 
     result = {}
     errors = []
@@ -496,10 +505,11 @@ def main():
     if pets:
         from RandomizerCore.Tools import event_tools, oead_tools
         print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
-    if settings.get('boss-souls'):
+    if soul_kinds:
         import msbt
         from RandomizerCore.Tools import event_tools, oead_tools
-        print('boss souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt), flush=True)
+        print('souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt, soul_kinds, soul_cat),
+              flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data

@@ -12,8 +12,10 @@
 // or room transition. A bottle that never swings never catches anything, so it stays empty. Not usable in boss arenas
 // (rect per arena below: the fight would be left half done) or Dampe's chambers (chamber.c keeps run state): there it
 // does nothing (no swing either: a fairy caught in it would turn it into a fairy bottle).
-// Nothing in the item logic knows about it (convenience only). Items page: a name tag under its slot (item names are
+// Nothing in the item logic knows about it (convenience only). Drawn GOLD (escape_bottle_tint below) on the Items page,
+// the HUD button and in Tarin's hands. Items page: a name tag under its slot (item names are
 // hidden in randomizer seeds; runtime/ui/inventory_overlay.mm).
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,3 +147,31 @@ bool escape_bottle_owned(void) {
 }
 
 RT_ON_RESET(escape_reset) { on = -1; }  // (seed switch: the next seed may differ)
+
+// Gold Escape Bottle: the renderer calls this for draws sampling the bottle's item icon (kind 1) or its 3D model's
+// colour map (kind 2; runtime/nvn/texpatch.c identifies both by content). All three bottles share those textures, so
+// the Escape Bottle's own draws are picked out: UI icons by the pane matrix in vertex UBO 0 (floats 16-23: 2x4,
+// x scale at 16, translation 19 / 23 in the 1280x720 layout, origin at the centre, y up) - its Items page slot
+// (last of the bottom row, 436, -67) and the HUD button holding item slot 0xf (Y at 476, 296; X at 571, 310; Y / X =
+// PlayerStatus +0xa2 / +0xa3); the model only while Tarin hands it over (Marin & Tarin's house, not owned yet - the
+// get sequence runs before AddItem). Tint (translate.c): rgb = mix(rgb, t0.rgb * lum^t1.w + t1.rgb * lum, t0.w).
+void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]) {
+    if (!active()) return;
+    uint64_t ps = LD64(PLAYER_STATUS_PTR);
+    if (!ps) return;
+    bool owned = LD8(ps + 0xa9) & 0x80;
+    if (kind == 2) {
+        if (owned || strcmp(cur_level(), kHome[0])) return;
+        extern void pot_gold_tint(float tint[8]);  // (the gold of unchecked pots / bushes: lit 3D)
+        pot_gold_tint(tint);
+        return;
+    }
+    if (!owned || !ui || ui_size < 24 * 4) return;
+    float x = ui[19], y = ui[23];
+    bool on = fabsf(x - 436) < 24 && fabsf(y + 67) < 24;
+    if (LD8(ps + 0xa2) == 0xf) on |= fabsf(x - 476) < 24 && fabsf(y - 296) < 24;
+    if (LD8(ps + 0xa3) == 0xf) on |= fabsf(x - 571) < 24 && fabsf(y - 310) < 24;
+    if (!on) return;
+    static const float gold[8] = {1.30f, 0.86f, 0.16f, 1.0f, 0.12f, 0.05f, 0.0f, 1.25f};  // (UI: unlit, 0-1; deep gold)
+    memcpy(tint, gold, sizeof gold);
+}

@@ -560,6 +560,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
     { extern void pot_reveal_tick(uint64_t frame); pot_reveal_tick(frame); }  // (after doorjump: Link found)
+    { extern void souls_tick(uint64_t frame); souls_tick(frame); }  // (boss / mini-boss souls: runtime/hle/souls.c)
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
     ptrscan_tick(frame);

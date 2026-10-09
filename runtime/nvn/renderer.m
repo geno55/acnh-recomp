@@ -144,6 +144,7 @@ bool renderer_texture_presented(NvnTexture *t);
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
 static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
+static int draw_bottle;                 // a fragment texture is the bottle's item icon (1) / model map (2): Escape Bottle
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
@@ -1170,6 +1171,7 @@ static void resolve_feedback(Prog *pr) {
 }
 
 static void bind_textures(int stage, ShaderInfo *si) {
+    if (stage == 1) draw_bottle = 0;
     for (int i = 0; i < si->ntex; i++) {
         ShaderTexture *st_ = &si->tex[i];
         int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -1182,6 +1184,11 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            if (e->tex && stage == 1) {
+                extern int renderer_texpatch_of(NvnTexture *t);
+                extern int texpatch_bottle_kind(int id);
+                if (!draw_bottle) draw_bottle = texpatch_bottle_kind(renderer_texpatch_of(e->tex));
+            }
             if (e->tex && i < 64) {
                 renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
                 tex_wh[stage][i][0] = e->tex->width; tex_wh[stage][i][1] = e->tex->height;
@@ -1982,6 +1989,10 @@ static void draw(CmdRec *r, bool indexed) {
         extern bool pot_glow_active(void);
         if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
+        if (draw_bottle) {  // the gold Escape Bottle (runtime/hle/escape.c): its item icon / held-up model
+            extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
+            escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);
+        }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
     for (int s = 0; s < 12; s++) {

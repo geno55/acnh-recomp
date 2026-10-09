@@ -1926,6 +1926,18 @@ static void draw_(CmdRec *r, bool indexed) {
         extern bool pot_glow_active(void);
         if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
+        // the gold Escape Bottle (runtime/hle/escape.c): draws sampling the bottle's item icon / model map
+        extern int texpatch_bottle_kind(int id);
+        int bottle = 0;
+        for (int i = 0; i < pr->fi->ntex && !bottle; i++) {
+            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+            const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+            if (b && b->tp > 0) bottle = texpatch_bottle_kind(b->tp - 1);
+        }
+        if (bottle) {
+            extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
+            escape_bottle_tint(bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);
+        }
     }
     // fragment textures are bound before deciding the viewport (tex_sc / tex_wh), rscale depends on the decision:
     // build the vertex set now and the fragment set after the decision (stage_set fills tex_sc for stage 1).
