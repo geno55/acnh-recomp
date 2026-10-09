@@ -44,6 +44,9 @@ This is a 0.1 alpha release. That means bug are likely, crashes could occur, ran
   - Switch games use fonts built into the Switch operating system for some text. Some sensible replacements were picked but optionally you may setup the Switch fonts for an authentic look. Switch fonts are Nintendo IP, you must provide them from your own hardware.
 - In-game overlay menu (F1, or Minus + Plus on a controller)
 - Keyboard and controller support
+- Button prompts for your controller: Xbox or PlayStation icons in the game's own UI and text when SDL reports
+  that controller (or pick Nintendo / Xbox / PlayStation yourself).
+- Optional 360-degree movement, blur removal and a hidden Hero Mode icon.
 - Apple MetalFX upscaler for macOS builds. Default.
 - Internal resolution adjustments. Pick how high you want the resolution to be or cut it down, match the display and dynamic resolution options. When combined with the MetalFX upscaler on Macs even a Macbook Air should be able to handle this easily with the right settings. Bilenear upscaling is the only option on Windows currently.
 
@@ -94,6 +97,14 @@ changes) in `third_party/LAS-Randomizer` under the MIT license. Huge thanks to i
 - **Glan** - created the original early builds of the randomizer (https://github.com/la-switch/LAS-Randomizer)
 - **ProfessorLaw** - additional programming
 - and everyone who has reported bugs, given feedback or contributed to LAS-Randomizer
+
+**Community mods** - some options re-implement ideas from these GameBanana mods (re-implemented in the recomp;
+none of their files are used):
+- **360 Controls (And More!)** by Owen_Splat - 360-degree movement, blur removal (blur removal patch by theboy181)
+  (https://gamebanana.com/mods/659802)
+- **XBOX UI** by fellow_demo - Xbox button prompts (https://gamebanana.com/mods/540069)
+- **PS4 UI Buttons** by messiahgov - PlayStation button prompts (https://gamebanana.com/mods/324458)
+- **No Hero Mode Indicator** by Boo/Calla - hide the Hero Mode icon (https://gamebanana.com/mods/441172)
 
 **Libraries and tools**
 - [SDL 3](https://libsdl.org) - windowing, input, audio (zlib license)
