@@ -7,10 +7,14 @@ soul per kind, it counts for every encounter) has a soul in the item pool. Until
 appear, so it can't be beaten and what it guards can't be had:
   runtime   runtime/hle/souls.c (factory hook tools/patches.py BOSS_SPAWN_SITE) refuses to create the boss / mini-boss
             and a boss's reward actor (the instrument; the Color Dungeon's Great Fairy) while the soul flag is clear.
-            An empty room leaves its shutters open (they follow the enemy), so souls.c also keeps Link from walking on:
-            in a room whose enemy is held back he can only leave through the doorway he came in by (no softlock, no free
-            pass) until its defeat flag is set. Side-view arenas (Angler, Evil Eagle) need no barrier: their way on opens
-            on the boss's defeat flag (Angler's Tunnel 04B north door via 846 <- 842, the Eagle's roof stairs).
+  doors     an arena's shutters follow its boss, so an empty arena would stand open. The shutters from a top-down
+            arena onward (to the instrument / the Color Dungeon's fairy) become flag doors at seed time (boss_doors:
+            closed until the boss's defeat flag, as before the fight in vanilla); the boss door side is left alone, so
+            Link can always leave. Side-view arenas already open their way on by flag (Angler's Tunnel 04B north door
+            via 846 <- 842; Eagle's Tower 03G via 939 <- 949); the Eagle's roof stairs back down to 03G (shown only
+            after the fight) are made always there, or Link would be stuck on the empty roof.
+  walls     mini-boss rooms (any doorway can be the way in): souls.c keeps Link inside, off every wall but the one
+            toward the cell he came from, until the defeat flag is set or the soul is found (invisible wall).
   item      an Items.gsheet row per soul (the Secret Medicine's model; gettingFlag = the soul flag), an Item.bfevfl entry
             showing the get message, System.msbt "You got Moldorm's Soul!" (English in every language folder). The
             item-get chains set the flag themselves (LAS item_get / chests, patched for 'BossSoul' / 'MinibossSoul').
@@ -229,13 +233,18 @@ def boss_doors(out_romfs, romfs, leb, cat):
             with open(f, 'rb') as fh:
                 r = leb.Room(fh.read())
             b = next((a for a in r.actors if a.type == typ), None)
-            if b is None or abs(b.posZ) < 0.01 or b.switches[0][0] != 1:  # (side-view arenas: flags already)
+            if b is None or b.switches[0][0] != 1:
                 continue
-            entry = {d[0] for d in cat.get(room, {}).get('doors', []) if 'bossdoor' in d[2]}
-            c0, r0 = (ord(room[-1]) - 65) * 15, (int(room[-3:-1]) - 1) * 12
             changed = False
+            for a in r.actors:  # Eagle's roof: the stairs back down only appear once the fight is over (room flag):
+                if a.type == 0x1f7 and a.switches[0][0] == 0:  # always there (they lead back where Link came from)
+                    a.switches[0] = (2, 1)
+                    out.append((room, 'stairs'))
+                    changed = True
+            entry = {d[0] for d in cat.get(room, {}).get('doors', []) if 'bossdoor' in d[2]}
+            c0, r0 = (ord(room[-1]) - 65) * 15, (int(room[-3:-1]) - 1) * 12 if room[-3:-1].isdigit() else 0
             for a in r.actors:
-                if a.type != 0xef:  # ObjClosedDoor
+                if a.type != 0xef or abs(b.posZ) < 0.01:  # ObjClosedDoor (side-view arenas: their way on opens by flag)
                     continue
                 dx, dz = a.posX - c0, a.posZ - r0
                 side = 'N' if dz < 1.5 else 'S' if dz > 10.5 else 'W' if dx < 1.5 else 'E' if dx > 13.5 else '?'
