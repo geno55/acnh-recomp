@@ -284,3 +284,21 @@ def _mb_seen(gen, a):
 
 
 PATCHES[MB_SEEN_SITE] = _mb_seen
+
+
+# Frame pacing (runtime/hle/framepace.c): the game's frame timer (f_700000c910) advances by its frame period times
+# the swap interval it reads from the system object (+0x812c, written only by the interval setter f_7000017800). It
+# reads it here and nowhere else: we hand it the number of vsyncs that really passed since the last frame, so a
+# late frame advances the world by the time that passed (no slow motion below 60 fps).
+FRAME_STEPS_SITE = 0x700000c954
+
+
+def _frame_steps(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb8696908, hex(w)  # ldr w8, [x8, x9]
+    return ('{ extern uint32_t rt_frame_steps(uint32_t interval); '
+            'c->x[8] = rt_frame_steps(LD32(c->x[8] + c->x[9])); }'
+            f'  /* {a:#x}: ldr w8, [x8, x9] (swap interval -> vsyncs elapsed: runtime/hle/framepace.c) */')
+
+
+PATCHES[FRAME_STEPS_SITE] = _frame_steps

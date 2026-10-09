@@ -120,6 +120,7 @@ static void mem_dump_test(uint64_t frame) {
     if ((long)frame < at || *e != ':') return;
     done = 1;
     uint64_t p = MAIN_BASE + strtoull(e + 1, (char **)&e, 16);
+    if (e[0] == '!') { p = strtoull(e + 1, (char **)&e, 16); }  // <frame>:0!<absolute hex>:... (heap addresses)
     if (*e == ':') e++;
     while (*e && *e != ':') {
         if (*e == '-') { e++; continue; }

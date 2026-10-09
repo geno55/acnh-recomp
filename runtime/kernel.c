@@ -434,6 +434,17 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
     KThread *t = t_cur;
     uint32_t *hs = (uint32_t *)(uintptr_t)handles_ptr;
     uint32_t r;
+    if (ENV("LARECOMP_VSYNC_BT")) {  // (debug) who waits for the display's vsync event: the game's frame loop
+        extern uint32_t vi_vsync_handle(void);
+        static int shown;
+        for (int i = 0; i < count && shown < 2; i++)
+            if (hs[i] && hs[i] == vi_vsync_handle()) {
+                shown++;
+                LOG("[vsync-bt] wait on vsync (%d handles, timeout %lld) lr %llx:\n", count, (long long)timeout,
+                    (unsigned long long)(t ? t->cpu.x[30] : 0));
+                plat_print_backtrace();
+            }
+    }
     for (;;) {
         for (int i = 0; i < count; i++) {
             KObject *o = handle_get(hs[i]);
