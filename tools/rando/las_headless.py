@@ -95,6 +95,7 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
+        'bushes': False,
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -159,6 +160,14 @@ def main():
                                                   settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
+
+    bush_locs = {}
+    if settings.get('bushes'):  # bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
+        import bushes as bushes_mod
+        import random as _rnd
+        bush_locs = bushes_mod.add_to_logic(bushes_mod.scan(romfs, leb), logic_defs, item_defs,
+                                            settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
+        print('bushes:', len(bush_locs), 'locations', flush=True)
 
     # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
     tier = int(settings.get('entrance-tier', 0))
@@ -308,6 +317,15 @@ def main():
             f.write('Pots:\n' + '\n'.join(lines) + '\n')
         print('pots placed:', len(lines), flush=True)
         print('pots.tsv:', pots_mod.write_tsv(out_dir, leb), flush=True)
+    if bush_locs:
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        stage('Hiding items in bushes', 0.94)
+        lines = bushes_mod.apply(bush_locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, las_data)
+        with open(os.path.join(out_dir, f'bushes_{settings["seed"]}.txt'), 'w') as f:
+            f.write('Bushes:\n' + '\n'.join(lines) + '\n')
+        print('bushes placed:', len(lines), flush=True)
+        print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
     if ent:
         lvl_out = os.path.join(out_dir, 'romfs', 'region_common', 'level')
 

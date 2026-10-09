@@ -89,7 +89,7 @@ static uint64_t find_player(uint64_t frame) {
         for (uint64_t k = 0; k + 0x100 <= rs[r]; k += 16)
             if (LD64(ra[r] + k) == PLAYER_COLLISION_VT && is_player_collision(ra[r] + k)) {
                 const float *p = (const float *)(uintptr_t)(ra[r] + k + 0x80);
-                if (getenv("LARECOMP_DOORJUMP_LOG"))
+                if (ENV("LARECOMP_DOORJUMP_LOG"))
                     LOG("[doorjump] candidate %llx (%.2f, %.2f, %.2f) parent %llx\n", (unsigned long long)(ra[r] + k),
                         p[0], p[1], p[2], (unsigned long long)LD64(ra[r] + k + 0x10));
                 cached = ra[r] + k;
@@ -116,7 +116,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     static int was_in;
     if (at == -2) {
         at = -1;
-        const char *e = getenv("LARECOMP_DOORJUMP_TEST");
+        const char *e = ENV("LARECOMP_DOORJUMP_TEST");
         char sd[4];
         if (e && sscanf(e, "%ld:%7[^:]:%3s", &at, cell, sd) == 3) side = sd[0]; else at = -1;
     }
@@ -128,7 +128,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     was_in = in;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     int row = atoi(cell), col = cell[2] - 'A';
-    if (placed < 0 && (long)frame >= at && in && frame - in_level_since >= 60) {
+    if (placed < 0 && (long)frame >= at && in && frame - in_level_since >= 300) {  // (5 s: under load the dungeon entry walk-in still runs after 1 s and overwrites the placement)
         for (int i = 0; i < g_njumps; i++) {
             const Jump *j = &g_jumps[i];
             if (j->row != row || j->col != col || j->side != side) continue;
@@ -210,7 +210,7 @@ static void place_tick(uint64_t frame) {
     LOG("[place] f%llu Link -> (%.2f, %.2f) in %s\n", (unsigned long long)frame, px, pz, lv);
     done = 1;
     placed_at = (long)frame;
-    if (getenv("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 240;
+    if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 240;
 }
 
 void doorjump_tick(uint64_t frame) {
@@ -224,7 +224,7 @@ void doorjump_tick(uint64_t frame) {
         }
     }
     if (!g_njumps) return;
-    if (getenv("LARECOMP_DOORJUMP_TEST")) {
+    if (ENV("LARECOMP_DOORJUMP_TEST")) {
         uint64_t ps0 = LD64(PLAYER_STATUS_PTR);
         if (ps0) test_tick(frame, find_player(frame), (const char *)(uintptr_t)ps0);
     }
@@ -237,7 +237,15 @@ void doorjump_tick(uint64_t frame) {
     if (!pc) return;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     float x = pos[0], z = pos[2];
-    if ((long)frame <= trace_until) LOG("[doorjump-trace] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, x, pos[1], z);
+    if ((long)frame <= trace_until) {
+        LOG("[doorjump-trace] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, x, pos[1], z);
+        if (ENV("LARECOMP_DOORJUMP_DUMP")) {  // every float of the PlayerCollision object that looks like x or z
+            const float *o = (const float *)(uintptr_t)pc;
+            for (int k = 0; k < 0x400 / 4; k++)
+                if ((fabsf(o[k] - x) < 0.6f || fabsf(o[k] - z) < 0.6f) && fabsf(o[k]) > 1.0f)
+                    LOG("[doorjump-dump]   +%#x = %.3f\n", k * 4, o[k]);
+        }
+    }
     static float px, pz;  // last frame (only moving INTO a doorway jumps)
     float dx = x - px, dz = z - pz;
     px = x, pz = z;
@@ -253,7 +261,7 @@ void doorjump_tick(uint64_t frame) {
         case 'N': depth = lz; lateral = lx; out = -dz; break;
         default: depth = 12.0f - lz; lateral = lx; out = dz; break;
         }
-        if (getenv("LARECOMP_DOORJUMP_LOG") && depth < 1.5f)
+        if (ENV("LARECOMP_DOORJUMP_LOG") && depth < 1.5f)
             LOG("[doorjump] f%llu %c depth %.3f lateral %.3f out %.4f still %d\n", (unsigned long long)frame, j->side, depth, lateral, out, j->still);
         // (pressed against the wall he bounces between two positions each frame, ~0.3 from the edge)
         if (depth > 0.7f || fabsf(lateral - j->own * 0.75f) > 1.2f) { j->still = 0; continue; }  // per doorway: a cell's other doorways mustn't reset it
@@ -263,7 +271,11 @@ void doorjump_tick(uint64_t frame) {
         // that frame's movement, and where the neighbour has no wall he'd walk on into its void), jump at rest
         g_stick_freeze_until = frame + 3;
         ++j->still;
-        if (j->still < 4 || (fabsf(out) > 0.02f && j->still < 12)) continue;
+        // jump only after ~0.4 s at rest: while Link is in the game's push-against-a-wall state (it outlasts the
+        // push) position writes are undone (Angler's 03G -> 02G: 12 frames failed, 20 passed). LARECOMP_DJ_REST: frames
+        static int rest = -1;
+        if (rest < 0) rest = getenv("LARECOMP_DJ_REST") ? atoi(getenv("LARECOMP_DJ_REST")) : 24;
+        if (j->still < rest || (fabsf(out) > 0.02f && j->still < rest + 8)) continue;
         j->still = 0;
         float nx = x, nz = z, across = 0.9f;  // just past the edge, in front of the partner doorway
         // just inside the target room's doorway on its side (for a neighbour: just past the shared edge)
@@ -280,7 +292,7 @@ void doorjump_tick(uint64_t frame) {
         pos[2] = pos2[2] = nz;
         px = nx, pz = nz;
         g_jumps_fired++;
-        if (getenv("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;
+        if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;
         if (g_test_stick_until > frame + 40) g_test_stick_until = frame + 40;  // (test: walk on a little, then stop)
         break;
     }

@@ -106,6 +106,14 @@ def load_room(romfs, name):
           'W': [rw for rw in range(8) if not coll[rw][0]], 'E': [rw for rw in range(8) if not coll[rw][9]]}
     tile_open = {k: list(v) for k, v in op.items()}
     doors = []
+    # water at a doorway (byte 2 bit 2, any depth): Link swims through it, and the game ignores position writes
+    # while he swims - such a doorway can't take a door jump (Catfish's Maw 04F north: refused every time)
+    edge = {'N': lambda i: (0, i), 'S': lambda i: (7, i), 'W': lambda i: (i, 0), 'E': lambda i: (i, 9)}
+    for side, tiles_ in op.items():
+        for i in tiles_:
+            row, col = edge[side](i)
+            if raw[0x10 * (row * 10 + col) + 2] & 4:
+                doors.append((side, i, 'blocked:water', 2 * i + 1))
     for a in r.actors:
         if a.type in BLOCKERS:
             lx, lz = (a.posX - ox) / 1.5, (a.posZ - oz) / 1.5
@@ -179,6 +187,22 @@ def catalog(romfs):
             nb = out.get(neighbour(rm.name, side))
             if nb and len(set(rm.openings[side]) & set(nb.openings[OPP[side]])) >= 3:
                 parent[find(rm.name)] = find(nb.name)
+    # ... and cells sharing one camera zone in their level: the game treats them as one room (the camera scrolls
+    # along, no room transition between them) even across 1-tile doorways - Tail Cave 05A/06A/07A (chest, hallway,
+    # stairs), Face Shrine 03G-06G, Turtle Rock 01E/02E, 05D-05F, 06D-06F (user 2026-10-08). Split apart, an edge
+    # inside a zone isn't a room boundary to the game: door jumps from there were undone.
+    import fixedhash
+    for lv in DUNGEONS:
+        p = os.path.join(romfs, 'region_common', 'level', lv, lv + '.lvb')
+        if not os.path.exists(p):
+            continue
+        fh = fixedhash.FixedHash(open(p, 'rb').read())
+        names = [e.name.decode() for e in fh.get(b'area').data.entries]
+        for z in fh.get(b'zone').data.entries:
+            n = z.data[0x9c + 6]
+            cells = [names[i] for i in z.data[0x9c + 7:0x9c + 7 + n] if i < len(names) and names[i] in out]
+            for c in cells[1:]:
+                parent[find(c)] = find(cells[0])
     groups = {}
     for k in out:
         groups.setdefault(find(k), []).append(k)

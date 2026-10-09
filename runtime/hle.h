@@ -1,5 +1,10 @@
 // Registration of host implementations for guest symbols.
 #pragma once
+#include <stdlib.h>
+// Environment lookups that run every frame / per call: looked up once per call site (the variables don't change
+// while the game runs). ENV("LARECOMP_X") -> const char * or NULL.
+#define ENV(name) ({ static const char *env_v_; static int env_i_; if (!env_i_) { env_v_ = getenv(name); env_i_ = 1; } env_v_; })
+
 #include "rt.h"
 
 typedef struct { const char *name; HostFn fn; } HleImplEntry;

@@ -45,8 +45,8 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 extern volatile int g_fnprof;
-void fnprof_hit(uint64_t addr);
-#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a); } while (0)
+void fnprof_hit(uint64_t addr, uint64_t lr);
+#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30]); } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
 #define LD16(a) (*(const u16u *)(uintptr_t)(a))

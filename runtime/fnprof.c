@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <execinfo.h>
 
 #include "hle.h"
 
@@ -12,7 +13,32 @@ volatile int g_fnprof;
 #define NSLOT (1 << 18)
 static struct { _Atomic uint64_t addr; _Atomic uint64_t count; } slots[NSLOT];
 
-void fnprof_hit(uint64_t a) {
+// LARECOMP_FNPROF_BT=<hex addr>[,...]: also print the host backtrace (guest functions are f_<addr>) the first time
+// each listed function is entered inside the window - who calls it
+static uint64_t bt_addrs[256];
+static int bt_n = -1;
+static _Atomic uint8_t bt_done[256];
+
+static void bt_check(uint64_t a, uint64_t lr) {
+    if (bt_n < 0) {
+        bt_n = 0;
+        const char *e = getenv("LARECOMP_FNPROF_BT");
+        for (const char *p = e; p && *p && bt_n < 256;) {
+            bt_addrs[bt_n++] = strtoull(p, (char **)&p, 16);
+            while (*p == ',' || *p == ' ') p++;
+        }
+    }
+    for (int i = 0; i < bt_n; i++)
+        if (bt_addrs[i] == a && !atomic_exchange(&bt_done[i], 1)) {
+            void *fr[64];
+            int n = backtrace(fr, 64);
+            fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx:\n", (unsigned long long)a, (unsigned long long)lr);
+            backtrace_symbols_fd(fr + 2, n - 2, 2);
+        }
+}
+
+void fnprof_hit(uint64_t a, uint64_t lr) {
+    if (bt_n) bt_check(a, lr);
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
     for (int n = 0; n < NSLOT; n++, h = (h + 1) & (NSLOT - 1)) {
         uint64_t cur = atomic_load_explicit(&slots[h].addr, memory_order_relaxed);

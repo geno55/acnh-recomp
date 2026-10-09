@@ -145,7 +145,7 @@ void input_frame(uint64_t frame) {
                                         "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
     uint64_t b = 0;
     int32_t lx = 0, ly = 0, rx = 0, ry = 0;
-    char buf[1024];
+    static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
     snprintf(buf, sizeof buf, "%s", spec);
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
         unsigned long start = 0, len = 10;

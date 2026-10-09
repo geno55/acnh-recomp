@@ -404,6 +404,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
             extern void save_editor_file_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             save_editor_file_read(f->path, b->addr, off, n);
+            extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            flags_ext_save_read(f->path, b->addr, off, n);
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
@@ -415,6 +417,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         if (strstr(f->path, "savedata"))
             LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
         if (pwrite(f->fd, (void *)(uintptr_t)a->addr, (size_t)size, off) < 0) resp->result = errno_result();
+        else if (strstr(f->path, "savedata")) {
+            extern void flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            flags_ext_save_written(f->path, a->addr, off, size);
+        }
         break;
     }
     case 2: fsync(f->fd); break;

@@ -34,9 +34,9 @@ import rooms  # noqa: E402
 NOT_MOVABLE = ('Stairs', 'Downstairs', 'Upstairs', 'Warp', 'Hole', 'PlayerStart', 'Npc', 'Shop', 'Panel',
                'LevelOpen', 'FullMoon', 'Instrument', 'ConchHorn', 'SeaLily', 'SurfHarp', 'WindMarimba',
                'CoralTriangle', 'EveningCalm', 'ThunderDrum', 'HeartContainer', 'Owl', 'Return')
-# doorways that only work with their original neighbour (user 2026-10-08: tie them to their vanilla partner rather
-# than chase them): Tail Cave 06A's hallway north - every jump into another room there was undone by the game
-PINNED = {('Lv01TailCave_06A', 'N')}
+# doorways that only work with their original neighbour (tied to their vanilla partner). Tail Cave 06A's hallway was
+# here until the catalog learnt that cells sharing a camera zone are one room (05A/06A/07A: now a fixed unit).
+PINNED = set()
 
 
 def pinned_ok(room, s, other):
@@ -124,7 +124,7 @@ def _exit_sides(cat, room):
 
 
 def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs=None, anchors=None, exclude=(),
-         stats=None, max_moved=None, exact=None, seal=False, avoid=()):
+         stats=None, max_moved=None, exact=None, seal=False, avoid=(), chaos=False):
     """A layout {cell: source room} for `level`: the entrance and `anchors` (default anchors_of) at their own cells,
     movable single-cell rooms of any dungeon (not in `exclude`) grown around them until every doorway meets a
     matching one (door jumps allowed, _openings_match) and every anchor is reachable from the entrance.
@@ -132,10 +132,14 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     (plan_all: the dungeons share one pool of movable rooms). exact: a set of rooms the layout must use, all of them
     and nothing else (plan_all trades rooms between dungeons). seal: a plain doorway may stay unconnected (it gets a
     door that never opens, sealable()) - an open side toward an empty cell or a room that doesn't match it.
-    avoid: rooms to use only when nothing else fits (plan_all: rooms another dungeon already has)."""
+    avoid: rooms to use only when nothing else fits (plan_all: rooms another dungeon already has).
+    chaos: Chaos dungeon room shuffle - free doorways (sealable()) need no neighbour (implies seal); the pieces only
+    have to be joinable by door jumps afterwards (chaos_pairs): every piece keeps a free doorway."""
     if anchors is None:
         anchors = anchors_of(cat, level)
     fixed = set(anchors) | {entrance}
+    if chaos:
+        seal = True
     if exact is not None:
         size = len(fixed) + len(exact)
     if size is None:
@@ -164,11 +168,18 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     def side_open(room, s):
         return so[room][s]
 
+    chaos_side = {k: {s: bool(op[k][s]) and all(chaos_free(cat, k, s, x[0]) for x in op[k][s]) for s in 'NSWE'}
+                  for k in op} if chaos else None
+
     def can_seal(room, s):
+        if chaos:
+            return chaos_side[room][s] and s not in exits.get(room, ())
         return seal and sealable(op[room][s])
 
     def joined(a, b, s, home_pair):
         x, y = side_open(a, s), side_open(b, rooms.OPP[s])
+        if chaos:  # Chaos pairs every unjoined doorway itself: only exact matches are physical connections
+            return bool(x) and bool(y) and (home_pair or ([p[0] for p in x] == [p[0] for p in y] and _openings_match(x, y)))
         return bool(x) and bool(y) and (home_pair or _openings_match(x, y))
 
     def nbr(c, r, s):
@@ -237,7 +248,41 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         # reaching one stairs room reaches them all (approximation: one passage network per dungeon)
         stairs = {cell_pos(k) for k in fixed if any(t in a for a in cat[k]['actors'] for t in ('Downstairs', 'Upstairs'))}
 
+        def chaos_ok():
+            # pieces joined physically (incl. the stairs network); each needs a free, unjoined doorway for a jump
+            comps, stubs = [], []
+            left = {p for p, k in placed.items() if any(so[k].values())}  # (doorless rooms: no way in anyway)
+            while left:
+                start = left.pop()
+                comp, todo, nstub = {start}, [start], 0
+                while todo:
+                    c, r = todo.pop()
+                    nbrs = []
+                    if (c, r) in stairs:
+                        nbrs += [st for st in stairs if st != (c, r)]
+                    for s in 'NSWE':
+                        n = nbr(c, r, s)
+                        a = side_open(placed[(c, r)], s)
+                        home_pair = n in placed and placed[n] == orig_nb[placed[(c, r)]][s] and placed[n] == names[n] \
+                            and placed[(c, r)] == names[(c, r)]
+                        if n in placed and joined(placed[(c, r)], placed[n], s, home_pair):
+                            nbrs.append(n)
+                        elif a and can_seal(placed[(c, r)], s):
+                            nstub += 1
+                    for n in nbrs:
+                        if n in left:
+                            left.discard(n)
+                            comp.add(n)
+                            todo.append(n)
+                comps.append(comp)
+                stubs.append(nstub)
+            if len(comps) == 1:
+                return True
+            return all(stubs) and sum(stubs) >= 2 * (len(comps) - 1)
+
         def connected():
+            if chaos:
+                return chaos_ok()
             seen, todo = {cell_pos(entrance)}, [cell_pos(entrance)]
             while todo:
                 c, r = todo.pop()
@@ -341,10 +386,24 @@ def openings(cat, room):
 JUMPS = True  # mismatched doorways joined by the runtime door jump (runtime/hle/doorjump.c)
 
 
+# Chaos: door kinds a doorway may have and still take a door jump to anywhere. A door that belonged to the old
+# neighbour leaves a plain opening (verified 2026-10-08: Tail Cave 08C west -> 07A); the room's own door still
+# works where it is (shutters, locks, bombable walls, pot doors). Not free: water (Link swims - writes ignored),
+# wide openings, one-way doors, the Nightmare-key door, doorways a puzzle object stands in (blocks, statues...).
+CHAOS_DOORS = {'shutter', 'lock', 'cracked', 'potdoor'}
+
+
+def chaos_free(cat, room, side, slot):
+    if isinstance(slot, str):
+        return False
+    kinds = {d[2].replace('(mirror)', '') for d in cat[room]['doors'] if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1}
+    return kinds <= CHAOS_DOORS
+
+
 def sealable(side):
     """A side whose doorway can be shut for good (a door that never opens): one plain doorway (no wide opening, no
     door actor of its own)."""
-    return len(side) == 1 and not isinstance(side[0][0], str) and not side[0][2]
+    return len(side) == 1 and not isinstance(side[0][0], str) and not side[0][2] and side[0][1] is not None
 
 
 def seals(cat, level, layout):
@@ -590,16 +649,179 @@ def plan_all(cat, seed, romfs, levels=None, stats=None, rounds=None):
     return {lv: out[lv] for lv in levels}
 
 
-def write_all(romfs, out, layouts):
+def chaos_pairs(cat, level, layout, entrance, rng):
+    """Chaos: pairs every free doorway that isn't physically joined with another one (any room of the level, any
+    side) -> door_jumps rows (level, cell, side, own centre, partner centre, partner cell, partner side), both ways.
+    Pieces joined physically (incl. the stairs network) are linked first (a random spanning tree), the rest pair at
+    random; an odd one out leads back to itself."""
+    pos = {cell_pos(k): k for k in layout}
+    exits = _exit_sides(cat, entrance)
+    stairs = {cell_pos(c) for c, r in layout.items() if c == r and
+              any(t in a for a in cat[r]['actors'] for t in ('Downstairs', 'Upstairs'))}
+    parent = {p: p for p in pos}
+
+    def find(p):
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+    st = sorted(stairs)
+    for a in st[1:]:
+        parent[find(a)] = find(st[0])
+    stubs = []
+    for (c, r), cell in sorted(pos.items()):
+        room = layout[cell]
+        op = openings(cat, room)
+        for s in 'NSWE':
+            if cell == entrance and s in exits:
+                continue
+            dc, dr = rooms.STEP[s]
+            n = pos.get((c + dc, r + dr))
+            mine = op[s]
+            if not mine:
+                continue
+            if n is not None:
+                theirs = openings(cat, layout[n])[rooms.OPP[s]]
+                home = room == cell and layout[n] == n and rooms.neighbour(room, s) == n
+                if home or (theirs and [x[0] for x in mine] == [x[0] for x in theirs] and _openings_match(mine, theirs)):
+                    parent[find((c, r))] = find((c + dc, r + dr))  # a real connection
+                    continue
+            for x in mine:
+                if chaos_free(cat, room, s, x[0]):
+                    stubs.append(((c, r), cell, s, x[0]))
+    comps = {}
+    for p in pos:
+        if any(openings(cat, layout[pos[p]]).values()):
+            comps.setdefault(find(p), []).append(p)
+    by_comp = {}
+    for st_ in stubs:
+        by_comp.setdefault(find(st_[0]), []).append(st_)
+    for v in by_comp.values():
+        rng.shuffle(v)
+    order = sorted(comps)
+    rng.shuffle(order)
+    order.sort(key=lambda k: -len(by_comp.get(k, ())))  # pieces with many free doorways first (random among equals)
+    pairs = []
+    if any(k not in by_comp for k in order) and len(order) > 1:
+        return None  # a piece without a free doorway can't be reached
+    # spanning tree: each next piece links to the linked piece with the most free doorways left
+    linked = [order[0]] if order else []
+    for k in order[1:]:
+        cand = [q for q in linked if by_comp.get(q)]
+        if not cand or not by_comp.get(k):
+            return None
+        most = max(len(by_comp[q]) for q in cand)
+        q = rng.choice([q for q in cand if len(by_comp[q]) == most])
+        pairs.append((by_comp[q].pop(), by_comp[k].pop()))
+        linked.append(k)
+    rest = [x for v in by_comp.values() for x in v]
+    rng.shuffle(rest)
+    while len(rest) >= 2:
+        pairs.append((rest.pop(), rest.pop()))
+    if rest:
+        pairs.append((rest[0], rest[0]))  # odd one out: back to itself
+    out = []
+    for a, b in pairs:
+        for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
+            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2]))
+    return out
+
+
+def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
+    """Chaos dungeon room shuffle for every dungeon of a seed: each room used once (no duplicates); physical
+    placement keeps doorways that can't jump matched; free doorways are paired by chaos_pairs.
+    Returns ({level: layout}, [door_jumps rows])."""
+    levels = levels or list(ENTRANCES)
+    if rounds is None:
+        rounds = int(os.environ.get('LARECOMP_GEN_ROUNDS', 8))
+    fixed = set()
+    for lv in levels:
+        fixed |= set(anchors_of(cat, lv)) | {ENTRANCES[lv]}
+    pool = {k for k, v in cat.items() if len(v['unit']) == 1 and movable(v) and k not in fixed
+            and k.split('_')[0] in levels}
+    best = None
+    for rnd in range(rounds):
+        sub = seed if rnd == 0 else f'{seed}#{rnd}'
+        rng = random.Random(sub + '-chaos')
+        order = sorted(levels, key=lambda lv: -len(anchors_of(cat, lv)))
+        if rnd:
+            rng.shuffle(order)
+        used, out, failed = set(), {}, []
+        for lv in order:
+            n = len(set(anchors_of(cat, lv)) | {ENTRANCES[lv]})
+            L = None
+            for add in (6, 3, 0):
+                L = L or plan(cat, lv, ENTRANCES[lv], sub, size=n + add, romfs=romfs, exclude=used, tries=12, chaos=True)
+            if L is None:
+                failed.append(lv)
+                continue
+            used |= {src for src in L.values() if src in pool}
+            out[lv] = L
+        if failed:
+            continue
+        # leftovers: rooms whose doorways can all jump go into empty cells (every room used once)
+        left = sorted(pool - used)
+        rng.shuffle(left)
+        share = {lv: sum(1 for k in pool if k.startswith(lv + '_')) for lv in levels}
+        for room in left:
+            if not all(chaos_free(cat, room, s, x[0]) for s, v in openings(cat, room).items() for x in v):
+                continue
+            # the dungeon furthest below its share of the pool, then a random empty cell nobody's doorway faces
+            for lv in sorted(levels, key=lambda lv: (sum(1 for v in out[lv].values() if v in pool) - share[lv],
+                                                      rng.random())):
+                L = out[lv]
+                taken = {cell_pos(k) for k in L}
+                free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1) if (c, r) not in taken]
+                rng.shuffle(free_cells)
+                for c, r in free_cells:
+                    ok = True
+                    for s in 'NSWE':
+                        dc, dr = rooms.STEP[s]
+                        n = (c + dc, r + dr)
+                        if n in taken:
+                            theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
+                            mine = openings(cat, room)[s]
+                            if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
+                                ok = False  # would join physically: keep it simple, not next to a matching doorway
+                            if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0]) for x in theirs):
+                                ok = False
+                    if ok:
+                        L[cell_name(lv, c, r)] = room
+                        used.add(room)
+                        break
+                else:
+                    continue
+                break
+        jumps = []
+        for lv in levels:
+            j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng)
+            if j is None:
+                break
+            jumps += j
+        else:
+            score = len(pool - used)
+            if best is None or score < best[0]:
+                best = (score, out, jumps)
+            if score == 0:
+                break
+    if best is None:
+        raise RuntimeError('no Chaos layout')
+    unused, out, jumps = best
+    print(f'chaos: no duplicates; {unused} room(s) unused; {len(jumps)} jump rows')
+    return out, jumps
+
+
+def write_all(romfs, out, layouts, jumps=None):
     """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv."""
-    jumps = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
-    open(jumps, 'w').close()
+    jumps_path = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
+    open(jumps_path, 'w').close()
     shared = FlagMap()
     for lv, L in layouts.items():
-        write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared)
+        write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,
+              jumps=None if jumps is None else [j for j in jumps if j[0] == lv])
 
 
-def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None):
+def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None):
     rooms_list = []
     # camera zones use the target dungeon's own zone record (environment / lighting set / music): a zone naming
     # another dungeon's environment (e.g. 'Lv10Base') isn't loaded in this level and the load throws
@@ -662,7 +884,8 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         shared_flags.next_g = flags.next_g
     _dungeon_map_rooms(romfs, out, layout, entrance)
     # door jumps: rando/<seed>/door_jumps.tsv next to the seed's romfs (read by runtime/hle/doorjump.c)
-    jumps = _jumps(cat, level, layout)
+    if jumps is None:  # (Chaos passes its own pairs)
+        jumps = _jumps(cat, level, layout)
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv'), 'a' if shared_flags else 'w') as f:
         for j in jumps:
             f.write('\t'.join(map(str, j)) + '\n')
@@ -794,6 +1017,17 @@ def ascii_map(layout):
                               for c in range(COLS)))
     return '\n'.join(lines)
 
+
+if __name__ == '__main__' and len(sys.argv) > 3 and sys.argv[3] == '--chaos':
+    # python3 dungeon_gen.py <romfs> <out romfs> --chaos [seed]: every dungeon, Chaos mode
+    romfs, out = sys.argv[1:3]
+    seed = sys.argv[4] if len(sys.argv) > 4 else 'LARecomp'
+    cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
+    layouts, jumps = plan_all_chaos(cat, seed, romfs)
+    for lv, L in layouts.items():
+        print(lv, len(L), 'cells,', sum(1 for k, v in L.items() if k != v), 'moved')
+    write_all(romfs, out, layouts, jumps)
+    sys.exit(0)
 
 if __name__ == '__main__' and len(sys.argv) > 3 and sys.argv[3] == '--all':
     # python3 dungeon_gen.py <romfs> <out romfs> --all [seed]: every dungeon (except Eagle's Tower)

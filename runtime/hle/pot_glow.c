@@ -23,20 +23,24 @@ static void load(void) {
     g_npots = 0;
     const char *dir = rando_seed_dir();
     if (!dir) return;
-    char path[512];
-    snprintf(path, sizeof path, "%s/pots.tsv", dir);
-    FILE *f = fopen(path, "r");
-    if (!f) return;
     int cap = 0;
-    char line[256];
-    while (fgets(line, sizeof line, f)) {
-        Pot p;
-        if (sscanf(line, "%39s %f %f %f %d", p.level, &p.x, &p.y, &p.z, &p.flag) != 5) continue;
-        if (g_npots == cap) g_pots = realloc(g_pots, sizeof(Pot) * (cap = cap ? cap * 2 : 256));
-        g_pots[g_npots++] = p;
+    // pots.tsv (potsanity) and bushes.tsv (bushsanity, flags 2048+: runtime/hle/flags_ext.c): same format
+    for (int k = 0; k < 2; k++) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s", dir, k ? "bushes.tsv" : "pots.tsv");
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        int n0 = g_npots;
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            Pot p;
+            if (sscanf(line, "%39s %f %f %f %d", p.level, &p.x, &p.y, &p.z, &p.flag) != 5) continue;
+            if (g_npots == cap) g_pots = realloc(g_pots, sizeof(Pot) * (cap = cap ? cap * 2 : 256));
+            g_pots[g_npots++] = p;
+        }
+        fclose(f);
+        LOG("[pots] %d gold %s from %s\n", g_npots - n0, k ? "bushes" : "pots", path);
     }
-    fclose(f);
-    LOG("[pots] %d item pots from %s\n", g_npots, path);
 }
 
 static const char *current_level(void) {
@@ -58,7 +62,7 @@ static void level_pots(void) {
     const char *lv = current_level();
     for (int i = 0; i < g_npots && g_nlv < 512; i++)
         if (!strcmp(g_pots[i].level, lv)) g_lv_idx[g_nlv++] = i;
-    if (getenv("LARECOMP_LOG_POTS") && f % 120 == 0) LOG("[pots] frame %llu level '%s': %d item pots\n", (unsigned long long)f, lv, g_nlv);
+    if (ENV("LARECOMP_LOG_POTS") && f % 120 == 0) LOG("[pots] frame %llu level '%s': %d item pots\n", (unsigned long long)f, lv, g_nlv);
 }
 
 // Cheap per-draw gate for the renderer: false when no item pot can be on screen.
@@ -76,7 +80,8 @@ bool pot_glow_active(void) {
 typedef struct { int pot; float x, y, z; uint64_t seen, mesh; } Track;
 static Track g_track[8];
 
-static bool unchecked(const Pot *p) { return !(LD8(EVENT_FLAGS + (p->flag >> 3)) & (1 << (p->flag & 7))); }
+bool flags_ext_get(int idx);  // runtime/hle/flags_ext.c (flags 2048+ for bushes)
+static bool unchecked(const Pot *p) { return !flags_ext_get(p->flag); }
 
 static void track(int pot, float x, float y, float z, uint64_t f, uint64_t mesh) {
     int slot = 0;

@@ -378,7 +378,9 @@
   },
   "doors": [],
   "unit": [
-   "Lv01TailCave_05A"
+   "Lv01TailCave_05A",
+   "Lv01TailCave_06A",
+   "Lv01TailCave_07A"
   ],
   "actors": [
    "MapStatic",
@@ -786,7 +788,9 @@
   },
   "doors": [],
   "unit": [
-   "Lv01TailCave_06A"
+   "Lv01TailCave_05A",
+   "Lv01TailCave_06A",
+   "Lv01TailCave_07A"
   ],
   "actors": [
    "ItemFeatherR",
@@ -1348,6 +1352,8 @@
   },
   "doors": [],
   "unit": [
+   "Lv01TailCave_05A",
+   "Lv01TailCave_06A",
    "Lv01TailCave_07A"
   ],
   "actors": [
@@ -6323,7 +6329,7 @@
   "heights": {
    "N": [],
    "S": [
-    -0.1
+    null
    ],
    "W": [],
    "E": []
@@ -6336,7 +6342,14 @@
    "W": [],
    "E": []
   },
-  "doors": [],
+  "doors": [
+   [
+    "S",
+    5,
+    "blocked:water",
+    11
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_03G"
   ],
@@ -6547,6 +6560,18 @@
   },
   "doors": [
    [
+    "E",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "E",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
     "N",
     5,
     "blocked:statue",
@@ -6645,6 +6670,18 @@
    ]
   },
   "doors": [
+   [
+    "W",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "W",
+    6,
+    "blocked:water",
+    13
+   ],
    [
     "N",
     5,
@@ -6807,7 +6844,7 @@
   },
   "heights": {
    "N": [
-    -0.1
+    null
    ],
    "S": [
     -0.1
@@ -6832,7 +6869,56 @@
    "W": [],
    "E": []
   },
-  "doors": [],
+  "doors": [
+   [
+    "N",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "S",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "S",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "S",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "S",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "S",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "S",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "S",
+    7,
+    "blocked:water",
+    15
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04G",
    "Lv04AnglersTunnel_05G"
@@ -7060,6 +7146,60 @@
   "doors": [
    [
     "S",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "S",
+    7,
+    "blocked:water",
+    15
+   ],
+   [
+    "S",
+    8,
+    "blocked:water",
+    17
+   ],
+   [
+    "E",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "E",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "E",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "E",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "E",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "E",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "S",
     2,
     "shutter(mirror)",
     4
@@ -7181,7 +7321,62 @@
     7
    ]
   },
-  "doors": [],
+  "doors": [
+   [
+    "S",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "S",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "S",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "W",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "W",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "W",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "W",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "W",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "W",
+    6,
+    "blocked:water",
+    13
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04E",
    "Lv04AnglersTunnel_04F",
@@ -7346,7 +7541,56 @@
    ],
    "E": []
   },
-  "doors": [],
+  "doors": [
+   [
+    "N",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "N",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "N",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "N",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "N",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "N",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "N",
+    7,
+    "blocked:water",
+    15
+   ],
+   [
+    "N",
+    8,
+    "blocked:water",
+    17
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04G",
    "Lv04AnglersTunnel_05G"
@@ -7428,7 +7672,32 @@
     6
    ]
   },
-  "doors": [],
+  "doors": [
+   [
+    "E",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "E",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "E",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "E",
+    6,
+    "blocked:water",
+    13
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04E",
    "Lv04AnglersTunnel_04F",
@@ -7531,6 +7800,72 @@
    ]
   },
   "doors": [
+   [
+    "N",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "N",
+    7,
+    "blocked:water",
+    15
+   ],
+   [
+    "N",
+    8,
+    "blocked:water",
+    17
+   ],
+   [
+    "W",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "W",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "W",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "W",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "E",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "E",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "E",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "E",
+    4,
+    "blocked:water",
+    9
+   ],
    [
     "N",
     2,
@@ -7652,7 +7987,44 @@
     7
    ]
   },
-  "doors": [],
+  "doors": [
+   [
+    "N",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "N",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
+    "W",
+    1,
+    "blocked:water",
+    3
+   ],
+   [
+    "W",
+    2,
+    "blocked:water",
+    5
+   ],
+   [
+    "W",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "W",
+    4,
+    "blocked:water",
+    9
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04E",
    "Lv04AnglersTunnel_04F",
@@ -7824,7 +8196,32 @@
     6
    ]
   },
-  "doors": [],
+  "doors": [
+   [
+    "E",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "E",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "E",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "E",
+    6,
+    "blocked:water",
+    13
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_04E",
    "Lv04AnglersTunnel_04F",
@@ -7932,6 +8329,42 @@
    ]
   },
   "doors": [
+   [
+    "S",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "S",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "W",
+    3,
+    "blocked:water",
+    7
+   ],
+   [
+    "W",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "W",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "W",
+    6,
+    "blocked:water",
+    13
+   ],
    [
     "E",
     5,
@@ -8276,7 +8709,20 @@
    "W": [],
    "E": []
   },
-  "doors": [],
+  "doors": [
+   [
+    "N",
+    4,
+    "blocked:water",
+    9
+   ],
+   [
+    "N",
+    5,
+    "blocked:water",
+    11
+   ]
+  ],
   "unit": [
    "Lv04AnglersTunnel_08D"
   ],
@@ -9384,7 +9830,7 @@
     0.0
    ],
    "S": [
-    -0.0
+    null
    ],
    "W": [],
    "E": []
@@ -9399,7 +9845,14 @@
    "W": [],
    "E": []
   },
-  "doors": [],
+  "doors": [
+   [
+    "S",
+    2,
+    "blocked:water",
+    5
+   ]
+  ],
   "unit": [
    "Lv05CatfishsMaw_03F"
   ],
@@ -9597,7 +10050,7 @@
   },
   "heights": {
    "N": [
-    -0.0
+    null
    ],
    "S": [],
    "W": [],
@@ -9616,7 +10069,14 @@
     4
    ]
   },
-  "doors": [],
+  "doors": [
+   [
+    "N",
+    2,
+    "blocked:water",
+    5
+   ]
+  ],
   "unit": [
    "Lv05CatfishsMaw_04F"
   ],
@@ -10381,6 +10841,18 @@
   },
   "doors": [
    [
+    "S",
+    5,
+    "blocked:water",
+    11
+   ],
+   [
+    "S",
+    6,
+    "blocked:water",
+    13
+   ],
+   [
     "N",
     5,
     "shutter",
@@ -10638,6 +11110,12 @@
    "E": []
   },
   "doors": [
+   [
+    "N",
+    5,
+    "blocked:water",
+    11
+   ],
    [
     "N",
     1,
@@ -11453,7 +11931,10 @@
   },
   "doors": [],
   "unit": [
-   "Lv06FaceShrine_03G"
+   "Lv06FaceShrine_03G",
+   "Lv06FaceShrine_04G",
+   "Lv06FaceShrine_05G",
+   "Lv06FaceShrine_06G"
   ],
   "actors": [
    "MapStatic",
@@ -12119,7 +12600,10 @@
   },
   "doors": [],
   "unit": [
-   "Lv06FaceShrine_04G"
+   "Lv06FaceShrine_03G",
+   "Lv06FaceShrine_04G",
+   "Lv06FaceShrine_05G",
+   "Lv06FaceShrine_06G"
   ],
   "actors": [
    "EnemyBallerine",
@@ -12756,7 +13240,10 @@
    ]
   ],
   "unit": [
-   "Lv06FaceShrine_05G"
+   "Lv06FaceShrine_03G",
+   "Lv06FaceShrine_04G",
+   "Lv06FaceShrine_05G",
+   "Lv06FaceShrine_06G"
   ],
   "actors": [
    "MapStatic",
@@ -13309,6 +13796,9 @@
    ]
   ],
   "unit": [
+   "Lv06FaceShrine_03G",
+   "Lv06FaceShrine_04G",
+   "Lv06FaceShrine_05G",
    "Lv06FaceShrine_06G"
   ],
   "actors": [
@@ -15330,7 +15820,8 @@
   },
   "doors": [],
   "unit": [
-   "Lv08TurtleRock_01E"
+   "Lv08TurtleRock_01E",
+   "Lv08TurtleRock_02E"
   ],
   "actors": [
    "AreaUpstairs",
@@ -15518,6 +16009,7 @@
   },
   "doors": [],
   "unit": [
+   "Lv08TurtleRock_01E",
    "Lv08TurtleRock_02E"
   ],
   "actors": [
@@ -16947,8 +17439,11 @@
   "unit": [
    "Lv08TurtleRock_05D",
    "Lv08TurtleRock_05E",
+   "Lv08TurtleRock_05F",
    "Lv08TurtleRock_06D",
-   "Lv08TurtleRock_06E"
+   "Lv08TurtleRock_06E",
+   "Lv08TurtleRock_06F",
+   "Lv08TurtleRock_07F"
   ],
   "actors": [
    "AreaDownstairs",
@@ -17075,8 +17570,11 @@
   "unit": [
    "Lv08TurtleRock_05D",
    "Lv08TurtleRock_05E",
+   "Lv08TurtleRock_05F",
    "Lv08TurtleRock_06D",
-   "Lv08TurtleRock_06E"
+   "Lv08TurtleRock_06E",
+   "Lv08TurtleRock_06F",
+   "Lv08TurtleRock_07F"
   ],
   "actors": [
    "MapStatic",
@@ -17160,7 +17658,11 @@
    ]
   ],
   "unit": [
+   "Lv08TurtleRock_05D",
+   "Lv08TurtleRock_05E",
    "Lv08TurtleRock_05F",
+   "Lv08TurtleRock_06D",
+   "Lv08TurtleRock_06E",
    "Lv08TurtleRock_06F",
    "Lv08TurtleRock_07F"
   ],
@@ -17536,8 +18038,11 @@
   "unit": [
    "Lv08TurtleRock_05D",
    "Lv08TurtleRock_05E",
+   "Lv08TurtleRock_05F",
    "Lv08TurtleRock_06D",
-   "Lv08TurtleRock_06E"
+   "Lv08TurtleRock_06E",
+   "Lv08TurtleRock_06F",
+   "Lv08TurtleRock_07F"
   ],
   "actors": [
    "EnemyZolGreen",
@@ -17670,8 +18175,11 @@
   "unit": [
    "Lv08TurtleRock_05D",
    "Lv08TurtleRock_05E",
+   "Lv08TurtleRock_05F",
    "Lv08TurtleRock_06D",
-   "Lv08TurtleRock_06E"
+   "Lv08TurtleRock_06E",
+   "Lv08TurtleRock_06F",
+   "Lv08TurtleRock_07F"
   ],
   "actors": [
    "AreaUpstairs",
@@ -17779,7 +18287,11 @@
    ]
   ],
   "unit": [
+   "Lv08TurtleRock_05D",
+   "Lv08TurtleRock_05E",
    "Lv08TurtleRock_05F",
+   "Lv08TurtleRock_06D",
+   "Lv08TurtleRock_06E",
    "Lv08TurtleRock_06F",
    "Lv08TurtleRock_07F"
   ],
@@ -18410,7 +18922,11 @@
    ]
   ],
   "unit": [
+   "Lv08TurtleRock_05D",
+   "Lv08TurtleRock_05E",
    "Lv08TurtleRock_05F",
+   "Lv08TurtleRock_06D",
+   "Lv08TurtleRock_06E",
    "Lv08TurtleRock_06F",
    "Lv08TurtleRock_07F"
   ],

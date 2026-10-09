@@ -333,7 +333,7 @@ extern "C" void save_editor_frame(uint64_t frame) {
     if (watch < 0) {
         watch = 0;
         unsigned lo, hi;
-        if (getenv("LARECOMP_WATCH_SAVE") && sscanf(getenv("LARECOMP_WATCH_SAVE"), "%x,%x", &lo, &hi) == 2) {
+        if (ENV("LARECOMP_WATCH_SAVE") && sscanf(ENV("LARECOMP_WATCH_SAVE"), "%x,%x", &lo, &hi) == 2) {
             extern uint64_t g_watch_lo, g_watch_hi;
             g_watch_lo = LIVE_SAVE + lo;
             g_watch_hi = LIVE_SAVE + hi;
@@ -352,21 +352,21 @@ extern "C" void save_editor_frame(uint64_t frame) {
         LOG("[save] test: maxed out\n");
     }
     static long poke_done;  // LARECOMP_POKE_SAVE=off=val,...: write live-save bytes (hex offsets) once after load
-    if (!poke_done && loaded() && getenv("LARECOMP_POKE_SAVE") && frame > 2600) {
+    if (!poke_done && loaded() && ENV("LARECOMP_POKE_SAVE") && frame > 2600) {
         poke_done = 1;
-        for (const char *p = getenv("LARECOMP_POKE_SAVE"); *p;) {
+        for (const char *p = ENV("LARECOMP_POKE_SAVE"); *p;) {
             unsigned off = 0, val = 0;
             if (sscanf(p, "%x=%x", &off, &val) == 2 && off < 0x5EE0) *(uint8_t *)(uintptr_t)(LIVE_SAVE + off) = (uint8_t)val;
             while (*p && *p != ',') p++;
             if (*p) p++;
         }
-        LOG("[save] poked %s\n", getenv("LARECOMP_POKE_SAVE"));
+        LOG("[save] poked %s\n", ENV("LARECOMP_POKE_SAVE"));
     }
     if (loaded()) {  // LARECOMP_LOG_FLAGS: log event-flag bit changes; LARECOMP_SET_FLAGS=i,j,..: force those bits on
         static uint8_t prev[256];
         static bool have_prev;
         uint8_t *fl = (uint8_t *)(uintptr_t)(LIVE_SAVE + 0x5DC0);
-        if (const char *sf = getenv("LARECOMP_SET_FLAGS")) {
+        if (const char *sf = ENV("LARECOMP_SET_FLAGS")) {
             for (const char *p = sf; *p;) {
                 int i = atoi(p);
                 if (i >= 0 && i < 2048 && !(fl[i >> 3] & (1 << (i & 7)))) {
@@ -377,7 +377,7 @@ extern "C" void save_editor_frame(uint64_t frame) {
                 if (*p) p++;
             }
         }
-        if (getenv("LARECOMP_LOG_FLAGS")) {
+        if (ENV("LARECOMP_LOG_FLAGS")) {
             if (have_prev)
                 for (int i = 0; i < 2048; i++)
                     if ((fl[i >> 3] ^ prev[i >> 3]) & (1 << (i & 7)))
@@ -386,7 +386,7 @@ extern "C" void save_editor_frame(uint64_t frame) {
             have_prev = true;
         }
     }
-    if (getenv("LARECOMP_FIND_FLAGS") && frame == 3000) {  // locate the event-flag bitfield (ptr, byte capacity)
+    if (ENV("LARECOMP_FIND_FLAGS") && frame == 3000) {  // locate the event-flag bitfield (ptr, byte capacity)
         for (uint64_t a = 0x7001C00000ull; a < 0x7001D00000ull; a += 8) {
             uint64_t v = *(uint64_t *)(uintptr_t)a;
             if (v >= LIVE_SAVE && v < LIVE_SAVE + 0x5EE0) {

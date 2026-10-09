@@ -35,7 +35,7 @@ extern "C" int32_t rt_damage(int32_t dmg, int32_t shift) {
     if (g_settings.diff_ohko) return 999;
     float m = g_settings.diff_damage > 0 ? g_settings.diff_damage : 1.0f;
     int32_t r = (int32_t)lroundf((float)base * m);
-    if (getenv("LARECOMP_LOG_DAMAGE")) LOG("[difficulty] damage %d (shift %d) -> %d\n", dmg, shift, r < 1 ? 1 : r);
+    if (ENV("LARECOMP_LOG_DAMAGE")) LOG("[difficulty] damage %d (shift %d) -> %d\n", dmg, shift, r < 1 ? 1 : r);
     return r < 1 ? 1 : r;  // at least a quarter heart
 }
 

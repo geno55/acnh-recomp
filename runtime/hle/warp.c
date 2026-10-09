@@ -105,13 +105,13 @@ void warp_frame(uint64_t frame) {
     warp_test(frame);
     warp_on_load(frame);
     mem_dump_test(frame);
-    if (getenv("LARECOMP_LOG_WARPAVAIL") && frame % 300 == 0) {
+    if (ENV("LARECOMP_LOG_WARPAVAIL") && frame % 300 == 0) {
         uint64_t gm = LD64(MAIN_BASE + 0x1c97188), ps = LD64(MAIN_BASE + 0x1cc1368);
         LOG("[warp] frame %llu gm %llx +4b8 %llx +4a8 %llx level '%s'\n", (unsigned long long)frame, (unsigned long long)gm,
             gm ? (unsigned long long)LD64(gm + 0x4b8) : 0, gm ? (unsigned long long)LD64(gm + 0x4a8) : 0,
             ps ? (const char *)(uintptr_t)ps : "");
     }
-    if (getenv("LARECOMP_LOG_KEYITEMS") && frame % 120 == 0) {  // PlayerStatus key items vs the save buffer copy
+    if (ENV("LARECOMP_LOG_KEYITEMS") && frame % 120 == 0) {  // PlayerStatus key items vs the save buffer copy
         uint64_t ps = LD64(MAIN_BASE + 0x1cc1368);
         LOG("[keyitems] frame %llu ps %llx ps+ac %08x save+556c %08x\n", (unsigned long long)frame, (unsigned long long)ps,
             ps ? *(uint32_t *)(uintptr_t)(ps + 0xac) : 0, *(uint32_t *)(uintptr_t)(0x7001CBB220ull + 0x556c));
@@ -196,7 +196,7 @@ static void find_move_tick(uint64_t frame) {
     }
     FILE *o = fopen("build/find_move.txt", "w");
     int n = 0;
-    float fm_tol = getenv("LARECOMP_FIND_MOVE_TOL") ? (float)atof(getenv("LARECOMP_FIND_MOVE_TOL")) : 0.05f;
+    float fm_tol = ENV("LARECOMP_FIND_MOVE_TOL") ? (float)atof(ENV("LARECOMP_FIND_MOVE_TOL")) : 0.05f;
     float dab = (float)(f[1] - f[0]), dbc = (float)(f[2] - f[1]);
     for (int i = 0; i < nr; i++) {
         if (!rs[i] || !snap[0][i] || !snap[1][i]) continue;
@@ -394,6 +394,7 @@ static void memdump_tick(uint64_t frame) {
 
 void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
+    { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
     ptrscan_tick(frame);
     memdump_tick(frame);
     find_move_tick(frame);

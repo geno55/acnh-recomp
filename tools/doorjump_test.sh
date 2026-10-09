@@ -20,7 +20,7 @@ while IFS=$'\t' read -r level cell side own partner; do
     LARECOMP_DOORJUMP_TEST="3100:$cell:$side" LARECOMP_CHEATS=hearts LARECOMP_RANDO_SEED=$SEED \
     LARECOMP_SAVE_DIR="build/djtest_$JOB" LARECOMP_WINDOW=640x360 SHOT_ID="dj_$JOB" \
     LARECOMP_INPUT="400:A:6,520:A:6,900:ZL:8,900:ZR:8,1300:A:6,1600:A:6,1900:A:6,2200:A:6" \
-    LARECOMP_WARP_AT="2700:$level:${level}_${ENTRANCE:-$ent}" tools/shot.sh 3700 480 </dev/null 2>/dev/null
+    LARECOMP_WARP_AT="2700:$level:${level}_${ENTRANCE:-$ent}" tools/shot.sh 4000 600 </dev/null 2>/dev/null
     cp "build/window_dj_$JOB.png" "$SHOTS/$cell$side.png"
     res=$(grep '\[doorjump-test\].*->' "build/run_shot_dj_$JOB.log" | tail -1)
     [ -z "$res" ] && res="[doorjump-test] $cell $side -> no result (crash? $(grep -c '\*\*\* signal' "build/run_shot_dj_$JOB.log") signals)"

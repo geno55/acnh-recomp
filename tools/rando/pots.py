@@ -166,8 +166,10 @@ def mark_refills(placements):
     return n
 
 
-def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
-    """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess)."""
+def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARPot',
+          flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE):
+    """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess).
+    Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -183,7 +185,8 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     sheet = oead_tools.readSheet(path('datasheets/GlobalFlags.gsheet'))
     used = {int(v['index']) for v in sheet['values']}
     flow = event_tools.readFlow(path('event/SinkingSword.bfevfl'))
-    next_flag = max([FLAG_BASE] + [u + 1 for u in used if u >= FLAG_BASE])
+    tails = {}
+    next_flag = max([flag_base] + [u + 1 for u in used if flag_base <= u < flag_limit])
     by_room = {}
     for name, p in locs.items():
         by_room.setdefault((p['level'], p['room']), []).append((name, p))
@@ -197,30 +200,37 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             pot = by_key.get(p['key'])
             if pot is None:
                 continue
-            if next_flag >= 2048:
-                raise RuntimeError('out of GlobalFlags indices for pots')
-            flag = f'LARPot{next_flag}'
+            if next_flag >= flag_limit:
+                raise RuntimeError(f'out of GlobalFlags indices for {flag_prefix}')
+            flag = f'{flag_prefix}{next_flag}'
             sheet['values'].append({'symbol': flag, 'index': next_flag})
             next_flag += 1
             item_key, item_index, model_path, model_name = mods.getItemInfo(name, mods.trap_models)
-            if item_key[:3] == 'Rup' or mods.placements[name] in QUICK:
-                get_anim = event_tools.createActionEvent(flow.flowchart, 'Inventory', 'AddItemByKey',
-                                                         {'itemKey': item_key, 'count': 1, 'index': item_index,
-                                                          'autoEquip': False})
-            else:
-                get_anim = item_get.insertItemGetAnimation(flow.flowchart, item_key, item_index)
+            quick = item_key[:3] == 'Rup' or mods.placements[name] in QUICK
+            # one event per location (its flag), then a chain shared by every location holding the same item:
+            # SinkingSword.bfevfl is loaded into a fixed buffer (~0xB0000 bytes - 1014 entries with a chain each
+            # crashed on load, 964 didn't); pots + bushes (1300+) only fit this way
+            tail_key = (item_key, item_index, quick)
+            if tail_key not in tails:
+                if quick:
+                    get_anim = event_tools.createActionEvent(flow.flowchart, 'Inventory', 'AddItemByKey',
+                                                             {'itemKey': item_key, 'count': 1, 'index': item_index,
+                                                              'autoEquip': False})
+                else:
+                    get_anim = item_get.insertItemGetAnimation(flow.flowchart, item_key, item_index)
+                tails[tail_key] = event_tools.createActionEvent(flow.flowchart, 'SinkingSword', 'Destroy', {}, get_anim)
             event_tools.addEntryPoint(flow.flowchart, name)
-            event_tools.createActionChain(flow.flowchart, name, [
-                ('SinkingSword', 'Destroy', {}),
-                ('EventFlags', 'SetFlag', {'symbol': flag, 'value': True})], get_anim)
+            set_flag = event_tools.createActionEvent(flow.flowchart, 'EventFlags', 'SetFlag',
+                                                     {'symbol': flag, 'value': True}, tails[tail_key])
+            event_tools.insertEventAfter(flow.flowchart, name, set_flag)
             it = copy.deepcopy(pot)
-            it.key = 0x7A00000000000000 | ((p['n'] & 0xFFFF) << 32) | (pot.key & 0xFFFFFFFF)
+            it.key = (key_tag << 56) | ((p['n'] & 0xFFFF) << 32) | (pot.key & 0xFFFFFFFF)
             it.name = b'SinkingSword-%016X' % it.key
             it.type = 0x194
             it.parameters = [model_path.encode(), model_name.encode(), name.encode(), flag.encode(),
                              b'true' if item_key == 'Seashell' else b'false', b'', b'', b'']
             it.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
-            s = data.MODEL_SIZES.get(model_name, 1.0) * HIDE_SCALE
+            s = data.MODEL_SIZES.get(model_name, 1.0) * hide_scale
             it.scaleX = it.scaleY = it.scaleZ = s
             if model_name in data.MODEL_ROTATIONS:
                 it.rotY = data.MODEL_ROTATIONS[model_name]
@@ -233,7 +243,7 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     return spoiler
 
 
-def write_tsv(seed_dir, leb):
+def write_tsv(seed_dir, leb, flag_prefix='LARPot', name='pots.tsv'):
     """rando/<seed>/pots.tsv for the runtime's golden unchecked pots: one line per item pot
     (level, x, y, z, GlobalFlags index), taken from the item actors this module placed in the seed's rooms."""
     rows = []
@@ -244,10 +254,10 @@ def write_tsv(seed_dir, leb):
         for a in room.actors:
             if a.type != 0x194 or not isinstance(a.parameters[3], bytes):
                 continue
-            m = re.match(rb'LARPot(\d+)$', a.parameters[3])
+            m = re.match(flag_prefix.encode() + rb'(\d+)$', a.parameters[3])
             if m:
                 rows.append(f'{level}\t{a.posX:g}\t{a.posY:g}\t{a.posZ:g}\t{int(m.group(1))}\n')
-    with open(os.path.join(seed_dir, 'pots.tsv'), 'w') as fh:
+    with open(os.path.join(seed_dir, name), 'w') as fh:
         fh.writelines(rows)
     return len(rows)
 

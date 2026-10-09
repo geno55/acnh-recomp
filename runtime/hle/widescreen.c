@@ -18,7 +18,7 @@ float widescreen_factor(void) { return g_wide; }
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;
-bool widescreen_allowed(void) { return g_allowed && g_settings.aspect == ASPECT_UNLOCKED && !getenv("LARECOMP_NO_WIDESCREEN"); }
+bool widescreen_allowed(void) { return g_allowed && g_settings.aspect == ASPECT_UNLOCKED && !ENV("LARECOMP_NO_WIDESCREEN"); }
 void widescreen_set_allowed(bool on) { g_allowed = on; }
 
 // Interiors and dungeons use cameras that never load the patched overworld aspect (site 0). Count
@@ -33,7 +33,7 @@ void widescreen_frame_end(uint64_t frame) {
     bool was = g_indoor;
     if (!g_indoor && g_indoor_streak >= 3) g_indoor = true;
     if (g_indoor && g_outdoor_streak >= 1) g_indoor = false;
-    if (was != g_indoor && getenv("LARECOMP_LOG_INDOOR"))
+    if (was != g_indoor && ENV("LARECOMP_LOG_INDOOR"))
         LOG("[widescreen] %s at frame %llu\n", g_indoor ? "interior (16:9 framing)" : "overworld (wide)", (unsigned long long)frame);
 }
 
@@ -49,7 +49,7 @@ float rt_aspect_site(int site) {
 // Culling aspect: the game's own value (camera field), widened like the camera.
 float rt_cull_aspect(float orig) {
     static float last = -1;
-    if (orig != last && getenv("LARECOMP_LOG_CULL")) { LOG("[widescreen] culling aspect field %f\n", orig); last = orig; }
+    if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] culling aspect field %f\n", orig); last = orig; }
     return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
 
@@ -57,7 +57,7 @@ float rt_cull_aspect(float orig) {
 // horizontal view stays what the game shows at 16:9.
 float rt_fovy(float orig) {
     static float last = -1;
-    if (orig != last && getenv("LARECOMP_LOG_CULL")) { LOG("[widescreen] fovy field %f\n", orig); last = orig; }
+    if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] fovy field %f\n", orig); last = orig; }
     if (g_wide >= 1.0f || !(orig > 0)) return orig;
     bool degrees = orig > 3.2f;  // radians otherwise
     float half = (degrees ? orig * (float)M_PI / 180.0f : orig) * 0.5f;
@@ -70,7 +70,7 @@ static uint64_t g_indoor_frame;
 float rt_indoor_aspect(void) {
     extern uint64_t renderer_present_count(void);
     uint64_t f = renderer_present_count();
-    if (getenv("LARECOMP_LOG_INDOOR") && f / 60 != g_indoor_frame / 60) LOG("[widescreen] indoor at frame %llu\n", (unsigned long long)f);
+    if (ENV("LARECOMP_LOG_INDOOR") && f / 60 != g_indoor_frame / 60) LOG("[widescreen] indoor at frame %llu\n", (unsigned long long)f);
     g_indoor_frame = f;
     return 16.0f / 9.0f;
 }
@@ -104,7 +104,7 @@ bool widescreen_frame_boxed(uint64_t frame) {
     bool in = level_is_interior();
     if (in) interior_until = frame + 8;
     bool b = g_backdrop_frame == frame || in || frame < interior_until;
-    if (b != last && getenv("LARECOMP_LOG_INDOOR")) LOG("[widescreen] boxed %d at frame %llu\n", b, (unsigned long long)frame);
+    if (b != last && ENV("LARECOMP_LOG_INDOOR")) LOG("[widescreen] boxed %d at frame %llu\n", b, (unsigned long long)frame);
     last = b;
     return b;
 }

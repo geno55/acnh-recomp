@@ -99,7 +99,7 @@ static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "
 
 struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
-    uint64_t rng = 0;         // 40-bit random part of the seed ID
+    uint64_t rng = 0;         // 36-bit random part of the seed ID
     int logic = 0;            // basic advanced glitched hell none
     int dungeon_items = 3;    // none stone-beak mc mcb
     int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
@@ -118,13 +118,14 @@ struct GenOpts {
     int entrances = 0;        // off / dungeons / ...
     bool decoupled = false, pots = false, grass = false;
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
+    bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
 };
 static GenOpts g_opts;
 
 // ---- Seed IDs: a 20-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and every
 // generation option, with a checksum. Same ID + same LAS Recomp version = the same seed, so IDs can be shared. The
 // generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout changes.
-enum { SEED_ID_VERSION = 1, SEED_ID_BITS = 100 };
+enum { SEED_ID_VERSION = 2, SEED_ID_BITS = 100 };  // v2: 36-bit random part, room for more options
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 struct Bits {
@@ -138,7 +139,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
     bool *f[] = {&o.bomb_bag, &o.powder_bag, &o.environments, &o.pets_in_dungeons, &o.skip_story, &o.enemy_minibosses,
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
-                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs};
+                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -151,7 +152,7 @@ static uint32_t id_check(const Bits &x, int upto) {
 static void seed_id_encode(GenOpts &o, char *out, size_t cap) {
     Bits x;
     x.put(SEED_ID_VERSION, 4);
-    x.put(o.rng, 40);
+    x.put(o.rng, 36);
     x.put(o.logic, 3); x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
     x.put(o.tunic, 4); x.put(o.entrances, 2); x.put(o.start_rupees, 10);
     for (int i = 0; bool *f = opt_flags(o, i); i++) x.put(*f, 1);
@@ -190,7 +191,7 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     int ver = (int)x.get(4);
     if (ver != SEED_ID_VERSION) return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
     GenOpts t = o;
-    t.rng = x.get(40);
+    t.rng = x.get(36);
     t.logic = (int)x.get(3); t.dungeon_items = (int)x.get(2); t.keysanity = (int)x.get(2); t.traps = (int)x.get(3);
     t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
     for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.get(1);
@@ -201,7 +202,7 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     return "";
 }
 
-static uint64_t new_rng(void) { return ((uint64_t)arc4random() << 8 ^ arc4random()) & 0xFFFFFFFFFFull; }
+static uint64_t new_rng(void) { return ((uint64_t)arc4random() << 4 ^ arc4random()) & 0xFFFFFFFFFull; }
 
 static const char *ADJ[] = {"Sleepy", "Brave", "Lucky", "Rapid", "Quiet", "Golden", "Wild", "Secret", "Dreamy", "Mighty"};
 static const char *NOUN[] = {"Marin", "Tarin", "Owl", "Cucco", "BowWow", "Moblin", "Zora", "Shell", "WindFish", "Toadstool"};
@@ -258,7 +259,8 @@ static void start_generation(void) {
             g_opts.open_mabe ? "true" : "false", g_opts.fast_songs ? "true" : "false", g_opts.ohko ? "true" : "false",
             g_opts.boss_cutscenes ? "true" : "false", g_opts.spoiler ? "true" : "false");
     fprintf(f, " \"starting-rupees\": %d, \"blur-removal\": false,\n", g_opts.start_rupees);
-    fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s,\n", g_opts.pots ? "true" : "false", g_opts.no_buffs ? "true" : "false");
+    fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s,\n", g_opts.pots ? "true" : "false",
+            g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false");
     fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
                " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
             g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
@@ -581,6 +583,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every liftable pot in houses, caves and dungeons hides an item from the pool (about 400 more checks).\n"
                           "Unchecked pots are golden. Lift, smash or throw a pot to reveal its item.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Bushes hold items", &g_opts.bushes);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every bush on the island hides an item from the pool (916 more checks; tall grass stays as it is).\n"
+                          "Unchecked bushes are golden. Cut a bush to reveal its item.");
     static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
     combo("Entrance randomizer", &g_opts.entrances, ent, 3);
     if (ImGui::IsItemHovered())

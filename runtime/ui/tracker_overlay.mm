@@ -279,7 +279,7 @@ static void solve(void) {
 }
 
 static void debug_dump(void) {
-    if (!getenv("LARECOMP_LOG_TRACKER")) return;
+    if (!ENV("LARECOMP_LOG_TRACKER")) return;
     int nd = 0;
     for (auto &n : g_nodes) nd += A(n.id) > 0;
     LOG("[tracker] solved: %d/%zu nodes; mabe %d tarin %d sword %d mabe-bushes %d\n", nd, g_nodes.size(), A(tok("mabe")),

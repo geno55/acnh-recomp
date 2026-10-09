@@ -475,7 +475,7 @@ static _Atomic uint64_t svc_wait_ns[32][0x80], svc_calls[32][0x80];
 static int prof_svc = -1;
 
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
-    if (prof_svc < 0) prof_svc = getenv("LARECOMP_PROF_SVC") != NULL;
+    if (prof_svc < 0) prof_svc = ENV("LARECOMP_PROF_SVC") != NULL;
     if (prof_svc && imm < 0x80) {
         uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
         uint32_t h0 = imm == 0x18 && a2 ? *(uint32_t *)(uintptr_t)a1 : 0;
@@ -730,7 +730,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = R_OK;
         x[1] = kernel_new_handle(ev);
         x[2] = kernel_new_handle(ev);
-        if (getenv("LARECOMP_PROF_SVC")) LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
+        if (ENV("LARECOMP_PROF_SVC")) LOG("[evt] guest w=%llx r=%llx lr=%llx\n", (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[30]);
         break;
     }
     default:
@@ -755,7 +755,7 @@ KEvent *kernel_create_event_pair(uint32_t *w, uint32_t *r) {
     ev->type = KOBJ_EVENT;
     *w = kernel_new_handle(ev);
     *r = kernel_new_handle(ev);
-    if (getenv("LARECOMP_PROF_SVC")) { Dl_info di; dladdr(__builtin_return_address(0), &di); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, di.dli_sname); }
+    if (ENV("LARECOMP_PROF_SVC")) { Dl_info di; dladdr(__builtin_return_address(0), &di); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, di.dli_sname); }
     return ev;
 }
 
