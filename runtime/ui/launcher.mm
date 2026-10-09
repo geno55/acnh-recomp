@@ -31,6 +31,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include "platform.h"
+#include "ui/ui_scale.h"
 #include "settings.h"
 void ui_window_init(void);
 SDL_Window *ui_window(void);
@@ -466,7 +467,7 @@ extern "C" void launcher_run(const char *root) {
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
-            ImGui::GetIO().FontGlobalScale = s * 0.5f;
+            ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
             if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
@@ -520,11 +521,13 @@ extern "C" void launcher_run(const char *root) {
                 if (menu_item("QUIT", true)) exit(0);
             } else {
                 // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
-                ImGui::SetCursorPos(ImVec2(x0 - 24 * s, 300 * s));
+                // larger text (ui_scale.h) gets a taller panel: it starts closer to the title, ends closer to the status
+                float grow = ui_text_scale() - 1, top = (300 - 50 * grow) * s, bottom = (140 - 25 * grow) * s;
+                ImGui::SetCursorPos(ImVec2(x0 - 24 * s, top));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.78f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
-                ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - 300 * s - 140 * s), ImGuiChildFlags_AlwaysUseWindowPadding,
+                ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - top - bottom), ImGuiChildFlags_AlwaysUseWindowPadding,
                                   ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
                 ImGui::PopStyleColor();
