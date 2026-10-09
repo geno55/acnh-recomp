@@ -446,7 +446,7 @@ class ItemShuffler(QtCore.QThread):
     def makeRandomizedPlacement(self):
         """Creates and returns a a randomized placement of items, adhering to the logic"""
         
-        verbose = False # change this to True to print item placements to help debug
+        verbose = bool(__import__("os").environ.get("LARECOMP_LAS_VERBOSE"))  # LAS Recomp: env; was: change this to True to print item placements to help debug
 
         if not set(self.settings['excluded-locations']).isdisjoint(self.vanilla_locations):
             print('Warning! Some locations set as disabled are unrandomized. These locations will not actually be considered out of logic.')
@@ -593,7 +593,9 @@ class ItemShuffler(QtCore.QThread):
             if ks_free:
                 item_pool = [s for s in item_pool if not s.startswith(ks_free)]
 
-            location_pool = [s for s in locations if len(s) >= 2 and s[:2] == f'D{i}']
+            # LAS Recomp dungeon room shuffle: a check belongs to the dungeon its room is in now (tools/rando/room_logic.py)
+            dungeon_of = self.settings.get('dungeon-of', {})
+            location_pool = [s for s in locations if dungeon_of.get(s, s[:2] if len(s) >= 2 else '') == f'D{i}']
             random.shuffle(location_pool)
             
             # Keep track of where we placed items. this is necessary to undo placements if we get stuck

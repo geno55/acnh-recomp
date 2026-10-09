@@ -11,8 +11,8 @@ that no longer holds, so for every shuffled dungeon this module builds the logic
   doors      only a room's OWN door actors count (a "(mirror)" door stood in the old neighbour, which isn't there):
              lock -> the dungeon's small keys, boss door -> its Nightmare Key, cracked wall -> bombs, shutter ->
              something to fight with / hit switches (approximate), pot in the doorway -> break-pot, water in the
-             doorway -> flippers, crystal -> break-crystal; one-way doors, statues and chests in a doorway are left
-             out (impassable for the logic: safe, never relied on)
+             doorway -> flippers, crystal -> break-crystal; one-way doors pass one way (actor halves 0x1A3 / 0x1A4); statues
+             and chests in a doorway are left out (impassable for the logic: safe, never relied on)
   keys       a lock needs ALL of the dungeon's small keys (always solvable: the keys sit before every lock); the
              number of small keys per dungeon = the number of locks in its new layout
   cells      each cell's requirement = OR over paths from the entrance of AND of the door requirements, computed
@@ -41,7 +41,7 @@ LEVELS = {
 SHUTTER = 'sword | shoot-arrows | bombs | rod | boomerang | hookshot'  # fight the room's enemies / hit its switches
 DOOR_REQ = {'cracked': 'bombs', 'potdoor': 'break-pot', 'blocked:water': 'flippers', 'blocked:crystal': 'break-crystal',
             'blocked:block': None, 'shutter': 'rs-shutter'}
-IMPASSABLE = {'oneway', 'blocked:statue', 'blocked:chest'}
+IMPASSABLE = {'blocked:statue', 'blocked:chest'}
 STEP = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}
 OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 MAX_TERMS = 48
@@ -151,20 +151,32 @@ def dnf_str(terms):
 def own_doors(cat, room, side, slot):
     """Types of the room's own door actors at that doorway (no '(mirror)')."""
     out = []
+    if isinstance(slot, str):  # wide opening ('w0-9'): no door actors
+        return out
     for d in cat.get(room, {}).get('doors', []):
         if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1 and not d[2].endswith('(mirror)'):
             out.append(d[2])
     return out
 
 
-def door_terms(types, n):
-    """frozenset of requirement atoms for passing these door types, or None if impassable."""
+ONEWAY_OUT, ONEWAY_IN = 0x1A3, 0x1A4  # ObjOnewayDoor halves: the room Link leaves through it / the room he enters
+                                     # (Bottle Grotto 05B 0x1A3 -> Hinox room 04B 0x1A4, as LAS's logic goes)
+
+
+def door_terms(types, n, entering=False, room_types=(), lock_id=''):
+    """frozenset of requirement atoms for passing these door types, or None if impassable. entering: going INTO the
+    room that owns the doors (else leaving it). A one-way door passes one way: out of the room with the 0x1A3 half,
+    into the room with the 0x1A4 half."""
     req = set()
     for t in types:
+        if t == 'oneway':
+            if (ONEWAY_IN if entering else ONEWAY_OUT) in room_types:
+                continue
+            return None
         if t in IMPASSABLE:
             return None
         if t == 'lock':
-            req.add(f'KEYS-D{n}')
+            req.add(f'LOCK|{n}|{lock_id}')  # (-> key-Dn:k, k by the worst-case key rule: key_counts)
         elif t == 'bossdoor':
             req.add(f'nightmare-key-D{n}')
         elif DOOR_REQ.get(t):
@@ -172,8 +184,9 @@ def door_terms(types, n):
     return frozenset(req)
 
 
-def stairs_links(romfs, level):
-    """[(grid room, grid room)] joined through side-view passages under the stairs."""
+def stairs_links(romfs, level, cat=None):
+    """[(grid room, grid room)] joined through side-view passages under the stairs (side-view room = not a grid room
+    of the catalog)."""
     import sys
     sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
     from RandomizerCore.Tools import leb
@@ -193,7 +206,9 @@ def stairs_links(romfs, level):
                 down.setdefault(room, set()).add(target)
             elif n.startswith('AreaUpstairs'):
                 up.setdefault(room, set()).add(target)
-    side = set(up) | {t for v in down.values() for t in v}
+    if cat is None:
+        cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
+    side = {r for r in set(up) | set(down) | {t for v in list(down.values()) + list(up.values()) for t in v} if r not in cat}
     parent = {s: s for s in side}
 
     def find(x):
@@ -201,27 +216,36 @@ def stairs_links(romfs, level):
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-    for s in side:  # side-view rooms next to each other in a row: one passage
+    for s in side:  # side-view rooms next to each other (a row, or Bottle Grotto's 3-row area 04D-06E): one passage
         m = re.search(r'_(\d\d)([A-P])$', s)
         if m:
-            nb = f'{s[:m.start()]}_{m.group(1)}{chr(ord(m.group(2)) + 1)}'
-            if nb in parent:
-                parent[find(s)] = find(nb)
+            for nb in (f'{s[:m.start()]}_{m.group(1)}{chr(ord(m.group(2)) + 1)}',
+                       f'{s[:m.start()]}_{int(m.group(1)) + 1:02d}{m.group(2)}'):
+                if nb in parent:
+                    parent[find(s)] = find(nb)
     comp = {}
-    for g, ts in down.items():
+    for a, ts in list(down.items()) + list(up.items()):  # stairs either way between a grid room and a passage
         for t in ts:
-            if t in parent:
-                comp.setdefault(find(t), set()).add(g)
-    for s, gs in up.items():
-        if s in parent:
-            comp.setdefault(find(s), set()).update(gs)
+            if a in parent and t not in parent:
+                comp.setdefault(find(a), set()).add(t)
+            elif t in parent and a not in parent:
+                comp.setdefault(find(t), set()).add(a)
     links = []
+    for a, ts in list(down.items()) + list(up.items()):  # stairs straight from one grid room to another (Key Cavern's
+        for t in ts:                                      # floors: 04B <-> 04G, 04C <-> 04H)
+            if a in cat and t in cat and a != t:
+                links.append(tuple(sorted((a, t))))
     for gs in comp.values():
-        gs = sorted(gs)
+        gs = sorted(g for g in gs if g not in side)  # (grid rooms only)
         for i in range(len(gs)):
             for j in range(i + 1, len(gs)):
                 links.append((gs[i], gs[j]))
-    return links
+    return sorted(set(links))
+
+
+def rooms_neighbour(room, side):
+    import rooms
+    return rooms.neighbour(room, side)
 
 
 def level_graph(cat, romfs, level, layout, jump_rows, openings):
@@ -248,7 +272,8 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
         jumped.add((cell, side, own))
         if target not in layout:
             continue
-        req = door_terms(own_doors(cat, layout[cell], side, own), n)
+        req = door_terms(own_doors(cat, layout[cell], side, own), n, room_types=cat[layout[cell]].get('types', ()),
+                         lock_id=f'{cell}{side}{own}')
         if req is not None:
             edges[cell].append((target, req))
     for cell, room in layout.items():
@@ -259,21 +284,62 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
             if nb is None:
                 continue
             theirs = {x[0] for x in openings(cat, layout[nb])[OPP[side]]}
-            for x in op[side]:
-                slot = x[0]
-                if (cell, side, slot) in jumped or slot not in theirs:
+            # original neighbours at home: connected as in the game, even where the doorway model doesn't line up
+            # (asked from both sides: a room whose doorway tiles hold its neighbour's door lists no opening there)
+            home_pair = room == f'{level}_{cell}' and layout[nb] == f'{level}_{nb}' and \
+                (rooms_neighbour(room, side) == layout[nb] or rooms_neighbour(layout[nb], OPP[side]) == room)
+            slots = [x[0] for x in op[side]]
+            if home_pair:  # (either room's doorway: the door's own tiles can hide it on one side)
+                slots += [t for t in theirs if t not in slots]
+            for slot in slots:
+                if (cell, side, slot) in jumped or (slot not in theirs and not home_pair):
                     continue
-                req_out = door_terms(own_doors(cat, room, side, slot), n)
-                req_in = door_terms(own_doors(cat, layout[nb], OPP[side], slot), n)
+                req_out = door_terms(own_doors(cat, room, side, slot), n, room_types=cat[room].get('types', ()),
+                                     lock_id=f'{cell}{side}{slot}')
+                req_in = door_terms(own_doors(cat, layout[nb], OPP[side], slot), n, entering=True,
+                                    room_types=cat[layout[nb]].get('types', ()), lock_id=f'{nb}{OPP[side]}{slot}')
                 if req_out is None or req_in is None:
                     continue
                 edges[cell].append((nb, req_out | req_in))
-    for a, b in stairs_links(romfs, level):
+    for a, b in stairs_links(romfs, level, cat):
         ca, cb = a.rsplit('_', 1)[1], b.rsplit('_', 1)[1]
         if layout.get(ca) == a and layout.get(cb) == b:  # (stairs rooms stay home)
             edges[ca].append((cb, frozenset()))
             edges[cb].append((ca, frozenset()))
     return edges, locks
+
+
+def key_counts(edges, start):
+    """{lock atom: keys it needs} by the worst-case key rule: a lock needs one key more than every OTHER lock that
+    can be reached (and opened, wasting a key) without going through it. Safe for any order the player opens doors
+    in; keys may sit behind earlier locks (the all-keys-before-any-lock rule made some layouts unfillable)."""
+    locks = {a for outs in edges.values() for _, r in outs for a in r if a.startswith('LOCK|')}
+    out = {}
+    for L in locks:
+        seen, todo, met = {start}, [start], set()
+        while todo:
+            a = todo.pop()
+            for b, r in edges[a]:
+                if L in r:
+                    continue
+                met |= {x for x in r if x.startswith('LOCK|')}
+                if b not in seen:
+                    seen.add(b)
+                    todo.append(b)
+        out[L] = len(met) + 1
+    return out
+
+
+def resolve_keys(terms, kc, n, total):
+    """LOCK atoms of each term -> one key-Dn:k (the largest k of the term's locks, at most the dungeon's keys)."""
+    out = set()
+    for t in terms:
+        ks = [kc.get(a, total) for a in t if a.startswith('LOCK|')]
+        rest = {a for a in t if not a.startswith('LOCK|')}
+        if ks:
+            rest.add(f'key-D{n}:{min(max(ks), total)}')
+        out.add(frozenset(rest))
+    return out
 
 
 def reach_terms(edges, start, base):
@@ -303,12 +369,15 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
     Returns a summary string. Sets settings['dungeon-of'] (location -> 'Dn') and adds unreachable checks to
     settings['excluded-locations']."""
     import dungeon_gen
+    # (dungeon_gen names cells like rooms, 'Lv01TailCave_08D'; here cells are '08D')
+    layouts = {lv: {c.rsplit('_', 1)[1]: room for c, room in L.items()} for lv, L in layouts.items()}
     lr = json.load(open(os.path.join(HERE, 'location_rooms.json')))
     rooms_at = {}  # room -> [(level, cell)]
     cell_expr = {}  # (level, cell) -> condition string
     lock_count = {}
     logic_defs['rs-shutter'] = {'type': 'interaction', 'condition-basic': SHUTTER}
     boss_cell = {}
+    junk_delta = [0]
     for level, layout in layouts.items():
         n, region = LEVELS[level]
         for cell, room in layout.items():
@@ -320,22 +389,36 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
                     boss_cell[level] = cell_name(c + dc, r + dr)
         edges, locks = level_graph(cat, romfs, level, layout, jump_rows, dungeon_gen.openings)
         lock_count[n] = locks
-        terms = reach_terms(edges, dungeon_gen.ENTRANCES[level], region)
+        start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
+        terms = reach_terms(edges, start, region)
+        kc = key_counts(edges, start)
+        nlocks = len(kc)
+        locks = max(locks, nlocks)  # (keys: at least one per lock the layout can meet)
         for cell, t in terms.items():
-            s = dnf_str(t)
-            if s:
-                s = s.replace(f'KEYS-D{n}', f'key-D{n}:{locks}' if locks else '')
-                s = re.sub(r'\(\s*&\s*|\s*&\s*\)', lambda m: '(' if '(' in m.group(0) else ')', s)
-                s = re.sub(r'&\s*&', '&', s).strip(' &')
-            cell_expr[(level, cell)] = s
+            cell_expr[(level, cell)] = dnf_str(resolve_keys(t, kc, n, locks))
         # LAS's cell regions of this dungeon: "reach that cell of the new layout"
         for k, v in logic_defs.items():
             if v.get('type') == 'room' and re.match(rf'D{n}-\d\d?[A-P]$', k):
                 cell = k.split('-', 1)[1].rjust(3, '0')
                 logic_defs[k]['condition-basic'] = cell_expr.get((level, cell)) or f'nightmare-key-D{n} & !nightmare-key-D{n}'
-        # small keys: as many as the new layout has locks
+        # small keys: as many as the new layout has locks (the pool keeps its size: extra keys replace junk, fewer
+        # keys leave room for junk - LAS has exactly one item per location)
         if f'key-D{n}' in item_defs:
+            delta = locks - item_defs[f'key-D{n}']['quantity']
             item_defs[f'key-D{n}']['quantity'] = locks
+            junk_delta[0] += delta
+    # balance the pool: take (or give back) junk for the keys added (or removed)
+    junk = sorted((k for k, d in item_defs.items() if k.startswith(('rupee-', 'chamber-stone')) and d.get('quantity', 0) > 0),
+                  key=lambda k: -item_defs[k]['quantity'])
+    left = junk_delta[0]
+    while left > 0 and junk:
+        for k in junk:
+            if left and item_defs[k]['quantity'] > 0:
+                item_defs[k]['quantity'] -= 1
+                left -= 1
+        junk = [k for k in junk if item_defs[k]['quantity'] > 0]
+    if left < 0 and junk:
+        item_defs[junk[0]]['quantity'] -= left
     shuffled = {LEVELS[lv][0] for lv in layouts}
     region_tok = {k for k, v in logic_defs.items() if v.get('type') in ('room', 'region')}
 
@@ -369,6 +452,9 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             continue
         places = rooms_at.get(room, [])
         reach = [cell_expr[p] for p in places if cell_expr.get(p)]
+        if not reach and any(p[1] == room.rsplit('_', 1)[1] and p[0] == room.rsplit('_', 1)[0] for p in places):
+            fallback += 1  # a room at home the graph can't enter (no doorways: Bottle Grotto 03C, reached by a fall):
+            continue       # its vanilla condition, on the redefined cell regions
         if not reach:
             excluded.add(loc)
             unused += 1
@@ -383,3 +469,43 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         rewritten += 1
     return (f'{len(layouts)} dungeons, {rewritten} checks rewritten, {unused} in unused rooms (excluded), '
             f'{fallback} without a room (vanilla condition), locks {dict(sorted(lock_count.items()))}')
+
+
+def boss_door_ok(cat, romfs, level, layout, rows):
+    """The generator's check (Coherent / Chaos): without passing a boss door, every cell is reachable except the boss
+    arena and the instrument room (DevRL_chaos_off: Turtle Rock's entrance was paired straight into the room before
+    the boss door - the whole dungeon sat behind the Nightmare Key). layout: dungeon_gen's ({'Lv.._08D': room})."""
+    import dungeon_gen
+    L = {c.rsplit('_', 1)[1]: r for c, r in layout.items()}
+    edges, _ = level_graph(cat, romfs, level, L, rows, dungeon_gen.openings)
+    start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
+    def reach(boss_doors):
+        seen, todo = {start}, [start]
+        while todo:
+            a = todo.pop()
+            for b, r in edges[a]:
+                if b not in seen and (boss_doors or not any(x.startswith('nightmare-key') for x in r)):
+                    seen.add(b)
+                    todo.append(b)
+        return seen
+    behind = reach(True) - reach(False)  # (cells unreachable either way aren't this check's business)
+    allowed = set()
+    n = LEVELS[level][0]
+    lr = json.load(open(os.path.join(HERE, 'location_rooms.json')))
+    inst = (lr.get(f'D{n}-instrument') or {}).get('room')
+    for cell, room in L.items():
+        if room == inst:
+            allowed.add(cell)
+        for d in cat.get(room, {}).get('doors', []):
+            if len(d) > 3 and d[2] == 'bossdoor':
+                c, r = cell_pos(cell)
+                allowed.add(cell_name(c + STEP[d[0]][0], r + STEP[d[0]][1]))
+    # beyond the boss arena (the instrument room, the Color Dungeon's reward room): reached through the arena
+    todo = [c for c in allowed if c in behind]
+    while todo:
+        a = todo.pop()
+        for b, _ in edges.get(a, []):
+            if b in behind and b not in allowed:
+                allowed.add(b)
+                todo.append(b)
+    return not (behind - allowed)

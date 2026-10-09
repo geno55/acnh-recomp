@@ -674,6 +674,9 @@ def plan_all(cat, seed, romfs, levels=None, stats=None, rounds=None):
             used |= placed
             out[lv] = L
         moved = sum(1 for L in out.values() for cell, src in L.items() if src != cell)
+        import room_logic  # (only the boss and the instrument may sit behind the boss door)
+        if not all(room_logic.boss_door_ok(cat, romfs, lv, L, _jumps(cat, lv, L)) for lv, L in out.items()):
+            continue
         score = (len(dups), len(pool - used), -moved)  # then the most variety
         if best is None or score < best[0]:
             best = (score, out, dups)
@@ -917,8 +920,16 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
         if any(dead_ends(cat, lv, out[lv]) for lv in levels):
             continue
         jumps = []
+        import room_logic
         for lv in levels:
-            j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs)
+            # (pairs that put the dungeon behind its boss door - only the boss and instrument may need the Nightmare
+            # Key - are drawn again)
+            for _ in range(20):
+                j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs)
+                if j is None or room_logic.boss_door_ok(cat, romfs, lv, out[lv], j):
+                    break
+            else:
+                j = None
             if j is None:
                 break
             jumps += j

@@ -601,7 +601,9 @@ extern "C" void rando_tab_draw(float scale) {
                           "every dungeon connected, a few rooms appear in two dungeons.\n"
                           "Chaos: any doorway can lead to any doorway of the dungeon. Every room is used once. Matching letters\n"
                           "(A-A, B-B...) appear on the dungeon map once you've been through a doorway, or all of them with the Map.\n"
-                          "EXPERIMENTAL: the item logic doesn't know rooms moved yet - a seed may need items in a different order.");
+                          "The item logic follows the new layout (keys, locks, boss doors, one-way doors). Without keysanity\n"
+                          "a dungeon's keys are inside that dungeon. Experimental: what a room needs to cross it (pits, water\n"
+                          "inside the room) and what opens each shutter are approximated.");
     ImGui::Spacing();
     ImGui::TextDisabled("Experimental:");
     ImGui::BeginDisabled(!g_opts.randomize_enemies);

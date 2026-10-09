@@ -111,7 +111,7 @@ def stage(label, frac):
     print(f'stage {frac:.3f} {label}', flush=True)
 
 
-def shuffle_dungeon_rooms(romfs, out_dir, seed, mode):
+def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps):
     """Dungeon room shuffle (Coherent / Chaos, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
     rooms from an overlay romfs where the seed's own room files (LAS chests, pots, bushes, entrances) replace the
     game's - as copies, since it writes the seed's rooms while still reading others."""
@@ -157,14 +157,8 @@ def shuffle_dungeon_rooms(romfs, out_dir, seed, mode):
             if os.path.lexists(os.path.join(dst, f)):
                 os.remove(os.path.join(dst, f))
             shutil.copyfile(os.path.join(seed_lv, f), os.path.join(dst, f))
-    cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
     try:
-        if mode == 'chaos':
-            layouts, jumps = dungeon_gen.plan_all_chaos(cat, seed, overlay)
-            dungeon_gen.write_all(overlay, out_romfs, layouts, jumps)
-        else:
-            layouts = dungeon_gen.plan_all(cat, seed, overlay)
-            dungeon_gen.write_all(overlay, out_romfs, layouts)
+        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps)  # (jumps None: Coherent)
     finally:
         shutil.rmtree(overlay, ignore_errors=True)
     return f"{mode}, {len(layouts)} dungeons, {sum(sum(1 for k, v in L.items() if k != v) for L in layouts.values())} rooms moved"
@@ -248,6 +242,26 @@ def main():
         moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
         ent = (ent_doors, ent_entry, ent_exit)
         print('entrances:', len(ent_entry), 'doors shuffled,', moved, 'locations moved', flush=True)
+
+    # ---- Dungeon room shuffle (Coherent / Chaos): the layouts are planned first, the item logic follows them
+    # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
+    room_mode = settings.get('dungeon-room-shuffle', 'off')
+    room_plan = None
+    if room_mode in ('coherent', 'chaos'):
+        stage('Planning dungeon rooms', 0.03)
+        import dungeon_gen
+        import room_logic
+        cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
+        if room_mode == 'chaos':
+            layouts, jumps = dungeon_gen.plan_all_chaos(cat, settings['seed'], romfs)
+            logic_rows = jumps
+        else:
+            layouts, jumps = dungeon_gen.plan_all(cat, settings['seed'], romfs), None
+            logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
+        room_plan = (layouts, jumps)
+        extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
+        print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
+              flush=True)
 
     result = {}
     errors = []
@@ -412,10 +426,9 @@ def main():
             f.write(el.spoiler(*ent) + '\n')
         print('entrance rooms edited:', n, flush=True)
 
-    room_mode = settings.get('dungeon-room-shuffle', 'off')
-    if room_mode in ('coherent', 'chaos'):
-        stage('Shuffling dungeon rooms', 0.975)
-        print('dungeon rooms:', shuffle_dungeon_rooms(romfs, out_dir, settings['seed'], room_mode), flush=True)
+    if room_plan:
+        stage('Building the shuffled dungeons', 0.975)
+        print('dungeon rooms:', shuffle_dungeon_rooms(romfs, out_dir, room_mode, *room_plan), flush=True)
         # gold pots / bushes are found by position: moved rooms moved their item actors too
         if pot_locs:
             print('pots.tsv:', pots_mod.write_tsv(out_dir, leb), flush=True)
