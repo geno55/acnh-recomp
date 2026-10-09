@@ -703,15 +703,23 @@ def landing_depth(romfs, room, side, slot, min_tile):
     def tile(row, col):
         o = 0x10 * (row * 10 + col)
         return raw[o:o + 3], struct.unpack_from('<f', raw, o + 12)[0]
-    for i in range(min_tile, 4):
+    def free(i):
         row, col = {'N': (i, along), 'S': (7 - i, along), 'W': (min(along, 7), i), 'E': (min(along, 7), 9 - i)}[side]
-        col = min(col, 9)
-        t, h = tile(row, col)
+        t, h = tile(min(row, 7), min(col, 9))
         solid = bool(t[0] & 2) and not t[2] & 8
         hazard = (t[2] & 4 and h < -0.3) or h < -1.0
-        if not solid and not hazard:
+        return not solid and not hazard, h
+    # never on the doorway tile itself (the game walks a Link who stands there on through the doorway - straight
+    # back into the jump: DevChaos1 Color Dungeon 07H -> 08H), and only where he can walk on inward
+    for i in range(max(min_tile, 1), 5):
+        ok, h = free(i)
+        if ok and free(i + 1)[0]:
             return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
-    return (2.2 if min_tile else 0.9), 0.0
+    for i in range(max(min_tile, 1), 5):
+        ok, h = free(i)
+        if ok:
+            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
+    return 2.2, 0.0
 
 
 def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):

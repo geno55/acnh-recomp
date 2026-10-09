@@ -18,9 +18,16 @@
 typedef struct { char level[40]; float x, y, z; int flag; } Pot;
 static Pot *g_pots;
 static int g_npots = -1;
+// gold = luminance remapped onto a gold ramp (keeps the pot's shading), plus a slow shimmer
+// (colour target is linear HDR: lum ~0.05-0.3 on a pot, so the curve lifts it)
+static float g_gold[7] = {1.85f, 1.06f, 0.09f, 1.0f, 0.50f, 0.34f, 0.03f};  // warm gold (tuned 2026-10-08)
+void pot_gold_tint(float tint[8]);
+
 
 static void load(void) {
     g_npots = 0;
+    const char *e = getenv("LARECOMP_POT_TINT");  // r,g,b,mix,pulse_r,pulse_g,pulse_b (tuning)
+    if (e) sscanf(e, "%f,%f,%f,%f,%f,%f,%f", &g_gold[0], &g_gold[1], &g_gold[2], &g_gold[3], &g_gold[4], &g_gold[5], &g_gold[6]);
     const char *dir = rando_seed_dir();
     if (!dir) return;
     int cap = 0;
@@ -50,18 +57,29 @@ static const char *current_level(void) {
 
 // Tint: rgb = mix(rgb, t0.rgb * lum^t1.w + t1.rgb * lum, t0.w)  (runtime/nvn/maxwell/translate.c).
 // m: the draw's model matrix (3x4 row-major). Fills tint (float4[2]) and returns true for an unchecked pot.
-// Pots of the current level, rebuilt once per presented frame (draws only scan these).
-static int g_lv_idx[512], g_nlv = 0;
+// Pots of the current level, sorted by x (draws binary-search them); rebuilt when the level changes. (The Field has
+// ~920 bushes: a fixed 512-entry list left most of them never gold, and a linear scan per draw was slow.)
+static int *g_lv_idx, g_nlv = 0;
+static char g_lv_name[40] = "\x01";
 static uint64_t g_lv_frame = ~0ull;
+static int by_x(const void *a, const void *b) {
+    float d = g_pots[*(const int *)a].x - g_pots[*(const int *)b].x;
+    return d < 0 ? -1 : d > 0;
+}
 static void level_pots(void) {
     extern uint64_t renderer_present_count(void);
     uint64_t f = renderer_present_count();
     if (f == g_lv_frame) return;
     g_lv_frame = f;
-    g_nlv = 0;
     const char *lv = current_level();
-    for (int i = 0; i < g_npots && g_nlv < 512; i++)
-        if (!strcmp(g_pots[i].level, lv)) g_lv_idx[g_nlv++] = i;
+    if (strncmp(lv, g_lv_name, sizeof g_lv_name)) {
+        strlcpy(g_lv_name, lv, sizeof g_lv_name);
+        if (!g_lv_idx) g_lv_idx = malloc(sizeof(int) * (size_t)(g_npots ? g_npots : 1));
+        g_nlv = 0;
+        for (int i = 0; i < g_npots; i++)
+            if (!strcmp(g_pots[i].level, lv)) g_lv_idx[g_nlv++] = i;
+        qsort(g_lv_idx, (size_t)g_nlv, sizeof(int), by_x);
+    }
     if (ENV("LARECOMP_LOG_POTS") && f % 120 == 0) LOG("[pots] frame %llu level '%s': %d item pots\n", (unsigned long long)f, lv, g_nlv);
 }
 
@@ -103,7 +121,9 @@ bool pot_tint(const float *m, float tint[8], uint64_t mesh) {
     bool upright = fabsf(m[0] - 1) <= 0.01f && fabsf(m[5] - 1) <= 0.01f && fabsf(m[10] - 1) <= 0.01f;
     float x = m[3], y = m[7], z = m[11];
     const Pot *hit = NULL;
-    for (int k = 0; k < g_nlv && upright; k++) {  // standing on its spot: pots are placed without rotation
+    int lo = 0, hi = g_nlv;  // first pot with x >= x - 0.02
+    while (lo < hi) { int mid = (lo + hi) / 2; if (g_pots[g_lv_idx[mid]].x < x - 0.02f) lo = mid + 1; else hi = mid; }
+    for (int k = lo; k < g_nlv && upright && g_pots[g_lv_idx[k]].x <= x + 0.02f; k++) {  // standing on its spot
         const Pot *p = &g_pots[g_lv_idx[k]];
         if (fabsf(p->x - x) > 0.02f || fabsf(p->z - z) > 0.02f || fabsf(p->y - y) > 0.05f) continue;
         if (!unchecked(p)) return false;  // already checked
@@ -121,22 +141,35 @@ bool pot_tint(const float *m, float tint[8], uint64_t mesh) {
         t->x = x; t->y = y; t->z = z; t->seen = now;
     }
     if (hit) {
-        float t = (float)now / 60.0f;
-        float pulse = 0.5f + 0.5f * sinf(t * 2.5f);
-        // gold = luminance remapped onto a gold ramp (keeps the pot's shading), plus a slow shimmer
-        // (colour target is linear HDR: lum ~0.05-0.3 on a pot, so the curve lifts it)
-        static float v[7] = {1.85f, 1.06f, 0.09f, 1.0f, 0.50f, 0.34f, 0.03f};  // warm gold (tuned 2026-10-08)
-        static int env = -1;  // LARECOMP_POT_TINT=r,g,b,mix,pulse_r,pulse_g,pulse_b (tuning)
-        if (env < 0) {
-            env = 0;
-            const char *e = getenv("LARECOMP_POT_TINT");
-            if (e) sscanf(e, "%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]);
-        }
-        tint[0] = v[0]; tint[1] = v[1]; tint[2] = v[2]; tint[3] = v[3];
-        tint[4] = v[4] * pulse; tint[5] = v[5] * pulse; tint[6] = v[6] * pulse; tint[7] = 0.8f;
+        pot_gold_tint(tint);
         return true;
     }
     return false;
+}
+
+// Instanced draws (bushes: one draw per batch, each instance's 4x4 row-major model matrix in vertex storage buffer
+// 0, random rotation about y): true when this instance stands on an unchecked item spot of the current level.
+bool pot_instance_gold(const float *m) {
+    float sx = m[0] * m[0] + m[4] * m[4] + m[8] * m[8], sy = m[1] * m[1] + m[5] * m[5] + m[9] * m[9];
+    if (fabsf(sx - 1) > 0.05f || fabsf(sy - 1) > 0.05f) return false;
+    float x = m[3], y = m[7], z = m[11];
+    int lo = 0, hi = g_nlv;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (g_pots[g_lv_idx[mid]].x < x - 0.02f) lo = mid + 1; else hi = mid; }
+    for (int k = lo; k < g_nlv && g_pots[g_lv_idx[k]].x <= x + 0.02f; k++) {
+        const Pot *p = &g_pots[g_lv_idx[k]];
+        if (fabsf(p->z - z) > 0.02f || fabsf(p->y - y) > 0.05f) continue;
+        return unchecked(p);
+    }
+    return false;
+}
+
+// the tint pot_tint gives a gold pot this frame
+void pot_gold_tint(float tint[8]) {
+    extern uint64_t renderer_present_count(void);
+    float t = (float)renderer_present_count() / 60.0f;
+    float pulse = 0.5f + 0.5f * sinf(t * 2.5f);
+    tint[0] = g_gold[0]; tint[1] = g_gold[1]; tint[2] = g_gold[2]; tint[3] = g_gold[3];
+    tint[4] = g_gold[4] * pulse; tint[5] = g_gold[5] * pulse; tint[6] = g_gold[6] * pulse; tint[7] = 0.8f;
 }
 
 // True when the current level has item pots: their hidden item actors' 2D twinkle is drawn at a bogus spot
@@ -152,4 +185,25 @@ bool pot_level_active(void) {
     level_pots();
     active = g_nlv > 0;
     return active;
+}
+
+// LARECOMP_POT_PROBE=1 (debug): log draws whose model matrix sits within a tile of an item pot / bush of this level
+// (whatever their scale / rotation / shader) - finds how a kind of object is drawn.
+void pot_probe(const float *m, bool tintable, uint64_t mesh, uint32_t inst) {
+    if (!pot_glow_active()) return;
+    extern uint64_t renderer_present_count(void);
+    static uint64_t frame;
+    static int n;
+    uint64_t f = renderer_present_count();
+    if (f != frame) { frame = f; n = 0; }
+    if (f % 300 || n >= 24) return;
+    float x = m[3], y = m[7], z = m[11];
+    for (int k = 0; k < g_nlv; k++) {
+        const Pot *p = &g_pots[g_lv_idx[k]];
+        if (fabsf(p->x - x) > 1.0f || fabsf(p->z - z) > 1.0f || fabsf(p->y - y) > 2.0f) continue;
+        n++;
+        LOG("[potprobe] f%llu pot (%.2f %.2f %.2f) draw (%.2f %.2f %.2f) diag %.3f %.3f %.3f tint %d mesh %llx arg3 %u\n",
+            (unsigned long long)f, p->x, p->y, p->z, x, y, z, m[0], m[5], m[10], tintable, (unsigned long long)mesh, inst);
+        break;
+    }
 }

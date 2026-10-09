@@ -81,9 +81,11 @@ void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t s
 void flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size) {
     if (!enabled() || off != 0 || size < BODY_CRC + 4) return;
     strlcpy(g_current, path, sizeof g_current);
-    g_live_crc = *(const uint32_t *)(uintptr_t)(addr + BODY_CRC);
+    // the slot now holds the written CRC; the live save keeps its own (the game writes from a copy) - track that
+    // one, else the next tick sees a "new" save in play and reloads another slot's extra bits over ours
+    g_live_crc = *(const uint32_t *)(uintptr_t)(LIVE_SAVE + BODY_CRC);
     Slot *s = slot_for(path);
-    if (s) { s->crc = g_live_crc; memcpy(s->ext, g_buf + 256, 256); }
+    if (s) { s->crc = *(const uint32_t *)(uintptr_t)(addr + BODY_CRC); memcpy(s->ext, g_buf + 256, 256); }
     char sc[1100];
     sidecar_path(path, sc, sizeof sc);
     bool any = false;

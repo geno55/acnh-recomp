@@ -586,7 +586,7 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Bushes hold items", &g_opts.bushes);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Every bush on the island hides an item from the pool (916 more checks; tall grass stays as it is).\n"
+        ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
     static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
     combo("Entrance randomizer", &g_opts.entrances, ent, 3);

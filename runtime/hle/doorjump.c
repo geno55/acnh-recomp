@@ -169,7 +169,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     if (placed < 0 && (long)frame >= at && arrived) {
         for (int i = 0; i < g_njumps; i++) {
             const Jump *j = &g_jumps[i];
-            if (j->row != row || j->col != col || j->side != side) continue;
+            if (j->row != row || j->col != col || j->side != side || strcmp(j->level, lv)) continue;  // (this level's)
             float x0 = 15.0f * col, z0 = 12.0f * (row - 1), x = 0, z = 0;
             switch (side) {
             case 'W': x = x0 + 1.2f; z = z0 + j->own * 0.75f; break;
@@ -185,6 +185,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             g_test_ly = side == 'N' ? 32767 : side == 'S' ? -32767 : 0;
             g_test_stick_until = frame + 180;  // cut to 40 frames after the jump (doorjump_tick)
             LOG("[doorjump-test] f%llu placed at (%.2f, %.2f) in %s %c\n", (unsigned long long)frame, x, z, cell, side);
+            break;
         }
         placed = (long)frame;
     } else if (placed >= 0 && (long)frame < placed + 120 && !g_jumps_fired && tries < 3 &&

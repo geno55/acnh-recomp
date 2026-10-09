@@ -1862,6 +1862,36 @@ static void draw(CmdRec *r, bool indexed) {
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
         [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
+    if (ENV("LARECOMP_POT_PROBE") && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48) {  // (debug: bush / pot draws)
+        extern void pot_probe(const float *m, bool tintable, uint64_t mesh, uint32_t inst);
+        uint32_t ninst = indexed ? (uint32_t)r->x[6] : (uint32_t)r->x[4];
+        pot_probe((const float *)(uintptr_t)st.ubuf[0][2].addr, pr->fi->uses_tint, st.vbuf[0].addr, ninst);
+        extern uint64_t renderer_present_count(void);
+        static uint64_t pf; static int pn;
+        if (renderer_present_count() != pf) { pf = renderer_present_count(); pn = 0; }
+        if (ninst > 1 && pf % 300 == 0 && pn++ < 40) {
+            const float *m = (const float *)(uintptr_t)st.ubuf[0][2].addr;
+            LOG("[potprobe] instanced x%u count %u tint %d ubuf sizes %u %u %u %u %u %u  m2 t (%.2f %.2f %.2f)\n", ninst,
+                (uint32_t)r->x[2], pr->fi->uses_tint, (unsigned)st.ubuf[0][0].size, (unsigned)st.ubuf[0][1].size,
+                (unsigned)st.ubuf[0][2].size, (unsigned)st.ubuf[0][3].size, (unsigned)st.ubuf[0][4].size,
+                (unsigned)st.ubuf[0][5].size, m[3], m[7], m[11]);
+            for (int i = 0; i < st.nattrib; i++) LOG(" a%d(f%#x s%u o%u)", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
+            for (int i = 0; i < 12; i++)
+                if (st.vbuf[i].addr && i < st.nstream && st.stream[i][1]) {
+                    const float *v = (const float *)(uintptr_t)st.vbuf[i].addr;
+                    LOG(" vb%d(size %llu stride %u div %u: %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f)", i,
+                        st.vbuf[i].size, st.stream[i][0], st.stream[i][1], v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+                }
+            LOG("\n");
+            for (int i = 0; i < 4; i++)
+                if (st.sbuf[0][i].addr) {
+                    const float *f = (const float *)(uintptr_t)st.sbuf[0][i].addr;
+                    LOG("   ssbo%d size %llu:", i, st.sbuf[0][i].size);
+                    for (int k = 0; k < 48 && k * 4 < (int)st.sbuf[0][i].size; k++) LOG(" %.2f", f[k]);
+                    LOG("\n");
+                }
+        }
+    }
     if (pr->fi->uses_tint) {  // per-draw highlight tint (golden unchecked pots, runtime/hle/pot_glow.c)
         float tint[8] = {0};
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
@@ -1878,13 +1908,44 @@ static void draw(CmdRec *r, bool indexed) {
     }
     if (used_streams & (1u << 31)) { static const float zero[4] = {0, 0, 0, 1}; [enc setVertexBytes:zero length:16 atIndex:30]; }
 
+    // Instanced draws with item spots among their instances (bushsanity: bushes are drawn in batches, each instance's
+    // model matrix in vertex storage buffer 0, indexed by instance id): drawn as runs of instances, gold runs tinted.
+    // (Metal's instance_id includes the base instance, so a run [b + k, b + k + n) draws exactly those instances.)
+    uint32_t inst_all = indexed ? (uint32_t)r->x[6] : (uint32_t)r->x[4], base_all = indexed ? (uint32_t)r->x[5] : (uint32_t)r->x[3];
+    if (!inst_all) inst_all = 1;
+    enum { MAX_RUNS = 64 };
+    uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
+    bool run_gold[MAX_RUNS];
+    int nruns = 0;
+    if (pr->fi->uses_tint && inst_all > 1 && st.sbuf[0][0].addr) {
+        extern bool pot_glow_active(void);
+        extern bool pot_instance_gold(const float *m);
+        uint64_t recs = st.sbuf[0][0].size / 64;
+        if (pot_glow_active() && (uint64_t)base_all + inst_all <= recs) {
+            const float *m = (const float *)(uintptr_t)st.sbuf[0][0].addr;
+            for (uint32_t k = 0; k < inst_all; k++) {
+                bool g = pot_instance_gold(m + (size_t)(base_all + k) * 16);
+                if (nruns && run_gold[nruns - 1] == g) { run_n[nruns - 1]++; continue; }
+                if (nruns == MAX_RUNS) { nruns = 0; break; }  // (too fragmented: draw as is)
+                run_at[nruns] = k; run_n[nruns] = 1; run_gold[nruns] = g; nruns++;
+            }
+            if (nruns == 1 && !run_gold[0]) nruns = 0;
+        }
+    }
+    if (!nruns) { run_at[0] = 0; run_n[0] = inst_all; nruns = 1; run_gold[0] = false; }
+    for (int ri = 0; ri < nruns; ri++) {
+    if (nruns > 1 || run_gold[0]) {
+        float tint[8] = {0};
+        extern void pot_gold_tint(float tint[8]);
+        if (run_gold[ri]) pot_gold_tint(tint);
+        [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
+    }
     // draw
     bool native;
     uint32_t mode = (uint32_t)r->x[0];
     MTLPrimitiveType pt = prim_type(mode, &native);
     if (!indexed) {
-        uint32_t first = (uint32_t)r->x[1], count = (uint32_t)r->x[2], base_inst = (uint32_t)r->x[3], inst = (uint32_t)r->x[4];
-        if (!inst) inst = 1;
+        uint32_t first = (uint32_t)r->x[1], count = (uint32_t)r->x[2], base_inst = base_all + run_at[ri], inst = run_n[ri];
         if (native) {
             [enc drawPrimitives:pt vertexStart:first vertexCount:count instanceCount:inst baseInstance:base_inst];
         } else if (mode == 6 || mode == 7 || mode == 9) {
@@ -1897,7 +1958,7 @@ static void draw(CmdRec *r, bool indexed) {
         uint32_t itype = (uint32_t)r->x[1], count = (uint32_t)r->x[2];
         uint64_t iaddr = r->x[3];
         int32_t base_vertex = (int32_t)r->x[4];
-        uint32_t base_inst = (uint32_t)r->x[5], inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
+        uint32_t base_inst = base_all + run_at[ri], inst = run_n[ri];
         if (native && itype != 0) {
             MTLIndexType it = itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
             uint32_t isz = itype == 1 ? 2 : 4;
@@ -1927,6 +1988,7 @@ static void draw(CmdRec *r, bool indexed) {
                          instanceCount:inst baseVertex:base_vertex baseInstance:base_inst];
         }
     }
+    }  // runs
     stat_draws++;
     if (dbg_this) {
         static int nlog;

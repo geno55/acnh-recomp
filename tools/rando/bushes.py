@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Bushsanity (LAS Recomp addition, user 2026-10-08): every bush on Koholint's overworld (ObjLawn 0xb5, 916 on the
-Field) hides an item, like the pots (pots.py does the writing: a scaled-down SinkingSword item actor inside the bush,
-cutting it reveals the item). Tall grass (ObjGrass 0xb6) is NOT randomized. Unchecked bushes are drawn gold
-(runtime/hle/pot_glow.c reads bushes.tsv).
+"""Bushsanity (LAS Recomp addition, user 2026-10-08): every bush on Koholint's overworld (ObjGrass 0xb6 - the leafy
+shrubs, model parts GrassBase / GrassTop; 381 on the Field) hides an item, like the pots (pots.py does the writing: a
+scaled-down SinkingSword item actor inside the bush, cutting it reveals the item). Tall grass (ObjLawn 0xb5, 916 on
+the Field - the names are misleading; checked by tinting each kind gold in game 2026-10-09) is NOT randomized.
+Unchecked bushes are drawn gold (runtime/hle/pot_glow.c reads bushes.tsv; bushes are drawn instanced, the renderer
+splits those draws).
 
-Flags: 916 don't fit in the game's 2048 GlobalFlags next to the pots, so bush flags are numbered from 2048 up and the
-runtime extends the flag bitfield (runtime/hle/flags_ext.c, turned on by the seed's `flags_ext` file).
+Flags: bush flags are numbered from 2048 up (the pots fill most of the game's 2048 GlobalFlags) and the runtime
+extends the flag bitfield (runtime/hle/flags_ext.c, turned on by the seed's `flags_ext` file).
 
 Logic: LAS's break-bush (sword | powders | bracelet | bombs | rod | boomerang) AND the logic regions of the bush's
 screen. A screen's regions come from the LAS locations on it (location_rooms.json) and the house / cave doors on it
@@ -21,13 +23,14 @@ import pots
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-BUSH_TYPE = 0xb5  # ObjLawn
+BUSH_TYPE = 0xb6  # ObjGrass (bushes; ObjLawn 0xb5 is the tall grass)
 FLAG_BASE = int(os.environ.get('LARECOMP_BUSH_FLAG_BASE', 2048))  # (env: experiments)
 FLAG_LIMIT = int(os.environ.get('LARECOMP_BUSH_FLAG_LIMIT', 4096))  # runtime/hle/flags_ext.c: 512-byte bitfield
 # what bushes give in the original game: hearts and rupees mostly (ItemDrop 'Grass'), a few refills
 JUNK_MIX = [('pot-heart', 0.32), ('rupee-5', 0.34), ('rupee-20', 0.10), ('rupee-50', 0.03),
             ('pot-arrows', 0.08), ('pot-bombs', 0.08), ('pot-powder', 0.05)]
 BUSH_TRAPS = pots.POT_TRAPS
+HIDE_SCALE = float(os.environ.get('LARECOMP_BUSH_HIDE', 0.4))  # smaller than in pots: leaves don't cover a 0.7 item
 
 
 def scan(romfs, leb):
@@ -124,7 +127,7 @@ def add_to_logic(bushes, logic_defs, item_defs, traps='none', rng=None):
 
 def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
     lines = pots.apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARBush',
-                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B)
+                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B, hide_scale=HIDE_SCALE)
     open(os.path.join(out_dir, 'flags_ext'), 'w').write('bushsanity: event flags 2048+ (runtime/hle/flags_ext.c)\n')
     return lines
 
