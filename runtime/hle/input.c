@@ -326,7 +326,6 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    { extern uint64_t pets_menu_buttons(uint64_t b); b = pets_menu_buttons(b); }  // (pause menu companion slot)
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     if (!menu && g_settings.dpad_move && lx == 0 && ly == 0) {  // d-pad / arrow keys walk (setting), stick left alone
@@ -355,6 +354,12 @@ static void fill_state(Cpu *c) {
     if (ry > 16000) b |= 1ull << 21;
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
+    {   // the pause menu's companion slot (runtime/hle/pets.c) takes the d-pad / sticks / A while the cursor is on it
+        extern uint64_t pets_menu_input(uint64_t b, int32_t st[4]);
+        int32_t st[4] = {lx, ly, rx, ry};
+        b = pets_menu_input(b, st);
+        lx = st[0], ly = st[1], rx = st[2], ry = st[3];
+    }
     *(uint64_t *)(s + 8) = b;
     static uint64_t last_b;
     if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);

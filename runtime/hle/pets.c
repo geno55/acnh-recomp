@@ -115,25 +115,50 @@ int pets_menu_options(int out[6]) {
     return 1 + pets_callable(out + 1);
 }
 
-// Game thread, each pad read (input.c fill_state): on the Items page the right stick click (unused by the pause
-// menu) calls the next choice; the game never sees that press there. Returns the buttons the game gets.
-uint64_t pets_menu_buttons(uint64_t b) {
-    extern bool inventory_items_page_shown(void);
-    enum { RSTICK = 1ull << 5 };
-    static bool held;
-    bool down = b & RSTICK, edge = down && !held;
-    held = down;
+// Pause menu companion slot (runtime/ui/inventory_overlay.mm), game thread, each pad read (input.c fill_state, b =
+// the buttons with the stick directions as bits 16-23, st = the sticks). The slot extends the Items page's own
+// cursor: LEFT from the grid's left column moves onto it (the game's cursor stays where it was), UP / DOWN pick a
+// choice, A makes it follow, RIGHT goes back to the grid. While on the slot the game sees no directions, sticks or
+// A / X / Y; a direction that moved onto / off the slot stays hidden from it until released (else the game would
+// take it as a fresh press). B (close) and L / R (other pages) reach the game and leave the slot.
+static int g_slot = -1;  // highlighted choice while the cursor is on the slot, -1 = on the game's grid
+int pets_menu_slot(void) { return g_slot; }
+
+uint64_t pets_menu_input(uint64_t b, int32_t st[4]) {
+    extern int inventory_items_cursor(void);
+    enum { A = 1, X = 4, Y = 8, LEFT = 1 << 12, UP = 1 << 13, RIGHT = 1 << 14, DOWN = 1 << 15 };
+    const uint64_t dirs = 0xfull << 12 | 0xffull << 16;
+    static uint64_t prev, hide;
+    uint64_t press = b & ~prev;
+    prev = b;
+    hide &= b;  // (released: the game may see it again)
     if (!rando_seed_dir()) return b;
     static int ghost = -2;  // (log the Ghost's steps: found, laid to rest, Owl's check)
     int gs = ghost_item() ? flag_get(kComp[C_GHOST].found) + flag_get("Ghost4_Clear") + pets_ghost_state() : -2;
     if (gs != ghost) LOG("[pets] ghost item state %d -> %d\n", ghost, gs), ghost = gs;
-    if (!inventory_items_page_shown()) return b;
-    int o[6], n = pets_menu_options(o), cur = pets_current(), i = 0;
-    if (edge && n >= 2) {
-        while (i < n && o[i] != cur) i++;
-        pets_call(o[i < n ? (i + 1) % n : 0]);
+    int o[6], n = pets_menu_options(o), cur = inventory_items_cursor();
+    if (hide) st[0] = st[1] = st[2] = st[3] = 0;  // (a direction may be a stick, or the d-pad walking setting's)
+    if (cur < 0 || n < 2) return g_slot = -1, b & ~hide;
+    bool left = press & (LEFT | 1 << 16), right = press & (RIGHT | 1 << 18);
+    bool up = press & (UP | 1 << 17), down = press & (DOWN | 1 << 19);
+    if (g_slot < 0) {
+        if (!left || cur % 4) return b & ~hide;
+        for (g_slot = 0; g_slot < n - 1 && o[g_slot] != pets_current(); g_slot++) {}
+        hide |= b & dirs;
+        LOG("[pets] menu: on the companion slot (grid cursor %d)\n", cur);
+    } else if (right) {
+        g_slot = -1;
+        hide |= b & dirs;
+        st[0] = st[1] = st[2] = st[3] = 0;
+        return b & ~hide;
+    } else if (up || down) {
+        g_slot = (g_slot + (up ? n - 1 : 1)) % n;
+    } else if (press & A) {
+        pets_call(o[g_slot]);
     }
-    return b & ~(uint64_t)RSTICK;
+    if (g_slot >= n) g_slot = n - 1;
+    st[0] = st[1] = st[2] = st[3] = 0;
+    return b & ~(dirs | A | X | Y);
 }
 
 // rt_add_item (keysanity.c): x2 index PET_INDEX + n. Returns 1 (handled: nothing is added to the inventory)

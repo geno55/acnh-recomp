@@ -3,8 +3,8 @@
 // game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
 // dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found.
 // Pets (runtime/hle/pets.c): the Ghost item sits in the equipment panel's free slot (left of the Secret Medicine),
-// ticked once laid to rest; a companion card left of the panel shows who follows Link and switches it (right stick
-// click). The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
+// ticked once laid to rest; a companion card left of the panel shows who follows Link and switches it (the page
+// cursor reaches it with LEFT from the grid, pets.c). The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,12 +22,14 @@ int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in thi
 int pets_ghost_state(void);    // runtime/hle/pets.c: -1 no Ghost item, 0 found, 1 laid to rest
 int pets_menu_options(int out[6]);
 int pets_current(void);
+int pets_menu_slot(void);      // highlighted choice while the cursor is on the companion slot, else -1
 }
 #include "../input_bind.h"
 
 #define DUNGEON_RECORDS (MAIN_BASE + 0x1CBB220 + 0xE0)  // live save: 0x10-byte records (+0 keys, +1 item bits)
 
 static volatile uint64_t g_items_frame;
+static uint64_t g_items_obj;  // the Items page (x0 of ITEMS_PAGE_SITE); +0x4020 u32 = its cursor (0-11, 4 columns)
 
 #define EVENT_FLAGS (MAIN_BASE + 0x1CBB220 + 0x5DC0)  // live save: GlobalFlags bitfield
 #define TRADE_SLOT (MAIN_BASE + 0x1CBB220 + 0x555A)   // live save: current trade item (1..14, 0 = none)
@@ -46,7 +48,7 @@ static const struct { const char *name, *flag, *done; } kTrade[] = {
 static int g_trade_flag[14], g_trade_done[14];  // -1 = not in the seed's flags.tsv (older seeds: no "done" flags)
 static int g_trade_loaded;
 
-RT_ON_RESET(inventory_overlay_reset) { g_trade_loaded = 0; g_items_frame = 0; }  // (the next seed's flags.tsv)
+RT_ON_RESET(inventory_overlay_reset) { g_trade_loaded = 0; g_items_frame = 0, g_items_obj = 0; }  // (the next seed's flags.tsv)
 
 static void load_trade_flags(void) {
     g_trade_loaded = 1;
@@ -67,13 +69,23 @@ static void load_trade_flags(void) {
 
 static bool flag_set(int i) { return i >= 0 && i < 2048 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1; }
 
-extern "C" void rt_items_page_tick(void) { g_items_frame = renderer_present_count(); }
+extern "C" Cpu *kernel_current_cpu(void);
+extern "C" void rt_items_page_tick(void) {
+    g_items_frame = renderer_present_count();
+    Cpu *c = kernel_current_cpu();
+    if (c) g_items_obj = c->x[0];
+}
 
 static bool items_page_shown(void) {
     uint64_t f = g_items_frame;
     return f && renderer_present_count() - f <= 2;
 }
-extern "C" bool inventory_items_page_shown(void) { return items_page_shown(); }  // (pets.c: the companion button)
+// pets.c (game thread): the grid cursor while the Items page is shown, else -1
+extern "C" int inventory_items_cursor(void) {
+    if (!items_page_shown() || !g_items_obj) return -1;
+    uint32_t i = LD32(g_items_obj + 0x4020);
+    return i < 12 ? (int)i : -1;
+}
 
 static bool companion_card(void) {
     int o[6];
@@ -175,12 +187,44 @@ static void companion_icon(ImDrawList *dl, ImVec2 c, float s, int who) {
     }
 }
 
-// The button that clicks the right stick for the game, in the controller's words (as texpatch.c labels: RS / R3)
-static const char *switch_label(void) {
-    int h = bind_prompt_host(BIND_RSTICK), fam = bind_label_family();
-    if (h == 8) return fam == 2 ? "R3" : "RS";
-    if (h == 7) return fam == 2 ? "L3" : "LS";
-    return bind_pad_label(h, fam);
+// The confirm button (Switch A, wherever it is bound) as the game's prompts draw it: a light disc with the
+// controller's own letter / symbol (texpatch.c relabels the game's glyphs the same way)
+static void confirm_glyph(ImDrawList *dl, ImFont *font, ImVec2 c, float r) {
+    int h = bind_prompt_host(BIND_A), fam = bind_label_family();
+    ImU32 bg = IM_COL32(240, 232, 210, 255), fg = IM_COL32(52, 38, 20, 255);
+    dl->AddCircleFilled(c, r, bg, 24);
+    float t = r * 0.16f;
+    if (fam == 2 && h >= 0 && h <= 3) {  // PlayStation: cross / circle / square / triangle (south, east, west, north)
+        float k = r * 0.45f;
+        if (h == 0) {
+            dl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), fg, t);
+            dl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), fg, t);
+        } else if (h == 1) {
+            dl->AddCircle(c, k, fg, 20, t);
+        } else if (h == 2) {
+            dl->AddRect(ImVec2(c.x - k * 0.85f, c.y - k * 0.85f), ImVec2(c.x + k * 0.85f, c.y + k * 0.85f), fg, 0, 0, t);
+        } else {
+            dl->AddTriangle(ImVec2(c.x, c.y - k), ImVec2(c.x + k, c.y + k * 0.7f), ImVec2(c.x - k, c.y + k * 0.7f), fg, t);
+        }
+        return;
+    }
+    static const char *const nin[4] = {"B", "A", "Y", "X"}, *const xb[4] = {"A", "B", "X", "Y"};  // south east west north
+    const char *l = h >= 0 && h <= 3 ? (fam == 1 ? xb[h] : nin[h]) : bind_pad_label(h, fam);
+    float fs = r * 1.45f;
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, l);
+    dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), fg, l);
+}
+
+// The game's cursor look: four yellow corner brackets
+static void cursor_frame(ImDrawList *dl, ImVec2 a, ImVec2 b, float u) {
+    ImU32 col = IM_COL32(250, 226, 90, 255);
+    float l = 16 * u, t = 4 * u;
+    ImVec2 c[4] = {a, ImVec2(b.x, a.y), b, ImVec2(a.x, b.y)};
+    for (int k = 0; k < 4; k++) {
+        float sx = k == 1 || k == 2 ? -1.0f : 1.0f, sy = k >= 2 ? -1.0f : 1.0f;
+        ImVec2 p[3] = {ImVec2(c[k].x, c[k].y + sy * l), c[k], ImVec2(c[k].x + sx * l, c[k].y)};
+        dl->AddPolyline(p, 3, col, 0, t);
+    }
 }
 
 static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
@@ -208,21 +252,28 @@ static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u)
     dl->AddCircleFilled(ic, 28 * u, IM_COL32(120, 92, 40, 235), 32);
     dl->AddCircle(ic, 28 * u, IM_COL32(255, 220, 120, 255), 32, 2 * u);
     companion_icon(dl, ic, 44 * u, cur);
-    // every choice, the current one lit
+    // every choice: the one following lit, the slot's own highlight (cursor on the slot) outlined
+    int sel = pets_menu_slot();
     for (int i = 0; i < n; i++) {
         float y = a.y + 104 * u + i * 24 * u;
         bool on = o[i] == cur;
-        if (on) dl->AddRectFilled(ImVec2(a.x + 6 * u, y - 2 * u), ImVec2(b.x - 6 * u, y + 20 * u), IM_COL32(120, 92, 40, 235), 6 * u);
-        text(kShort[o[i]], y, 16 * u, on ? IM_COL32(255, 240, 200, 255) : IM_COL32(170, 150, 115, 230));
+        ImVec2 ra(a.x + 6 * u, y - 2 * u), rb(b.x - 6 * u, y + 20 * u);
+        if (on) dl->AddRectFilled(ra, rb, IM_COL32(120, 92, 40, 235), 6 * u);
+        if (i == sel) dl->AddRect(ra, rb, IM_COL32(250, 226, 90, 255), 6 * u, 0, 2 * u);
+        text(kShort[o[i]], y, 16 * u, on || i == sel ? IM_COL32(255, 240, 200, 255) : IM_COL32(170, 150, 115, 230));
     }
-    // the button: a pill in the menu's prompt colours, "Switch" over it
-    const char *bl = switch_label();
-    float fs = 15 * u, y = b.y - 28 * u;
-    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, bl);
-    ImVec2 pa(cx - ts.x * 0.5f - 7 * u, y), pb(cx + ts.x * 0.5f + 7 * u, y + ts.y + 4 * u);
-    dl->AddRectFilled(pa, pb, IM_COL32(240, 232, 210, 255), (pb.y - pa.y) * 0.5f);
-    dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, y + 2 * u), IM_COL32(52, 38, 20, 255), bl);
-    text("Switch", y - 20 * u, 14 * u, IM_COL32(230, 215, 185, 255));
+    if (sel >= 0) {  // on the slot: the game-style cursor around the card, "(A) Choose" under the list
+        cursor_frame(dl, ImVec2(a.x - 6 * u, a.y - 6 * u), ImVec2(b.x + 6 * u, b.y + 6 * u), u);
+        float y = b.y - 22 * u, fs = 15 * u;
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, "Choose");
+        float w = 22 * u + ts.x, x0 = cx - w * 0.5f;
+        confirm_glyph(dl, font, ImVec2(x0 + 8 * u, y), 9 * u);
+        dl->AddText(font, fs, ImVec2(x0 + 22 * u, y - ts.y * 0.5f), IM_COL32(255, 245, 225, 255), "Choose");
+    } else {  // a hint that the grid's cursor reaches it: an arrow on the card's right edge
+        float y = (a.y + b.y) * 0.5f;
+        dl->AddTriangleFilled(ImVec2(b.x - 4 * u, y - 7 * u), ImVec2(b.x - 4 * u, y + 7 * u), ImVec2(b.x - 12 * u, y),
+                              IM_COL32(214, 176, 92, 230));
+    }
 }
 
 
