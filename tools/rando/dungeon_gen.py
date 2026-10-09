@@ -169,6 +169,20 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     def side_open(room, s):
         return so[room][s]
 
+    # the room's own door actors per side: a one-way door needs its own other half facing it, a locked door its twin
+    # sharing the flag - neither exists between rooms that weren't neighbours (user's Madness seed: impassable
+    # one-way door)
+    own_k = {k: {s: {d[2] for d in cat[k]['doors'] if len(d) > 3 and d[0] == s and not d[2].endswith('(mirror)')}
+                 for s in 'NSWE'} for k in op}
+
+    def doors_fit(a, s, b):
+        ka, kb = own_k[a][s], own_k[b][rooms.OPP[s]]
+        if 'lock' in ka or 'lock' in kb:
+            return False
+        # (a one-way door's halves only work as their vanilla pair - checked in game: Face Shrine 07B's out-half facing
+        # Tail Cave 06E's in-half stays shut; Bottle Grotto 05B -> 04B passes. Callers let original neighbours through)
+        return 'oneway' not in ka and 'oneway' not in kb
+
     chaos_side = {k: {s: bool(op[k][s]) and all(chaos_free(cat, k, s, x[0]) for x in op[k][s]) for s in 'NSWE'}
                   for k in op} if chaos else None
 
@@ -241,6 +255,8 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                         continue
                     a, b = op[room][s], side_open(placed[n], rooms.OPP[s])
                     exact = [x[0] for x in a] == [x[0] for x in b] and (not a or _heights_ok(a, b))
+                    if a and b and _openings_match(a, b) and not doors_fit(room, s, placed[n]):
+                        return None
                     if not _openings_match(a, b) and not (seal and (not a or can_seal(room, s))
                                                           and (not b or can_seal(placed[n], rooms.OPP[s]))):
                         return None
