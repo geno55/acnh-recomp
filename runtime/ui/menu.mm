@@ -1,15 +1,23 @@
-// In-game overlay menu built with Dear ImGui (Metal renderer; input fed from SDL events).
+// In-game overlay menu built with Dear ImGui (Metal renderer on macOS, Vulkan elsewhere; input fed from SDL events).
 //
 // Threads: SDL events arrive on the main thread and are queued; the menu is laid out and drawn on the
 // render thread inside backend_present, after the game image, into the same drawable.
+#ifdef __APPLE__
 #import <Metal/Metal.h>
+#endif
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <pthread.h>
 #include <atomic>
 #include <vector>
 
 #include "imgui.h"
+#ifdef __APPLE__
 #include "imgui_impl_metal.h"
+#else
+#include "imgui_impl_vulkan.h"
+extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+#endif
 
 extern "C" {
 #include "../hle.h"
@@ -284,7 +292,11 @@ static void style_init(void) {
 
 extern "C" void rt_restart_to_title(void);  // runtime/main.c: back to the start screen
 
+#ifdef __APPLE__
 static void init(id<MTLDevice> dev) {
+#else
+static void init(void) {
+#endif
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
@@ -293,7 +305,8 @@ static void init(id<MTLDevice> dev) {
     io.IniFilename = NULL;
     ImFontConfig cfg;
     cfg.OversampleH = 2;
-    const char *paths[] = {"/System/Library/Fonts/Avenir Next.ttc", "/System/Library/Fonts/Helvetica.ttc"};
+    const char *paths[] = {"/System/Library/Fonts/Avenir Next.ttc", "/System/Library/Fonts/Helvetica.ttc",
+                           "C:/Windows/Fonts/segoeui.ttf"};
     for (const char *p : paths) {
         if (!g_font) g_font = io.Fonts->AddFontFromFileTTF(p, 34, &cfg);
         if (g_font && !g_font_big) { ImFontConfig b = cfg; b.FontNo = 0; g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &b); }
@@ -301,7 +314,11 @@ static void init(id<MTLDevice> dev) {
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     if (!g_font_big) g_font_big = g_font;
     style_init();
+#ifdef __APPLE__
     ImGui_ImplMetal_Init(dev);
+#else
+    vk_imgui_backend_init();
+#endif
     g_inited = true;
 }
 
@@ -509,7 +526,13 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     return ok;
 }
 
+#ifdef __APPLE__
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
+    const double tw = target.width, th = target.height;
+#else
+void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
+    const double tw = target_w, th = target_h;
+#endif
     bool open = g_open.load();
     bool toast = toast_active();
     bool inv = !open && inventory_overlay_wanted();
@@ -519,9 +542,13 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
+#ifdef __APPLE__
     if (!g_inited) init(dev);
+#else
+    if (!g_inited) init();
+#endif
     ImGuiIO &io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)target.width, (float)target.height);
+    io.DisplaySize = ImVec2((float)tw, (float)th);
     io.DisplayFramebufferScale = ImVec2(1, 1);
     static double last;
     double now = SDL_GetTicks() / 1000.0;
@@ -529,14 +556,16 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
     last = now;
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window
-    float scale = target.height / 1080.0f;
+    float scale = (float)(th / 1080.0);
     if (scale < 0.45f) scale = 0.45f;
     io.FontGlobalScale = scale;
 
+#ifdef __APPLE__
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = target;
     rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+#endif
     // spacing/rounding follow the output size too (style tuned for 1080 p)
     static ImGuiStyle base;
     static float style_scale = -1;
@@ -546,7 +575,11 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         ImGui::GetStyle().ScaleAllSizes(scale);
         style_scale = scale;
     }
+#ifdef __APPLE__
     ImGui_ImplMetal_NewFrame(rp);
+#else
+    ImGui_ImplVulkan_NewFrame();
+#endif
     ImGui::NewFrame();
 
     if (g_settings.show_fps) {
@@ -654,7 +687,11 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
 
     if (kbd) keyboard_draw(io, scale);
     ImGui::Render();
+#ifdef __APPLE__
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
     [enc endEncoding];
+#else
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+#endif
 }

@@ -74,7 +74,11 @@ void rt_restart_to_title(void) {
 int main(int argc, char **argv) {
     g_argv = argv;
     plat_init();
+#ifdef _WIN32
+    setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
+#else
     setvbuf(stderr, NULL, _IOLBF, 0);
+#endif
     const char *root = "extracted";
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
     for (int i = 1; i < argc; i++) {

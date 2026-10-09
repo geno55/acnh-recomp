@@ -14,8 +14,9 @@ IMGUI    := third_party/imgui
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -Iruntime
 
 GEN_SRC  := $(wildcard generated/main/*.c) $(wildcard generated/sdk/*.c)
-ifeq ($(GEN_SRC),)
-GEN_SRC  := tools/nogen_stub.c  # no generated code yet (make gen): start screen only
+# no generated code yet (make gen): link a stub, the start screen works
+ifeq ($(strip $(GEN_SRC)),)
+GEN_SRC  := tools/nogen_stub.c
 endif
 GEN_OBJ  := $(patsubst %.c,build/obj/%.o,$(patsubst generated/%,%,$(GEN_SRC)))
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
@@ -45,8 +46,8 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 GENFLAGS += -D_FILE_OFFSET_BITS=64
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan-1 \
             -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared
-BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c)
-BACKEND_OBJ := $(patsubst runtime/%.c,build/rt/%.o,$(BACKEND_SRC))
+BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
+BACKEND_OBJ := $(patsubst runtime/%.cpp,build/rt/%.o,$(patsubst runtime/%.c,build/rt/%.o,$(BACKEND_SRC)))
 IMGUI_OBJ += build/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
 endif
@@ -68,6 +69,10 @@ build/obj/tools/%.o: tools/%.c
 build/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@
+
+build/rt/%.o: runtime/%.cpp $(RT_HDRS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(OSFLAGS) -c $< -o $@
 
 build/rt/%.o: runtime/%.m $(RT_HDRS)
 	@mkdir -p $(dir $@)
