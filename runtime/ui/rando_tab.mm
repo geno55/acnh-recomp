@@ -665,8 +665,8 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Ghost", &g_opts.pet_ghost);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The Ghost is an item: found, he follows you and asks for his grave; take him there for the\n"
-                          "grave's check (the Owl). He no longer appears by himself after the Surf Harp.");
+        ImGui::SetTooltip("The Ghost is an item (shown on the Items page; he doesn't take the Rooster's or Marin's place):\n"
+                          "found, walk to his grave for its check (the Owl). He no longer appears by himself after the Surf Harp.");
     ImGui::SameLine();
     ImGui::Checkbox("Marin (desert closed)", &g_opts.pet_marin);
     if (ImGui::IsItemHovered())

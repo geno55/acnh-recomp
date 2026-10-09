@@ -123,7 +123,11 @@ uint64_t pets_menu_buttons(uint64_t b) {
     static bool held;
     bool down = b & RSTICK, edge = down && !held;
     held = down;
-    if (!rando_seed_dir() || !inventory_items_page_shown()) return b;
+    if (!rando_seed_dir()) return b;
+    static int ghost = -2;  // (log the Ghost's steps: found, laid to rest, Owl's check)
+    int gs = ghost_item() ? flag_get(kComp[C_GHOST].found) + flag_get("Ghost4_Clear") + pets_ghost_state() : -2;
+    if (gs != ghost) LOG("[pets] ghost item state %d -> %d\n", ghost, gs), ghost = gs;
+    if (!inventory_items_page_shown()) return b;
     int o[6], n = pets_menu_options(o), cur = pets_current(), i = 0;
     if (edge && n >= 2) {
         while (i < n && o[i] != cur) i++;
