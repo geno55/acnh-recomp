@@ -10,9 +10,12 @@
 // is painted over with the body colour and the new label (Xbox letters, PlayStation symbols, drawn here with a
 // system font / simple geometry) composited in its place. Changed 4x4 blocks are re-encoded to the original format.
 //
-// Labels follow runtime/hle/input.c's mapping by position: Switch A (east) = Xbox B / circle, B (south) = Xbox A /
+// Labels follow the controller bindings (runtime/hle/bindings.c; by position unless remapped): each Switch button's
+// glyph names the controller button now driving it. Defaults: Switch A (east) = Xbox B / circle, B (south) = Xbox A /
 // cross, X (north) = Y / triangle, Y (west) = X / square; L / R = LB / RB, L1 / R1; ZL / ZR = LT / RT, L2 / R2;
-// Plus / Minus = Menu / View, Options / Create. Stick glyphs stay.
+// Plus / Minus = Menu / View, Options / Create. A button remapped on a Nintendo-style pad gets Nintendo letters; one
+// moved to a stick click / the d-pad gets LS / RS (L3 / R3) or an arrow. Stick glyphs stay. (The keyboard has no
+// glyphs of its own: keyboard bindings don't change the prompts.)
 #include "texpatch.h"
 
 #include <math.h>
@@ -22,6 +25,7 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../input_bind.h"
 #include "../settings.h"
 #include "astc.h"
 #include "tegra.h"
@@ -33,6 +37,8 @@
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
+// labels: R_A..R_MINUS = the button that role is on by default; or these
+enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
 
 typedef struct {
     uint8_t role, kind, srgb;
@@ -189,7 +195,45 @@ static bool hide_hero(void) {
     return env >= 0 ? env : g_settings.hide_hero_icon;
 }
 
-uint32_t texpatch_generation(void) { return 1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0); }
+// The label a glyph of `role` gets: whichever button is bound to that Switch input now
+static int prompt_label(int role) {
+    static const int8_t slot[] = {[R_A] = BIND_A, [R_B] = BIND_B, [R_X] = BIND_X, [R_Y] = BIND_Y, [R_L] = BIND_L,
+                                  [R_R] = BIND_R, [R_ZL] = BIND_ZL, [R_ZR] = BIND_ZR, [R_PLUS] = BIND_PLUS,
+                                  [R_MINUS] = BIND_MINUS};
+    if (role < R_A || role > R_MINUS) return role;
+    switch (bind_prompt_host(slot[role])) {
+    case 1 /* east */: return R_A;
+    case 0 /* south */: return R_B;
+    case 3 /* north */: return R_X;
+    case 2 /* west */: return R_Y;
+    case 9 /* left shoulder */: return R_L;
+    case 10 /* right shoulder */: return R_R;
+    case PADB_LTRIGGER: return R_ZL;
+    case PADB_RTRIGGER: return R_ZR;
+    case 6 /* start */: return R_PLUS;
+    case 4 /* back */: return R_MINUS;
+    case 7: return L_LS;
+    case 8: return L_RS;
+    case 11: return L_DUP;
+    case 12: return L_DDOWN;
+    case 13: return L_DLEFT;
+    case 14: return L_DRIGHT;
+    default: return L_OTHER;
+    }
+}
+
+static uint32_t labels_hash(void) {
+    uint32_t h = 0;
+    for (int r = R_A; r <= R_MINUS; r++) h = h * 41 + (uint32_t)(prompt_label(r) - r + 64);
+    return h;
+}
+
+// (a Nintendo-style glyph is only redrawn when its button was remapped)
+static bool restyled(int role, int style) { return style != STYLE_NINTENDO || prompt_label(role) != role; }
+
+uint32_t texpatch_generation(void) {  // (a rebind re-uploads the glyphs, like a style change)
+    return 1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0) + (labels_hash() << 3);
+}
 
 // ------------------------------------------------------------------ block codecs (BC4/BC5, BC1/BC3, ASTC 4x4)
 static void bc4_decode(const uint8_t *b, uint8_t out[16]) {
@@ -441,10 +485,40 @@ static bool draw_text(float *cv, const char *text) {
     return true;
 }
 
-// The new label for `role` (canvas coverage). symbol = true: a square pictogram (fitted by its size, not cap height).
+// The new label `role` (R_* / L_*, canvas coverage). symbol = true: a square pictogram (fitted by its size, not cap
+// height).
 static bool draw_label(int role, int style, float *cv, bool *symbol) {
     memset(cv, 0, sizeof(float) * CV * CV);
-    *symbol = role == R_PLUS || role == R_MINUS || (style == STYLE_PS && role <= R_Y);
+    *symbol = role == R_PLUS || role == R_MINUS || (style == STYLE_PS && role <= R_Y) || role >= L_DUP;
+    if (role >= L_DUP && role <= L_DRIGHT) {  // d-pad: an arrow (drawn pointing up, then turned)
+        static const float up[3][4] = {{128, 228, 128, 40}, {128, 34, 46, 116}, {128, 34, 210, 116}};
+        Seg s[3];
+        for (int i = 0; i < 3; i++) {
+            float p[4];
+            for (int k = 0; k < 4; k += 2) {
+                float x = up[i][k] - 128, y = up[i][k + 1] - 128;
+                float rx = role == L_DUP ? x : role == L_DDOWN ? -x : role == L_DLEFT ? y : -y;
+                float ry = role == L_DUP ? y : role == L_DDOWN ? -y : role == L_DLEFT ? -x : x;
+                p[k] = rx + 128, p[k + 1] = ry + 128;
+            }
+            s[i] = (Seg){p[0], p[1], p[2], p[3]};
+        }
+        draw_segs(cv, s, 3, 16);
+        return true;
+    }
+    if (role == L_OTHER) { draw_ring(cv, 128, 128, 40, 80); return true; }  // a paddle / extra button: a dot
+    if (role == L_LS || role == L_RS)
+        return draw_text(cv, style == STYLE_PS ? (role == L_LS ? "L3" : "R3") : (role == L_LS ? "LS" : "RS"));
+    if (style == STYLE_NINTENDO && role == R_PLUS) {
+        Seg s[2] = {{128, 40, 128, 216}, {40, 128, 216, 128}};
+        draw_segs(cv, s, 2, 18);
+        return true;
+    }
+    if (style == STYLE_NINTENDO && role == R_MINUS) {
+        Seg s[1] = {{40, 128, 216, 128}};
+        draw_segs(cv, s, 1, 18);
+        return true;
+    }
     if (role == R_PLUS) {  // Menu / Options: three bars
         Seg s[3] = {{48, 64, 208, 64}, {48, 128, 208, 128}, {48, 192, 208, 192}};
         draw_segs(cv, s, 3, 15);
@@ -472,8 +546,9 @@ static bool draw_label(int role, int style, float *cv, bool *symbol) {
     }
     static const char *const xbox[] = {"", "B", "A", "Y", "X", "LB", "RB", "LT", "RT"};
     static const char *const ps[] = {"", "", "", "", "", "L1", "R1", "L2", "R2"};
+    static const char *const nin[] = {"", "A", "B", "X", "Y", "L", "R", "ZL", "ZR"};
     if (role > R_ZR) return false;
-    return draw_text(cv, style == STYLE_XBOX ? xbox[role] : ps[role]);
+    return draw_text(cv, style == STYLE_XBOX ? xbox[role] : style == STYLE_PS ? ps[role] : nin[role]);
 }
 
 // Relabel one glyph: img (W x H RGBA8, alpha channel `ach` = the shape), region x0,y0 w,h. flip: the region is
@@ -571,7 +646,7 @@ static void relabel(uint8_t *img, int W, int x0, int y0, int w, int h, int ach, 
         }
         for (int k = 0; k < 4; k++) lab[k] /= nl;
         bool symbol;
-        if (!draw_label(role, style, cv, &symbol)) goto done;
+        if (!draw_label(prompt_label(role), style, cv, &symbol)) goto done;
         // paint the old label (and its anti-aliased fringe) over with the body colour
         for (int i = 0; i < n; i++) {
             int x = i % w, y = i / w, near = 0, in = S[i];
@@ -608,7 +683,7 @@ static void relabel(uint8_t *img, int W, int x0, int y0, int w, int h, int ach, 
             th = s * ch / fmaxf(cw, ch);
             tcx = (sx0 + sx1 + 1) / 2.0f, tcy = (sy0 + sy1 + 1) / 2.0f;
         } else {
-            th = lh;
+            th = role == R_PLUS || role == R_MINUS ? fminf(lw, ih * 0.6f) : lh;  // (remapped Plus / Minus: by "+"'s width)
             if (th * cw / ch > iw * 0.78f) th = iw * 0.78f * ch / cw;
         }
         float tw = th * cw / ch, k = ch / th;  // canvas pixels per glyph pixel
@@ -656,7 +731,11 @@ void texpatch_apply(int id, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t ro
         return;
     }
     int style = prompt_style();
-    if (style == STYLE_NINTENDO) return;
+    if (style == STYLE_NINTENDO) {  // the game's own look, unless a button was remapped
+        bool any = false;
+        for (int rl = R_A; rl <= R_MINUS; rl++) any |= restyled(rl, style);
+        if (!any) return;
+    }
     static pthread_once_t font_once = PTHREAD_ONCE_INIT;
     pthread_once(&font_once, load_font);
     int bw = (int)(w + 3) / 4;
@@ -666,10 +745,10 @@ void texpatch_apply(int id, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t ro
     if (r->role == R_SHEET) {
         for (int g = 0; g < (int)sizeof k_sheet_roles; g++) {
             int y0 = (int)h - (g / 4 + 1) * 64;
-            if (k_sheet_roles[g] && y0 >= 0 && (g % 4 + 1) * 64 <= (int)w)
+            if (k_sheet_roles[g] && y0 >= 0 && (g % 4 + 1) * 64 <= (int)w && restyled(k_sheet_roles[g], style))
                 relabel(img, (int)w, (g % 4) * 64, y0, 64, 64, ach, true, k_sheet_roles[g], style, dirty, bw);
         }
-    } else {
+    } else if (restyled(r->role, style)) {
         relabel(img, (int)w, 0, 0, (int)w, (int)h, ach, false, r->role, style, dirty, bw);
     }
     encode_image(r, img, dirty, blocks, row);

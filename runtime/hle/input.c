@@ -1,7 +1,8 @@
 // Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
 //
-// Keyboard: WASD left stick, arrows D-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR,
-//           Enter = Plus, Backspace = Minus, IJKL-style right stick on numpad 8/4/5/6.
+// Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
+// d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
+// controller by position, Switch A = east).
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -12,11 +13,14 @@
 #include "../nvn/nvn.h"
 #include "../nvn/renderer.h"
 #include "../settings.h"
+#include "../input_bind.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
     BTN_LEFT, BTN_UP, BTN_RIGHT, BTN_DOWN
 };
+
+_Static_assert(BTN_DOWN == BIND_DOWN && BTN_ZL == BIND_ZL, "bindings follow the button bits");
 
 static _Atomic uint64_t key_buttons, pad_buttons;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
@@ -24,42 +28,39 @@ static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad;
 static _Atomic int64_t sampling;
 
+// Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
+static uint8_t test_keys[SDL_SCANCODE_COUNT];
+static _Atomic uint32_t test_pad;
+static bool host_test;  // (then a real controller is left out: the player's own pad must not spoil the test)
+
+static int held_key(int sc) { return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]); }
+
+// Through the bindings (runtime/hle/bindings.c: g_bind_key), read on every key event, so a rebind applies at once.
 static void recompute_keyboard(void) {
-    static const struct { SDL_Scancode sc; int bit; } map[] = {
-        {SDL_SCANCODE_K, BTN_A}, {SDL_SCANCODE_J, BTN_B}, {SDL_SCANCODE_L, BTN_X}, {SDL_SCANCODE_I, BTN_Y},
-        {SDL_SCANCODE_Q, BTN_L}, {SDL_SCANCODE_E, BTN_R}, {SDL_SCANCODE_1, BTN_ZL}, {SDL_SCANCODE_3, BTN_ZR},
-        {SDL_SCANCODE_RETURN, BTN_PLUS}, {SDL_SCANCODE_BACKSPACE, BTN_MINUS},
-        {SDL_SCANCODE_LEFT, BTN_LEFT}, {SDL_SCANCODE_UP, BTN_UP}, {SDL_SCANCODE_RIGHT, BTN_RIGHT},
-        {SDL_SCANCODE_DOWN, BTN_DOWN}, {SDL_SCANCODE_F, BTN_LSTICK}, {SDL_SCANCODE_KP_0, BTN_RSTICK},
-    };
     uint64_t b = 0;
-    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
-        if (keys_down[map[i].sc]) b |= 1ull << map[i].bit;
+    for (int i = 0; i < BIND_PAD_COUNT; i++)
+        if (held_key(g_bind_key[i])) b |= 1ull << i;
     key_buttons = b;
-    key_lx = (keys_down[SDL_SCANCODE_D] - keys_down[SDL_SCANCODE_A]) * 32767;
-    key_ly = (keys_down[SDL_SCANCODE_W] - keys_down[SDL_SCANCODE_S]) * 32767;
-    key_rx = (keys_down[SDL_SCANCODE_KP_6] - keys_down[SDL_SCANCODE_KP_4]) * 32767;
-    key_ry = (keys_down[SDL_SCANCODE_KP_8] - keys_down[SDL_SCANCODE_KP_5]) * 32767;
+    key_lx = (held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT])) * 32767;
+    key_ly = (held_key(g_bind_key[BIND_LS_UP]) - held_key(g_bind_key[BIND_LS_DOWN])) * 32767;
+    key_rx = (held_key(g_bind_key[BIND_RS_RIGHT]) - held_key(g_bind_key[BIND_RS_LEFT])) * 32767;
+    key_ry = (held_key(g_bind_key[BIND_RS_UP]) - held_key(g_bind_key[BIND_RS_DOWN])) * 32767;
 }
 
+// Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
 static void recompute_pad(void) {
-    if (!pad) { pad_buttons = 0; pad_lx = pad_ly = pad_rx = pad_ry = 0; return; }
-    // Nintendo layout by position: east = A, south = B, north = X, west = Y
-    static const struct { SDL_GamepadButton b; int bit; } map[] = {
-        {SDL_GAMEPAD_BUTTON_EAST, BTN_A}, {SDL_GAMEPAD_BUTTON_SOUTH, BTN_B}, {SDL_GAMEPAD_BUTTON_NORTH, BTN_X},
-        {SDL_GAMEPAD_BUTTON_WEST, BTN_Y}, {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L},
-        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R}, {SDL_GAMEPAD_BUTTON_START, BTN_PLUS},
-        {SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS}, {SDL_GAMEPAD_BUTTON_LEFT_STICK, BTN_LSTICK},
-        {SDL_GAMEPAD_BUTTON_RIGHT_STICK, BTN_RSTICK}, {SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT},
-        {SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, BTN_RIGHT},
-        {SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN},
-    };
+    uint32_t host = test_pad;
+    if (pad && !host_test) {
+        for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
+            if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)i)) host |= 1u << i;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) host |= 1u << PADB_RTRIGGER;
+    }
     uint64_t b = 0;
-    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
-        if (SDL_GetGamepadButton(pad, map[i].b)) b |= 1ull << map[i].bit;
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) b |= 1ull << BTN_ZL;
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) b |= 1ull << BTN_ZR;
+    for (int i = 0; i < BIND_PAD_COUNT; i++)
+        if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
     pad_buttons = b;
+    if (!pad || host_test) { pad_lx = pad_ly = pad_rx = pad_ry = 0; return; }
     pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
     pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
     pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
@@ -76,12 +77,13 @@ volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/
 
 // Scripted test runs ignore the user's own input (a key or stick touched while a test drives Link spoils it):
 // LARECOMP_NO_USER_INPUT=1, on by default whenever LARECOMP_INPUT / LARECOMP_DOORJUMP_TEST / LARECOMP_PLACE is set
-// (LARECOMP_NO_USER_INPUT=0 lets it through again).
+// (or LARECOMP_HOST_INPUT / LARECOMP_BIND_TEST; LARECOMP_NO_USER_INPUT=0 lets it through again).
 bool input_user_blocked(const SDL_Event *e) {
     static int on = -1;
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
-        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE"));
+        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
+                                 getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
     if (!on) return false;
@@ -154,6 +156,72 @@ void input_handle_event(const SDL_Event *e) {
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
+// Tests of the bindings, through them like a real player:
+// LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
+//   button (names as in larecomp.ini's bind_* lines: "Z", "Keypad 0", "south", "ltrigger"...).
+// LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
+//   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
+//   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
+static void host_test_frame(uint64_t frame) {
+    static const char *hspec, *bspec;
+    static int init;
+    if (!init) { init = 1; hspec = getenv("LARECOMP_HOST_INPUT"); bspec = getenv("LARECOMP_BIND_TEST"); host_test = hspec; }
+    char buf[2048];
+    if (hspec) {
+        uint8_t keys[SDL_SCANCODE_COUNT] = {0};
+        uint32_t padm = 0;
+        snprintf(buf, sizeof buf, "%s", hspec);
+        char *save = NULL;
+        for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            unsigned long start = 0, len = 10;
+            char dev[8] = "", name[40] = "";
+            if (sscanf(tok, "%lu:%7[a-z]:%39[^:]:%lu", &start, dev, name, &len) < 3) continue;
+            if (frame < start || frame >= start + len) continue;
+            if (!strcmp(dev, "key")) { SDL_Scancode sc = SDL_GetScancodeFromName(name); if (sc) keys[sc] = 1; }
+            else { int h = bind_pad_from_name(name); if (h >= 0) padm |= 1u << h; }
+        }
+        bool kch = memcmp(keys, test_keys, sizeof keys) != 0, pch = padm != test_pad;
+        memcpy(test_keys, keys, sizeof keys);
+        test_pad = padm;
+        if (kch) recompute_keyboard();
+        if (pch) recompute_pad();
+    }
+    if (bspec) {
+        snprintf(buf, sizeof buf, "%s", bspec);
+        char *save = NULL;
+        for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            unsigned long start = 0;
+            char dev[8] = "", in[16] = "", host[40] = "";
+            if (sscanf(tok, "%lu:%7[a-z]:%15[a-z_]:%39[^:]", &start, dev, in, host) < 3) continue;
+            if (!strcmp(dev, "reset")) { if (frame == start) bind_reset(!strcmp(in, "key") ? BIND_DEV_KEY : BIND_DEV_PAD); continue; }
+            int d = !strcmp(dev, "key") ? BIND_DEV_KEY : BIND_DEV_PAD;
+            if (frame == start) {
+                LOG("[input] test: capture %s %s\n", dev, in);
+                bind_capture_begin(d, bind_slot_from_name(in));
+            }
+            if (frame == start + 90 && strcmp(host, "wait")) {
+                SDL_Event e;
+                memset(&e, 0, sizeof e);
+                if (!strcmp(host, "esc") || d == BIND_DEV_KEY) {
+                    e.type = SDL_EVENT_KEY_DOWN;
+                    e.key.scancode = !strcmp(host, "esc") ? SDL_SCANCODE_ESCAPE : SDL_GetScancodeFromName(host);
+                } else {
+                    int h = bind_pad_from_name(host);
+                    if (h >= PADB_LTRIGGER) {
+                        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+                        e.gaxis.axis = h == PADB_LTRIGGER ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+                        e.gaxis.value = 32767;
+                    } else {
+                        e.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+                        e.gbutton.button = (Uint8)h;
+                    }
+                }
+                bind_capture_event(&e);
+            }
+        }
+    }
+}
+
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip the opening on rando seeds)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
@@ -173,6 +241,7 @@ void input_frame(uint64_t frame) {
     }
     extern void watch_arm(void);
     watch_arm();
+    host_test_frame(frame);
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",

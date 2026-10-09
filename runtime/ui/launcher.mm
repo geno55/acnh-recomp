@@ -33,6 +33,8 @@ extern "C" {
 #include "platform.h"
 #include "ui/ui_scale.h"
 #include "settings.h"
+#include "input_bind.h"
+void controls_bindings_draw(float scale);  // ui/controls_ui.mm
 void ui_window_init(void);
 SDL_Window *ui_window(void);
 #ifdef __APPLE__
@@ -324,7 +326,7 @@ static std::vector<std::string> list_seeds() {
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP };
+enum Page { MAIN, SETTINGS, SETUP, CONTROLS };
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
@@ -475,6 +477,7 @@ extern "C" void launcher_run(const char *root) {
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
+        if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -492,6 +495,7 @@ extern "C" void launcher_run(const char *root) {
     while (!play) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (page == CONTROLS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
         }
@@ -615,6 +619,10 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::Combo("Button icons", &g_settings.prompts, prompts, 4);
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("More options are in the in-game menu (Esc).");
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("CONTROLS", true)) page = CONTROLS;
+                ImGui::PushFont(g_font_small);
                 ImGui::Dummy(ImVec2(0, 12 * s));
                 import_fonts();
                 bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
@@ -641,6 +649,19 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                     ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = MAIN; }  // (B / Esc: back)
+                } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
+                ImGui::PushFont(g_font_small);
+                controls_bindings_draw(s);
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                int cap_dev;
+                bind_capture_active(&cap_dev, NULL, NULL);
+                if (menu_item("BACK", true) || (cap_dev < 0 && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                                ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    bind_capture_cancel();
+                    settings_save();
+                    page = SETTINGS;
+                }
                 } else {  // SETUP
                 pthread_mutex_lock(&g_lock);
                 std::string dump = g_dump, keys = g_keys, job = g_job;
