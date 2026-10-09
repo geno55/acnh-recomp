@@ -22,7 +22,8 @@ float widescreen_factor(void) { return g_wide; }
 float widescreen_effect_stretch(uint64_t fs_hash) {
     static const uint64_t k[] = {
         0xffad3b2d795231a7ull,  // Mysterious Woods fog ring (Field 06C...; found 2026-10-09 by skipping shaders)
-        0xd66b33b13b2eac29ull,  // Mysterious Woods haze layer (vertical streaks at the far left at 32:9)
+        0xd66b33b13b2eac29ull,  // Mysterious Woods haze layer
+        0x1372d4fe34dd4bb4ull,  // Mysterious Woods light-shaft boxes (their sides: vertical streaks at the far left)
     };
     if (g_wide <= 1.0f) return 1.0f;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
