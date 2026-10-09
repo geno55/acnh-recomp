@@ -795,7 +795,8 @@ class ItemShuffler(QtCore.QThread):
                     and placements[k].startswith(('compass', 'map', 'stone-beak', 'key-', 'nightmare-key'))
                     and placements[k][-2:-1] == 'D' and placements[k][-1].isdigit()]:
             n = int(placements[key][-1])
-            if key.startswith(f'D{n}-'):
+            # (dungeon room shuffle: the dungeon the check's room is in now, not the one its name says)
+            if self.settings.get('dungeon-of', {}).get(key, key[:2]) == f'D{n}':
                 continue
             placements['indexes'][key] = 9 if n == 0 else n - 1
         # dungeon_indexes = [k for k in placement_tracker if placements[k].startswith(('compass', 'map', 'stone', 'key', 'nightmare'))]
