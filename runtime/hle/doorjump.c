@@ -144,6 +144,8 @@ static uint64_t find_player(uint64_t frame) {
     return g_player;
 }
 
+uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (test hooks elsewhere: hookshot.c)
+
 // LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side> (test): from <frame> on, once the level with jumps has been loaded
 // for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway; the test holds the
 // stick outward (tools/doorjump_test.sh, LARECOMP_INPUT); 300 frames later log the cell he is in
@@ -233,7 +235,7 @@ uint64_t g_test_buttons, g_test_buttons_until;
 int32_t g_stick_lx, g_stick_ly;  // left stick as the player holds it (runtime/hle/input.c)
 
 // LARECOMP_PLACE=<frame>:<x>:<z>[:<script>] (test): put Link at x, z (any level) once the level has been loaded 60
-// frames, then run <script> relative to that moment: steps "<delay>:<L|R|U|D|A|B>:<frames>" separated by '/', e.g.
+// frames, then run <script> relative to that moment: steps "<delay>:<L|R|U|D|A|B|X|Y>:<frames>" separated by '/', e.g.
 // "10:L:8/40:A:6/90:A:6/130:L:30" = face west, lift, throw, walk west (pot tests)
 static long trace_until = -1;  // LARECOMP_DOORJUMP_TRACE: Link's position for 90 frames after each jump / placement
 
@@ -263,7 +265,7 @@ static void place_tick(uint64_t frame) {
                 g_test_ly = k == 'U' ? 32767 : k == 'D' ? -32767 : 0;
                 g_test_stick_until = frame + n;
             } else {
-                g_test_buttons = k == 'A' ? 1 : 2;  // bit 0 A, bit 1 B
+                g_test_buttons = k == 'A' ? 1 : k == 'X' ? 4 : k == 'Y' ? 8 : 2;  // bit 0 A, 1 B, 2 X, 3 Y
                 g_test_buttons_until = frame + n;
             }
             LOG("[place] f%llu script %c for %ld\n", (unsigned long long)frame, k, n);

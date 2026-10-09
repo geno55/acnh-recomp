@@ -878,7 +878,8 @@ void backend_present(NvnTexture *t) {
         static long win_shot = -1;  // LARECOMP_WINDOW_SHOT=<frame>: save the final window image (game + menu)
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         id<MTLTexture> shot_tex = nil;
-        if (win_shot && (long)total_frames + 1 == win_shot) {
+        extern char g_window_shot_request[256];  // test hooks (runtime/hle/hookshot.c): save the next frame here
+        if ((win_shot && (long)total_frames + 1 == win_shot) || g_window_shot_request[0]) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
                                          width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
             td.usage = MTLTextureUsageShaderRead;
@@ -892,8 +893,13 @@ void backend_present(NvnTexture *t) {
         if (shot_tex) {
             [cb waitUntilCompleted];
             // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
-            renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
-            if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+            if (g_window_shot_request[0]) {
+                renderer_save_texture(shot_tex, g_window_shot_request);
+                g_window_shot_request[0] = 0;
+            } else {
+                renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
+                if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+            }
         }
     }
     frames++;

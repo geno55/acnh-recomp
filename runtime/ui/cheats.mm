@@ -73,6 +73,7 @@ extern "C" void cheats_draw(float scale) {
     toggle("Infinite hearts", "health refills to full", &g_settings.cheat_hearts);
     toggle("Infinite ammo", "bombs, arrows and magic powder stay full (for bags you own)", &g_settings.cheat_ammo);
     toggle("Infinite rupees", "999 rupees", &g_settings.cheat_rupees);
+    toggle("Hookshot anything", "latches onto any wall or object (seeds made with it: on)", &g_settings.cheat_hookshot);
     ImGui::Spacing();
     ImGui::SeparatorText("One-time");
     if (ImGui::Button("Max hearts (20)")) {

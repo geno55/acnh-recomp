@@ -354,6 +354,22 @@ def _boss_spawn(gen, a):
 PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
 
 
+# Hookshot anything (runtime/hle/hookshot.c): the hookshot's Shot update (main+0xd7ecc0) loads the attribute word of
+# the surface its ray hit; bit 0x4000 (hookshot target) makes it latch (Adhere) instead of bouncing off (Return).
+HOOKSHOT_ATTR_SITE = 0x7000d7ee9c
+
+
+def _hookshot_attr(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9403bf7, hex(w)  # ldr w23, [sp, #0x38]
+    return ('{ extern uint32_t rt_hookshot_attr(Cpu *, uint32_t); '
+            'c->x[23] = rt_hookshot_attr(c, LD32(c->sp + 0x38)); }'
+            f'  /* {a:#x}: ldr w23, [sp, #0x38] (hookshot hit attribute) */')
+
+
+PATCHES[HOOKSHOT_ATTR_SITE] = _hookshot_attr
+
+
 # 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
 # to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
 # runtime returns the stick's own angle instead (as the community "360 Controls" mod does).
