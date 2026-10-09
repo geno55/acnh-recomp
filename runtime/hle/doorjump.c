@@ -64,7 +64,8 @@ static void load(void) {
                     q->slot[1] == j.own && q->col[0] == j.tcol && q->row[0] == j.trow && q->side[0] == j.tside)
                     j.pair = k;
             }
-            if (j.pair < 0 && g_npairs < 296) {
+            bool self = j.trow == j.row && j.tcol == j.col && j.tside == j.side && j.partner == j.own;
+            if (j.pair < 0 && g_npairs < 296 && !self) {  // (a doorway leading back into itself is a wall: no letter)
                 ChaosPair *q = &g_pairs[g_npairs];
                 strlcpy(q->level, j.level, sizeof q->level);
                 q->col[0] = j.col, q->row[0] = j.row, q->side[0] = j.side, q->slot[0] = j.own;

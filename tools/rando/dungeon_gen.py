@@ -722,6 +722,31 @@ def landing_depth(romfs, room, side, slot, min_tile):
     return 2.2, 0.0
 
 
+def dead_ends(cat, level, layout):
+    """[(cell, side, slot)]: doorways of a Chaos layout that can't jump and don't meet a matching neighbour."""
+    pos = {cell_pos(k): k for k in layout}
+    exits = _exit_sides(cat, ENTRANCES[level])
+    out = []
+    for cell, room in layout.items():
+        c, r = cell_pos(cell)
+        for s in 'NSWE':
+            if cell == ENTRANCES[level] and s in exits:
+                continue
+            nb_home = rooms.neighbour(room, s)
+            if cell == room and nb_home and nb_home not in cat:  # (side-view passage / outside, as in the game)
+                continue
+            dc, dr = rooms.STEP[s]
+            nb = pos.get((c + dc, r + dr))
+            if nb and cell == room and layout[nb] == nb and nb == nb_home:  # original neighbours at home: as in the game
+                continue
+            theirs = [y[0] for y in openings(cat, layout[nb])[rooms.OPP[s]]] if nb else []
+            for x in openings(cat, room)[s]:
+                if x[0] in theirs or chaos_free(cat, room, s, x[0]):
+                    continue
+                out.append((cell, s, x[0]))
+    return out
+
+
 def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
     """Chaos: pairs every free doorway that isn't physically joined with another one (any room of the level, any
     side) -> door_jumps rows (level, cell, side, own centre, partner centre, partner cell, partner side), both ways.
@@ -789,10 +814,22 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
         linked.append(k)
     rest = [x for v in by_comp.values() for x in v]
     rng.shuffle(rest)
+    tree = len(pairs)
     while len(rest) >= 2:
         pairs.append((rest.pop(), rest.pop()))
+    # a room never leads into itself (user 2026-10-09: "rooms shouldn't connect to the same room"): swap partners
+    # between the extra pairs (the spanning tree's pairs join different pieces, so they stay as they are)
+    for i in range(tree, len(pairs)):
+        a, b = pairs[i]
+        if a[1] != b[1]:
+            continue
+        for j in range(tree, len(pairs)):
+            c, d = pairs[j]
+            if j != i and c[1] != b[1] and d[1] != a[1]:
+                pairs[i], pairs[j] = (a, d), (c, b)
+                break
     if rest:
-        pairs.append((rest[0], rest[0]))  # odd one out: back to itself
+        pairs.append((rest[0], rest[0]))  # odd one out: leads back into its own doorway (a wall; no map letter)
     def own_door(cell, side, slot):  # the room's own door in that doorway: arrive past it (it may still be shut)
         return any(not d[2].endswith('(mirror)') and d[0] == side and abs(d[3] - slot) <= 1
                    for d in cat[layout[cell]]['doors'] if len(d) > 3)
@@ -875,6 +912,10 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
                 else:
                     continue
                 break
+        # a doorway that can't jump (wide opening, one-way door...) needs its matching neighbour, else it leads
+        # into the void (user's seed De: 12 such): such a round is dropped
+        if any(dead_ends(cat, lv, out[lv]) for lv in levels):
+            continue
         jumps = []
         for lv in levels:
             j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs)
