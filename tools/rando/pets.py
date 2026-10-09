@@ -17,9 +17,10 @@ Link (save +0x555D) and remembers it (event flag FLAGS[n]) so the in-game menu c
 """
 
 PET_INDEX = 90
-# itemID the dummies carry: PanelDungeonPieceSet (79), never given in a seed. Checked in game: Link holds up the
-# npcKey's model (the pet) and no get message shows (the runtime toasts "<pet> joins you!"). ClothesGreen (17) showed
-# "You got the green tunic!" and no model.
+# itemIDs the dummies carry: CARRIER_ID + n (79-81, unused in the vanilla table). Checked in game: Link holds up the
+# npcKey's model (the pet) and shows the Item.bfevfl entry named after the item key (added below; vanilla has none).
+# ClothesGreen (17) showed "You got the green tunic!" and no model. One ID per pet: the Seashell Mansion present turns
+# its itemKey into the ID and back into the FIRST key with that ID (LAS: why traps have their own IDs).
 CARRIER_ID = 79
 # item name (= logic token) -> (Items.gsheet symbol, npcKey, model file, model name, setting that puts it in the pool)
 PETS = {
@@ -89,7 +90,7 @@ def apply(out_dir, romfs, pets, oead_tools, event_tools):
     d = oead_tools.parseStruct(next(v for v in sheet['values'] if v['symbol'] == 'YoshiDoll'))  # (parsed once,
     for p in pets:                                                                               # like LAS does)
         sym, npc = PETS[p][:2]
-        d.update(symbol=sym, itemID=CARRIER_ID, npcKey=npc, gettingFlag='')
+        d.update(symbol=sym, itemID=CARRIER_ID + ORDER.index(p), npcKey=npc, gettingFlag='')
         sheet['values'].append(oead_tools.dictToStruct(d))
     os.makedirs(ds, exist_ok=True)
     oead_tools.writeSheet(os.path.join(ds, 'Items.gsheet'), sheet)
@@ -108,4 +109,93 @@ def apply(out_dir, romfs, pets, oead_tools, event_tools):
         assert e12.data.params.data['symbol'] == 'WalrusTalked'
         event_tools.insertEventAfter(flow.flowchart, 'Event123', 'Event58')
         event_tools.writeFlow(os.path.join(ev, 'Walrus.bfevfl'), flow)
+    # the get message: GenericItemGetSequenceByKey runs the Item.bfevfl entry named messageEntry - the item key for
+    # constant gives (item_get) and for chests / presents ('' = the key) - so one entry per pet covers every source
+    flow = event_tools.readFlow(path('event', 'Item.bfevfl'))
+    for p in pets:
+        sym = PETS[p][0]
+        if event_tools.findEntryPoint(flow.flowchart, sym) is None:
+            event_tools.addEntryPoint(flow.flowchart, sym)
+            event_tools.createActionChain(flow.flowchart, sym, [('Dialog', 'Show', {'message': f'System:{sym}'})])
+    event_tools.writeFlow(os.path.join(ev, 'Item.bfevfl'), flow)
+    write_messages(out_dir, romfs, pets)
     return len(pets)
+
+
+# ---- "<pet> joins you!" in every language's System.msbt. The name and the colour / end-of-box tags come from the
+# game's own text (Glossary.msbt, System.msbt GetSmallKey); the words around the name are ours: English in full, other
+# languages a short "New companion: <name>!" (gendered where the language needs it; Marin is the one female pet).
+NAME_LABEL = {'rooster': 'glossary_sequence16', 'marin-companion': 'glossary_npc01', 'ghost': 'glossary_npc41'}
+EN_ARTICLE = {'rooster': 'The ', 'marin-companion': '', 'ghost': 'The '}
+# language (folder name minus the region) -> ((before the name, after it) male, female); {i} = Korean subject particle
+TEMPLATES = {
+    'de': (('Neuer Gefährte: ', '!'), ('Neue Gefährtin: ', '!')),
+    'fr': (('Nouveau compagnon : ', ' !'), ('Nouvelle compagne : ', ' !')),
+    'es': (('¡Nuevo compañero: ', '!'), ('¡Nueva compañera: ', '!')),
+    'it': (('Nuovo compagno: ', '!'), ('Nuova compagna: ', '!')),
+    'nl': (('Nieuwe metgezel: ', '!'), ('Nieuwe metgezel: ', '!')),
+    'ru': (('Новый спутник: ', '!'), ('Новая спутница: ', '!')),
+    'ja': (('', 'が なかまに なった！'), ('', 'が なかまに なった！')),
+    'kr': (('', '{i} 동료가 되었다!'), ('', '{i} 동료가 되었다!')),
+}
+CH = {'CN': ('', '成为了伙伴！'), 'TW': ('', '成為了夥伴！')}  # Chinese by region: simplified / traditional
+
+
+def compose(pet, lang, name_raw, get_raw):
+    """lang = message folder (USen, EUfr, JPja, CNch_Validation, ...); raw MSBT text with the terminating NUL"""
+    from keysanity_text import _tokens, COLOR, WAIT
+    t = _tokens(get_raw)
+    colors = [r for k, g, r in t if g == COLOR]
+    on, off = (colors[0], colors[1]) if len(colors) >= 2 else (b'', b'')
+    wait = next((r for k, g, r in reversed(t) if g == WAIT), b'')
+    name = b''.join(r for k, g, r in _tokens(name_raw)).decode('utf-8')
+    code = lang[2:4]
+    if code == 'ch':
+        pre, post = CH[lang[:2]]
+    elif TEMPLATES.get(code):
+        pre, post = TEMPLATES[code][pet == 'marin-companion']
+        if lang.startswith('US'):  # (USfr writes "clé!", EUfr "clé !")
+            post = post.lstrip()
+    else:  # English (and any language without a template)
+        return EN_ARTICLE[pet].encode() + on + name.encode() + off + b' joins you!' + wait + b'\0'
+    if name[:1].islower():  # (glossary names like "fantôme" are lower case)
+        name = name[0].upper() + name[1:]
+    if '{i}' in post:  # 이 after a final consonant, else 가
+        last = ord(name[-1]) - 0xAC00
+        post = post.replace('{i}', '이' if 0 <= last < 11172 and last % 28 else '가')
+    return pre.encode() + on + name.encode() + off + post.encode() + wait + b'\0'
+
+
+def write_messages(out_dir, romfs, pets):
+    import glob
+    import os
+    from keysanity_text import _read
+    from msbt import Msbt
+    n = 0
+    for sysp in sorted(glob.glob(os.path.join(romfs, 'region*', '*', 'message', 'System.msbt'))):
+        rel = os.path.relpath(sysp, romfs)
+        lang = rel.split(os.sep)[1]
+        sysm = Msbt(_read(out_dir, romfs, rel))
+        names = Msbt(_read(out_dir, romfs, rel.replace('System.msbt', 'Glossary.msbt'))).texts
+        for p in pets:
+            if NAME_LABEL[p] in names:
+                sysm.set(PETS[p][0], compose(p, lang, names[NAME_LABEL[p]], sysm.texts['GetSmallKey']))
+                n += 1
+        out = os.path.join(out_dir, 'romfs', rel)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, 'wb') as f:
+            f.write(sysm.pack())
+    return n
+
+
+if __name__ == '__main__':  # preview: pets.py <romfs>  (prints the composed texts for every language)
+    import glob
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from msbt import Msbt, readable
+    for sysp in sorted(glob.glob(os.path.join(sys.argv[1], 'region*', '*', 'message', 'System.msbt'))):
+        lang = sysp.split(os.sep)[-3]
+        names = Msbt(open(sysp.replace('System.msbt', 'Glossary.msbt'), 'rb').read()).texts
+        get = Msbt(open(sysp, 'rb').read()).texts['GetSmallKey']
+        print(f'{lang:16}', ' | '.join(readable(compose(p, lang, names[NAME_LABEL[p]], get)) for p in ORDER))
