@@ -72,7 +72,8 @@ int warp_available(void) { return game_in_play(); }
 bool warp_blocked(const char *locator) {
     if (!strcmp(locator, "Warp_DanpeiHouse") || !strcmp(locator, "Warp_ShellHouseEast")) return true;  // (Manbo, no
                                                                                                     // plain start)
-    static const char *const kSwim[] = {"Field_03O", "Field_15K", "Field_03K", "EagleTowerExit_01A_b"};
+    static const char *const kSwim[] = {"Field_03O", "Field_15K", "Field_03K", "EagleTowerExit_01A_b",  // WaterTopOutForward
+                                        "FishingBoat_01A", "MamboCave_01A"};  // WaterSideOutLeft / Right (swim in)
     for (size_t i = 0; i < sizeof kSwim / sizeof kSwim[0]; i++)
         if (!strcmp(locator, kSwim[i])) return !(LD32(MAIN_BASE + 0x1CBB220 + 0x556C) & 1);
     return false;
