@@ -454,13 +454,13 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
                     dc, dr = STEP[d[0]]
                     boss_cell[level] = cell_name(c + dc, r + dr)
         edges, locks = level_graph(cat, romfs, level, layout, jump_rows, dungeon_gen.openings)
-        lock_count[n] = locks
         start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
         terms = reach_terms(edges, start, region)
         kc = key_counts(edges, start)
         kcs[level] = (kc, n)
         nlocks = len(kc)
         locks = max(locks, nlocks)  # (keys: at least one per lock the layout can meet)
+        lock_count[n] = locks
         for cell, t in terms.items():
             cell_expr[(level, cell)] = dnf_str(resolve_keys(t, kc, n, locks))
         # LAS's cell regions of this dungeon: "reach that cell of the new layout"
@@ -548,21 +548,27 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         lvl0 = next((p for p in places if LEVELS[p[0]][0] == home), places[0])[0]
         dungeon_of[loc] = f'D{LEVELS[lvl0][0]}'
         rewritten += 1
-    # can each dungeon be filled? (keysanity off: its keys go into its own checks; the first lock opened needs at least
-    # min(k) keys, all from checks reachable before any lock) - else the caller plans another layout
+    # can each dungeon be filled? (keysanity off: its keys go into its own checks.) Key j has to sit in a check that
+    # needs at most j-1 keys - else the caller plans another layout
     if settings.get('keysanity', 'off') == 'off':
-        free = {}
+        need_k = {}  # 'Dn' -> [keys each check of the dungeon needs]
         for loc, d in dungeon_of.items():
             v = logic_defs.get(loc, {})
-            if loc in excluded or v.get('type') != 'item':
-                continue
             cond = v.get('condition-basic', '')
-            if not re.search(r'key-D\d|nightmare-key', cond):
-                free[d] = free.get(d, 0) + 1
+            if loc in excluded or v.get('type') != 'item' or 'nightmare-key' in cond:
+                continue
+            need_k.setdefault(d, []).append(max([int(k) for k in re.findall(rf'key-{d}:(\d+)', cond)] or [0]))
         for level, (kc, n) in kcs.items():
-            need = (min(kc.values()) if kc else 0) + 1  # (+ the Nightmare Key)
-            if free.get(f'D{n}', 0) < need:
-                settings['room-logic-unfillable'] = f'{level}: {free.get(f"D{n}", 0)} checks before any lock, needs {need}'
+            ks = sorted(need_k.get(f'D{n}', []))
+            total = lock_count[n]
+            for j in range(1, total + 1):
+                if sum(1 for k in ks if k <= j - 1) < j:
+                    settings['room-logic-unfillable'] = (f'{level}: key {j} of {total} has '
+                                                         f'{sum(1 for k in ks if k <= j - 1)} checks to go in')
+                    break
+            else:
+                if len(ks) < total + DUNGEON_ITEMS:  # (room for the Nightmare Key, Map, Compass, Stone Beak too)
+                    settings['room-logic-unfillable'] = f'{level}: {len(ks)} checks for {total + DUNGEON_ITEMS} dungeon items'
     return (f'{len(layouts)} dungeons, {rewritten} checks rewritten, {unused} in unused rooms (excluded), '
             f'{fallback} without a room (vanilla condition), locks {dict(sorted(lock_count.items()))}')
 
@@ -605,3 +611,43 @@ def boss_door_ok(cat, romfs, level, layout, rows):
                 allowed.add(b)
                 todo.append(b)
     return not (behind - allowed)
+
+
+DUNGEON_ITEMS = 4  # besides the small keys: Nightmare Key, Map, Compass, Stone Beak
+
+
+def fill_ok(cat, romfs, level, layout, rows):
+    """The generator's other check (keysanity off: a dungeon's keys go into its own checks): key j needs a check that
+    takes at most j-1 keys (by the worst-case key rule) - the first lock reached needs as many checks before it as
+    locks reachable from the start. layout: dungeon_gen's. (Only checks with a known room count; apply() checks the
+    finished logic again.)"""
+    import dungeon_gen
+    L = {c.rsplit('_', 1)[1]: r for c, r in layout.items()}
+    edges, locks = level_graph(cat, romfs, level, L, rows, dungeon_gen.openings)
+    start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
+    kc = key_counts(edges, start)
+    total = max(locks, len(kc))
+    n = LEVELS[level][0]
+    cell_k = {}
+    for cell, terms in reach_terms(edges, start, 'in').items():
+        ks = [max([kc.get(a, total) for a in t if a.startswith('LOCK|')] or [0]) for t in terms
+              if not any(a.startswith('nightmare-key') for a in t)]
+        if ks:
+            cell_k[cell] = min(ks)
+    lr = json.load(open(os.path.join(HERE, 'location_rooms.json')))
+    per_room = {}
+    for k, v in lr.items():
+        if v.get('room') and v.get('subtype') != 'boss':
+            per_room[v['room']] = per_room.get(v['room'], 0) + 1
+    ks = []
+    for room, count in per_room.items():
+        cells = [c for c, r in L.items() if r == room and c in cell_k]
+        if not cells:
+            continue
+        k = min(cell_k[c] for c in cells)
+        bl = lock_blocks(romfs, room)
+        if bl:
+            k = max([k] + [kc.get(f'LOCK|{n}|block{b}', 1) for b in bl])
+        ks += [k] * count
+    return (all(sum(1 for k in ks if k <= j - 1) >= j for j in range(1, total + 1)) and
+            sum(1 for k in ks if k <= total) >= total + DUNGEON_ITEMS)
