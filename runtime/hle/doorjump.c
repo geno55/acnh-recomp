@@ -22,7 +22,14 @@
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0
 #define PLAYER_COLLISION_VT (MAIN_BASE + 0x1c501f0)
 
-typedef struct { char level[40]; int col, row; char side; int own, partner, still; int tcol, trow; char tside; } Jump;
+typedef struct { char level[40]; int col, row; char side; int own, partner, still; int tcol, trow; char tside; float depth;
+                 int pair; } Jump;  // pair: Chaos doorway pair (both directions share it), -1 = a neighbour jump
+// Chaos dungeon map letters (runtime/ui/chaos_overlay.mm): a pair's letter shows once Link has walked through either
+// end - remembered in event flag CHAOS_FLAG_BASE + pair (extended flags, runtime/hle/flags_ext.c: saved per slot)
+#define CHAOS_FLAG_BASE 3800
+typedef struct { char level[40]; int col[2], row[2]; char side[2]; int slot[2]; } ChaosPair;
+static ChaosPair g_pairs[296];
+static int g_npairs;
 static Jump *g_jumps;
 static int g_njumps = -1;
 
@@ -39,13 +46,29 @@ static void load(void) {
     while (fgets(line, sizeof line, f)) {
         Jump j;
         char cell[8], side[4], tcell[8], tside[4];
-        int n = sscanf(line, "%39s %7s %3s %d %d %7s %3s", j.level, cell, side, &j.own, &j.partner, tcell, tside);
-        if (n != 5 && n != 7) continue;
+        j.depth = 0.9f;  // how far past the target edge Link lands (Chaos: further when the target has its own door)
+        int n = sscanf(line, "%39s %7s %3s %d %d %7s %3s %f", j.level, cell, side, &j.own, &j.partner, tcell, tside, &j.depth);
+        if (n != 5 && n != 7 && n != 8) continue;
         j.row = atoi(cell);  // "08C" -> row 8, column C
         j.col = cell[2] - 'A';
         j.side = side[0];
-        if (n == 7) {
+        j.pair = -1;
+        if (n >= 7) {
             j.trow = atoi(tcell), j.tcol = tcell[2] - 'A', j.tside = tside[0];
+            // its pair: the reverse row's, if seen already
+            for (int k = 0; k < g_npairs && j.pair < 0; k++) {
+                const ChaosPair *q = &g_pairs[k];
+                if (!strcmp(q->level, j.level) && q->col[1] == j.col && q->row[1] == j.row && q->side[1] == j.side &&
+                    q->slot[1] == j.own && q->col[0] == j.tcol && q->row[0] == j.trow && q->side[0] == j.tside)
+                    j.pair = k;
+            }
+            if (j.pair < 0 && g_npairs < 296) {
+                ChaosPair *q = &g_pairs[g_npairs];
+                strlcpy(q->level, j.level, sizeof q->level);
+                q->col[0] = j.col, q->row[0] = j.row, q->side[0] = j.side, q->slot[0] = j.own;
+                q->col[1] = j.tcol, q->row[1] = j.trow, q->side[1] = j.tside, q->slot[1] = j.partner;
+                j.pair = g_npairs++;
+            }
         } else {  // the neighbour across the edge, its facing side
             j.trow = j.row + (j.side == 'N' ? -1 : j.side == 'S' ? 1 : 0);
             j.tcol = j.col + (j.side == 'W' ? -1 : j.side == 'E' ? 1 : 0);
@@ -112,6 +135,8 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     static long at = -2, placed = -1;
     static char cell[8], side;
     static int er = -1, ec = -1;  // expected cell (the tested jump's target)
+    static float px0, pz0;        // where Link was placed
+    static int tries;
     static uint64_t in_level_since;
     static int was_in;
     if (at == -2) {
@@ -128,7 +153,18 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     was_in = in;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     int row = atoi(cell), col = cell[2] - 'A';
-    if (placed < 0 && (long)frame >= at && in && frame - in_level_since >= 300) {  // (5 s: under load the dungeon entry walk-in still runs after 1 s and overwrites the placement)
+    // place once Link has arrived: the dungeon's fade-in / walk-in runs late under load and would overwrite the
+    // placement - wait until he has moved (the walk-in) and then stood still 60 frames (or 15 s at most)
+    static float lx_, lz_;
+    static int moved_, still_;
+    if (in) {
+        float px_ = pos[0], pz_ = pos[2];
+        if (fabsf(px_ - lx_) > 0.01f || fabsf(pz_ - lz_) > 0.01f) { if (frame - in_level_since > 5) moved_ = 1; still_ = 0; }
+        else still_++;
+        lx_ = px_, lz_ = pz_;
+    }
+    bool arrived = in && frame - in_level_since >= 120 && ((moved_ && still_ >= 60) || frame - in_level_since >= 900);
+    if (placed < 0 && (long)frame >= at && arrived) {
         for (int i = 0; i < g_njumps; i++) {
             const Jump *j = &g_jumps[i];
             if (j->row != row || j->col != col || j->side != side) continue;
@@ -141,6 +177,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             }
             pos[0] = pos2[0] = x;
             pos[2] = pos2[2] = z;
+            px0 = x, pz0 = z;
             er = j->trow, ec = j->tcol;
             g_test_lx = side == 'W' ? -32767 : side == 'E' ? 32767 : 0;  // walk out
             g_test_ly = side == 'N' ? 32767 : side == 'S' ? -32767 : 0;
@@ -148,6 +185,12 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             LOG("[doorjump-test] f%llu placed at (%.2f, %.2f) in %s %c\n", (unsigned long long)frame, x, z, cell, side);
         }
         placed = (long)frame;
+    } else if (placed >= 0 && (long)frame < placed + 120 && !g_jumps_fired && tries < 3 &&
+               (fabsf(pos[0] - px0) > 4.0f || fabsf(pos[2] - pz0) > 4.0f)) {
+        // the dungeon's arrival (fade-in / walk-in, late under load) put Link back at the entrance: place again
+        LOG("[doorjump-test] f%llu placement overwritten (Link at %.2f, %.2f): again\n", (unsigned long long)frame, pos[0], pos[2]);
+        placed = -1;
+        tries++;
     } else if (placed >= 0 && (long)frame == placed + 300) {
         float x = pos[0], z = pos[2];
         int c = (int)floorf(x / 15.0f), r = (int)floorf(z / 12.0f) + 1;
@@ -277,7 +320,7 @@ void doorjump_tick(uint64_t frame) {
         if (rest < 0) rest = getenv("LARECOMP_DJ_REST") ? atoi(getenv("LARECOMP_DJ_REST")) : 24;
         if (j->still < rest || (fabsf(out) > 0.02f && j->still < rest + 8)) continue;
         j->still = 0;
-        float nx = x, nz = z, across = 0.9f;  // just past the edge, in front of the partner doorway
+        float nx = x, nz = z, across = j->depth;  // just past the edge, in front of the partner doorway
         // just inside the target room's doorway on its side (for a neighbour: just past the shared edge)
         float tx0 = 15.0f * j->tcol, tz0 = 12.0f * (j->trow - 1);
         switch (j->tside) {
@@ -292,8 +335,22 @@ void doorjump_tick(uint64_t frame) {
         pos[2] = pos2[2] = nz;
         px = nx, pz = nz;
         g_jumps_fired++;
+        if (j->pair >= 0) { extern void flags_ext_set(int idx); flags_ext_set(CHAOS_FLAG_BASE + j->pair); }
         if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;
         if (g_test_stick_until > frame + 40) g_test_stick_until = frame + 40;  // (test: walk on a little, then stop)
         break;
     }
 }
+
+// Chaos doorway pairs of a level (letters on the dungeon map), index = the pair's number in the seed (its flag)
+int doorjump_chaos_pairs(const char *level, int *ids, int max) {
+    if (g_njumps < 0) load();
+    int n = 0;
+    for (int k = 0; k < g_npairs && n < max; k++)
+        if (!strcmp(g_pairs[k].level, level)) ids[n++] = k;
+    return n;
+}
+void doorjump_chaos_pair(int id, int *col, int *row, char *side, int *slot) {
+    for (int e = 0; e < 2; e++) { col[e] = g_pairs[id].col[e]; row[e] = g_pairs[id].row[e]; side[e] = g_pairs[id].side[e]; slot[e] = g_pairs[id].slot[e]; }
+}
+bool doorjump_chaos_seen(int id) { extern bool flags_ext_get(int idx); return flags_ext_get(CHAOS_FLAG_BASE + id); }

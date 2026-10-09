@@ -183,6 +183,11 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
             rc = n.rsplit('_', 1)[1][:3]
             d[0x3E] = int(rc[:2]) - 1
             d[0x3F] = ord(rc[2]) - ord('A')
+            # floor margin: some rooms' boxes start at y -0.1 (Face Shrine 04A/05A); Link settling after a door jump
+            # dips to -0.14 -> outside every room -> the game puts him back at the entrance. Never above -0.5.
+            for off in (0x04, 0x1C):
+                if struct.unpack_from('<f', d, off)[0] > -0.5:
+                    struct.pack_into('<f', d, off, -0.5)
         e.data = bytes(d)
 
     if starts is not None:

@@ -392,7 +392,61 @@ static void memdump_tick(uint64_t frame) {
     }
 }
 
+// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (RE: pane name at +0xB0,
+// translate +0x30/+0x34, scale +0x48/+0x4C), following pointers up to <depth> levels (default 2)
+static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *seen, int *nseen) {
+    extern int kernel_data_regions(uint64_t *a, uint64_t *s, int max);
+    static uint64_t ra[256], rs[256];
+    static int nr = -1;
+    if (nr < 0) nr = kernel_data_regions(ra, rs, 256);
+    for (uint32_t off = 0; off < 0x800; off += 8) {
+        uint64_t p = LD64(obj + off);
+        bool ok = false;
+        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 <= ra[i] + rs[i];
+        if (!ok) continue;
+        bool dup = false;
+        for (int i = 0; i < *nseen && !dup; i++) dup = seen[i] == p;
+        if (dup || *nseen >= 4096) continue;
+        seen[(*nseen)++] = p;
+        const char *nm = (const char *)(uintptr_t)(p + 0xB0);
+        int len = 0;
+        while (len < 24 && ((nm[len] >= 'A' && nm[len] <= 'Z') || (nm[len] >= 'a' && nm[len] <= 'z') ||
+                            (nm[len] >= '0' && nm[len] <= '9') || nm[len] == '_')) len++;
+        if (len >= 3 && nm[len] == 0 && nm[1] == '_') {
+            const float *f = (const float *)(uintptr_t)p;
+            LOG("[pane] %s+%#x -> %llx '%s' t(%.1f, %.1f) s(%.3f, %.3f) size(%.1f, %.1f)\n", path, off, (unsigned long long)p, nm,
+                f[0x30 / 4], f[0x34 / 4], f[0x48 / 4], f[0x4C / 4], f[0x50 / 4], f[0x54 / 4]);
+        }
+        if (depth > 0) {
+            char sub[256];
+            snprintf(sub, sizeof sub, "%s+%#x", path, off);
+            pane_scan_rec(p, depth - 1, sub, seen, nseen);
+        }
+    }
+}
+
+static void pane_scan_tick(uint64_t frame) {
+    static long at = -2;
+    static uint64_t addr;
+    static int depth = 2;
+    if (at == -2) {
+        at = -1;
+        const char *e = getenv("LARECOMP_PANE_SCAN");
+        if (e && sscanf(e, "%ld:%llx:%d", &at, (unsigned long long *)&addr, &depth) < 2) at = -1;
+    }
+    if (at < 0 || (long)frame != at) return;
+    extern uint64_t g_bt_first_x0;  // fnprof.c: x0 of the first LARECOMP_FNPROF_BT function hit (addr 0 = use it)
+    if (!addr) addr = g_bt_first_x0;
+    LOG("[pane] scanning from %llx\n", (unsigned long long)addr);
+    if (!addr) return;
+    static uint64_t seen[4096];
+    int nseen = 0;
+    pane_scan_rec(addr, depth, "obj", seen, &nseen);
+    LOG("[pane] scan done (%d objects)\n", nseen);
+}
+
 void give_item_tick(Cpu *c, uint64_t frame) {
+    pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
     ptrscan_tick(frame);

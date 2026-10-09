@@ -19,7 +19,9 @@ static uint64_t bt_addrs[256];
 static int bt_n = -1;
 static _Atomic uint8_t bt_done[256];
 
-static void bt_check(uint64_t a, uint64_t lr) {
+uint64_t g_bt_first_x0;
+
+static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
     if (bt_n < 0) {
         bt_n = 0;
         const char *e = getenv("LARECOMP_FNPROF_BT");
@@ -30,15 +32,17 @@ static void bt_check(uint64_t a, uint64_t lr) {
     }
     for (int i = 0; i < bt_n; i++)
         if (bt_addrs[i] == a && !atomic_exchange(&bt_done[i], 1)) {
+            if (i == 0) g_bt_first_x0 = x0;
             void *fr[64];
             int n = backtrace(fr, 64);
-            fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx:\n", (unsigned long long)a, (unsigned long long)lr);
+            fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx x0 %llx:\n", (unsigned long long)a, (unsigned long long)lr,
+                    (unsigned long long)x0);
             backtrace_symbols_fd(fr + 2, n - 2, 2);
         }
 }
 
-void fnprof_hit(uint64_t a, uint64_t lr) {
-    if (bt_n) bt_check(a, lr);
+void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
+    if (bt_n) bt_check(a, lr, x0);
     uint32_t h = (uint32_t)((a >> 2) * 0x9E3779B1u) & (NSLOT - 1);
     for (int n = 0; n < NSLOT; n++, h = (h + 1) & (NSLOT - 1)) {
         uint64_t cur = atomic_load_explicit(&slots[h].addr, memory_order_relaxed);

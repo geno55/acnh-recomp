@@ -390,14 +390,16 @@ JUMPS = True  # mismatched doorways joined by the runtime door jump (runtime/hle
 # neighbour leaves a plain opening (verified 2026-10-08: Tail Cave 08C west -> 07A); the room's own door still
 # works where it is (shutters, locks, bombable walls, pot doors). Not free: water (Link swims - writes ignored),
 # wide openings, one-way doors, the Nightmare-key door, doorways a puzzle object stands in (blocks, statues...).
-CHAOS_DOORS = {'shutter', 'lock', 'cracked', 'potdoor'}
+CHAOS_DOORS = {'shutter', 'lock', 'cracked', 'potdoor'}  # (a jump INTO one lands Link past the door: chaos_pairs depth)
 
 
 def chaos_free(cat, room, side, slot):
     if isinstance(slot, str):
         return False
-    kinds = {d[2].replace('(mirror)', '') for d in cat[room]['doors'] if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1}
-    return kinds <= CHAOS_DOORS
+    doors = [d for d in cat[room]['doors'] if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1]
+    # a door that belonged to the old neighbour ('(mirror)') leaves a plain opening; the room's own door may still be
+    # shut when Link arrives from elsewhere
+    return all(d[2].endswith('(mirror)') or d[2] in CHAOS_DOORS for d in doors)
 
 
 def sealable(side):
@@ -720,10 +722,14 @@ def chaos_pairs(cat, level, layout, entrance, rng):
         pairs.append((rest.pop(), rest.pop()))
     if rest:
         pairs.append((rest[0], rest[0]))  # odd one out: back to itself
+    def own_door(cell, side, slot):  # the room's own door in that doorway: arrive past it (it may still be shut)
+        return any(not d[2].endswith('(mirror)') and d[0] == side and abs(d[3] - slot) <= 1
+                   for d in cat[layout[cell]]['doors'] if len(d) > 3)
     out = []
     for a, b in pairs:
         for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
-            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2]))
+            depth = 2.2 if own_door(y[1], y[2], y[3]) else 0.9
+            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth))
     return out
 
 
@@ -815,6 +821,9 @@ def write_all(romfs, out, layouts, jumps=None):
     """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv."""
     jumps_path = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
     open(jumps_path, 'w').close()
+    if jumps is not None:  # Chaos: discovered doorway pairs are event flags 3800+ (runtime/hle/flags_ext.c)
+        with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'flags_ext'), 'w') as f:
+            f.write('chaos dungeon map letters: event flags 3800+\n')
     shared = FlagMap()
     for lv, L in layouts.items():
         write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,

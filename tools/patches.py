@@ -239,6 +239,21 @@ def _map_page(gen, a):
 PATCHES[MAP_PAGE_SITE] = _map_page
 
 
+# Chaos map letters (runtime/ui/chaos_overlay.mm): main+0xe78740 runs once per frame while the DUNGEON map page is
+# shown (fnprof: map open vs closed in Face Shrine); x0 = the dungeon map page.
+DGN_MAP_SITE = 0x7000e78740
+
+
+def _dgn_map(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10243ff, hex(w)  # sub sp, sp, #0x90
+    return ('{ extern void rt_dgnmap_tick(Cpu *); rt_dgnmap_tick(c); c->sp -= 0x90; }'
+            f'  /* {a:#x}: sub sp, sp, #0x90 (dungeon map page shown) */')
+
+
+PATCHES[DGN_MAP_SITE] = _dgn_map
+
+
 # Debug (LARECOMP_LOG_RESNAME=1): main+0x10def30 builds a resource handle from a name (x2 -> {char *name, ...})
 # and looks it up; the generated-dungeon map crash dereferences a handle whose resource wasn't found.
 RES_NAME_SITE = 0x70010def30

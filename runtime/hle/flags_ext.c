@@ -152,3 +152,9 @@ bool flags_ext_get(int idx) {
     if (idx >= 2048) return false;
     return (LD8(LIVE_FLAGS + (idx >> 3)) >> (idx & 7)) & 1;
 }
+
+// set event flag `idx` (runtime features: Chaos map letters) - only once the bitfield is ours
+void flags_ext_set(int idx) {
+    if (idx < 0 || idx >= 4096 || LD64(FLAG_PTR) != (uint64_t)(uintptr_t)g_buf) return;
+    g_buf[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+}
