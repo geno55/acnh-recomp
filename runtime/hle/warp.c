@@ -428,7 +428,8 @@ static void memdump_tick(uint64_t frame) {
     }
 }
 
-// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (RE: pane name at +0xB0,
+// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (addr 0 = LARECOMP_FNPROF_BT's
+// x0, 1 = the dungeon map page) (RE: pane name at +0xB0,
 // translate +0x30/+0x34, scale +0x48/+0x4C), following pointers up to <depth> levels (default 2)
 static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *seen, int *nseen) {
     extern int kernel_data_regions(uint64_t *a, uint64_t *s, int max);
@@ -438,7 +439,7 @@ static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *s
     for (uint32_t off = 0; off < 0x800; off += 8) {
         uint64_t p = LD64(obj + off);
         bool ok = false;
-        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 <= ra[i] + rs[i];
+        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];  // (-1: wraps)
         if (!ok) continue;
         bool dup = false;
         for (int i = 0; i < *nseen && !dup; i++) dup = seen[i] == p;
@@ -473,6 +474,7 @@ static void pane_scan_tick(uint64_t frame) {
     if (at < 0 || (long)frame != at) return;
     extern uint64_t g_bt_first_x0;  // fnprof.c: x0 of the first LARECOMP_FNPROF_BT function hit (addr 0 = use it)
     if (!addr) addr = g_bt_first_x0;
+    if (addr == 1) { extern uint64_t chaos_dgnmap_obj(void); addr = chaos_dgnmap_obj(); }  // 1 = the dungeon map page
     LOG("[pane] scanning from %llx\n", (unsigned long long)addr);
     if (!addr) return;
     static uint64_t seen[4096];

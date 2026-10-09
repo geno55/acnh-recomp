@@ -381,6 +381,18 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Check tracker on the Map screen", &g_settings.tracker);
     if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
+    {  // room shuffle doorway letters on the dungeon map (runtime/ui/chaos_overlay.mm)
+        static const char *letters[] = {"Off", "As you explore", "As you explore, all with the Map"};
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Dungeon map doorway letters");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(360 * scale);
+        if (ImGui::Combo("##chaos_letters", &g_settings.chaos_letters, letters, 3)) settings_save();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Chaos room shuffle: matching letters (A-A, B-B...) on the dungeon map show which doorways\n"
+                              "connect. As you explore: a pair appears once you've walked through either end. All with the\n"
+                              "Map: every pair of the dungeon once you have its Map.");
+    }
 
     section("Seeds");
     if (g_seeds.empty()) ImGui::TextDisabled("No seeds yet: make one below.");

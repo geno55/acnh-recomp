@@ -27,7 +27,8 @@ typedef struct { char level[40]; int col, row; char side; int own, partner, stil
 // Chaos dungeon map letters (runtime/ui/chaos_overlay.mm): a pair's letter shows once Link has walked through either
 // end - remembered in event flag CHAOS_FLAG_BASE + pair (extended flags, runtime/hle/flags_ext.c: saved per slot)
 #define CHAOS_FLAG_BASE 3800
-typedef struct { char level[40]; int col[2], row[2]; char side[2]; int slot[2]; } ChaosPair;
+typedef struct { char level[40]; int col[2], row[2]; char side[2]; int slot[2]; bool two; } ChaosPair;  // two: both ways
+// (Madness: rows are one-way, each unmatched row is its own pair; 3800-4095 = at most 296 pairs per seed)
 static ChaosPair g_pairs[296];
 static int g_npairs;
 static Jump *g_jumps;
@@ -62,7 +63,7 @@ static void load(void) {
                 const ChaosPair *q = &g_pairs[k];
                 if (!strcmp(q->level, j.level) && q->col[1] == j.col && q->row[1] == j.row && q->side[1] == j.side &&
                     q->slot[1] == j.own && q->col[0] == j.tcol && q->row[0] == j.trow && q->side[0] == j.tside)
-                    j.pair = k;
+                    j.pair = k, g_pairs[k].two = true;
             }
             bool self = j.trow == j.row && j.tcol == j.col && j.tside == j.side && j.partner == j.own;
             if (j.pair < 0 && g_npairs < 296 && !self) {  // (a doorway leading back into itself is a wall: no letter)
@@ -70,6 +71,7 @@ static void load(void) {
                 strlcpy(q->level, j.level, sizeof q->level);
                 q->col[0] = j.col, q->row[0] = j.row, q->side[0] = j.side, q->slot[0] = j.own;
                 q->col[1] = j.tcol, q->row[1] = j.trow, q->side[1] = j.tside, q->slot[1] = j.partner;
+                q->two = false;
                 j.pair = g_npairs++;
             }
         } else {  // the neighbour across the edge, its facing side
@@ -383,4 +385,5 @@ int doorjump_chaos_pairs(const char *level, int *ids, int max) {
 void doorjump_chaos_pair(int id, int *col, int *row, char *side, int *slot) {
     for (int e = 0; e < 2; e++) { col[e] = g_pairs[id].col[e]; row[e] = g_pairs[id].row[e]; side[e] = g_pairs[id].side[e]; slot[e] = g_pairs[id].slot[e]; }
 }
+bool doorjump_chaos_twoway(int id) { return g_pairs[id].two; }  // false: Madness, end 0 leads to end 1 only
 bool doorjump_chaos_seen(int id) { extern bool flags_ext_get(int idx); return flags_ext_get(CHAOS_FLAG_BASE + id); }
