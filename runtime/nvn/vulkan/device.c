@@ -479,17 +479,10 @@ void backend_present(NvnTexture *t) {
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
-        extern bool widescreen_frame_boxed(uint64_t frame);
-        float crop[4] = {0, 0, 1, 1};
-        if (shape != 1.0 && widescreen_frame_boxed(total_frames)) {
-            if (shape > 1.0) {
-                crop[0] = (float)((1.0 - 1.0 / shape) / 2); crop[2] = (float)(1.0 / shape);
-                double nw = vw / shape; vx += (vw - nw) / 2; vw = nw;
-            } else {
-                crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
-                double nh = vh * shape; vy += (vh - nh) / 2; vh = nh;
-            }
-        }
+        // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
+        extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
+        float crop[4];  // uv origin and size
+        widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();
