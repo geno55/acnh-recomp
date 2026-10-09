@@ -114,8 +114,8 @@ def build(seed_dir, romfs):
         room, level = lr.get('room'), lr.get('level')
         g = -1
         cell = None
-        if name.startswith('pot-') or re.match(r'D\d-pot-', name):
-            continue  # pots come from pots.tsv below
+        if name.startswith('pot-') or re.match(r'D\d-pot-', name) or name.startswith('bush-'):
+            continue  # pots and bushes come from pots.tsv / bushes.tsv below
         if level in DUNGEONS or (re.match(r'D(\d)-', name) and not room):
             dk = DUNGEONS.get(level) or name[:2]
             lvname = level or next(k for k, x in DUNGEONS.items() if x == dk)
@@ -178,6 +178,22 @@ def build(seed_dir, romfs):
             key = DUNGEONS.get(lv, lv)
             label = DUNGEONS.get(lv) or lv
             checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': group(key, label, cell), 'flag': int(fl)})
+    # bushsanity (bushes.tsv: level x y z flag): a dot on the bush's Field screen (bush-<screen>-<n>), hidden once cut
+    tsv = os.path.join(seed_dir, 'bushes.tsv')
+    if os.path.exists(tsv):
+        import bushes as bushes_mod
+        names = {}
+        for b in bushes_mod.scan(romfs, leb):
+            r = room_file(b['room'])
+            a = next((a for a in r.actors if a.key == b['key']), None) if r else None
+            if a:
+                names[(round(a.posX, 2), round(a.posZ, 2))] = bushes_mod.location_name(b)
+        for line in open(tsv):
+            lv, x, y, z, fl = line.split()
+            n = names.get((round(float(x), 2), round(float(z), 2)))
+            cell = n and cell_of_field('Field_' + n.split('-')[1])
+            if n in logic and cell:
+                checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': -1, 'flag': int(fl)})
     out = {'settings': {k: 1 for k, v in settings.items() if v is True}, 'nodes': nodes, 'checks': checks,
            'groups': groups, 'logic': settings.get('logic', 'basic')}
     with open(os.path.join(seed_dir, 'tracker.json'), 'w') as f:
