@@ -435,6 +435,9 @@ def main():
         if bush_locs:
             print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
 
+    import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
+    keysanity_text.apply(out_dir, romfs, result['placements'])
+
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
