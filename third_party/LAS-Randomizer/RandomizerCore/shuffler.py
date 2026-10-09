@@ -549,7 +549,9 @@ class ItemShuffler(QtCore.QThread):
             
             # Place the defined vanilla content
             placements[loc] = self.logic_defs[loc]['content']
-            
+
+            if placements[loc] not in items:  # (LAS Recomp: say which, instead of a bare ValueError)
+                raise ValueError(f"vanilla content {placements[loc]!r} of {loc} is not in the item pool")
             items.remove(placements[loc])
             access = self.removeAccess(access, placements[loc])
             locations.remove(loc)

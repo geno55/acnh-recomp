@@ -252,16 +252,24 @@ def main():
         import dungeon_gen
         import room_logic
         cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
-        if room_mode == 'chaos':
-            layouts, jumps = dungeon_gen.plan_all_chaos(cat, settings['seed'], romfs)
-            logic_rows = jumps
-        else:
-            layouts, jumps = dungeon_gen.plan_all(cat, settings['seed'], romfs), None
-            logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
-        room_plan = (layouts, jumps)
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
-        print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
-              flush=True)
+        base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
+        for attempt in range(6):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
+            sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
+            if room_mode == 'chaos':
+                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs)
+                logic_rows = jumps
+            else:
+                layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
+                logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
+            logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
+            print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
+                  flush=True)
+            why = settings.pop('room-logic-unfillable', None)
+            if not why:
+                break
+            print('room layout can\'t be filled -', why, '- planning another', flush=True)
+        room_plan = (layouts, jumps)
 
     result = {}
     errors = []

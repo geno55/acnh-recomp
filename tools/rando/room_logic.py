@@ -163,6 +163,63 @@ ONEWAY_OUT, ONEWAY_IN = 0x1A3, 0x1A4  # ObjOnewayDoor halves: the room Link leav
                                      # (Bottle Grotto 05B 0x1A3 -> Hinox room 04B 0x1A4, as LAS's logic goes)
 
 
+_lock_cache = {}
+
+
+def lock_flag(romfs, room, side):
+    """The 'opened' flag of the room's own ObjLockDoor (0xED) on that side, or None. A vanilla locked door is two
+    actors - one in each room - sharing this flag, so one key opens both halves: locks are counted by flag."""
+    if room not in _lock_cache:
+        import sys
+        sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
+        from RandomizerCore.Tools import leb
+        import rooms as _rooms
+        out = []
+        try:
+            r = leb.Room(open(_rooms._leb_path(romfs, room), 'rb').read())
+            col, row = cell_pos(room.rsplit('_', 1)[1])
+            x0, z0 = 15.0 * col, 12.0 * (row - 1)
+            for a in r.actors:
+                if a.type != 0xED:
+                    continue
+                lx, lz = a.posX - x0, a.posZ - z0
+                d = {'W': lx, 'E': 15.0 - lx, 'N': lz, 'S': 12.0 - lz}
+                sd = min(d, key=d.get)
+                flag = next((i for t, i in a.switches if t == 1), None)
+                out.append((sd, flag))
+        except (OSError, ValueError):
+            pass
+        _lock_cache[room] = out
+    for sd, flag in _lock_cache[room]:
+        if sd == side:
+            return flag
+    return None
+
+
+_block_cache = {}
+
+
+def lock_blocks(romfs, room):
+    """The 'opened' flags of the room's keyhole blocks (ObjLockBlock 0x102): each takes a small key. What a block
+    guards inside its room isn't known, so the logic asks for it for the room's checks and for leaving the room
+    through its other doorways (entering stays free)."""
+    if room not in _block_cache:
+        import sys
+        sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
+        from RandomizerCore.Tools import leb
+        import rooms as _rooms
+        out = []
+        try:
+            r = leb.Room(open(_rooms._leb_path(romfs, room), 'rb').read())
+            for a in r.actors:
+                if a.type == 0x102:
+                    out.append(next((i for t, i in a.switches if t == 1), None) or f'{room}-{len(out)}')
+        except (OSError, ValueError):
+            pass
+        _block_cache[room] = out
+    return _block_cache[room]
+
+
 def door_terms(types, n, entering=False, room_types=(), lock_id=''):
     """frozenset of requirement atoms for passing these door types, or None if impassable. entering: going INTO the
     room that owns the doors (else leaving it). A one-way door passes one way: out of the room with the 0x1A3 half,
@@ -253,11 +310,14 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
     n = LEVELS[level][0]
     pos = {cell_pos(c): c for c in layout}
     edges = {c: [] for c in layout}
-    locks = 0
+    flags = set()  # distinct locks: one per 'opened' flag (a vanilla door's two halves share it)
     for cell, room in layout.items():
         for d in cat.get(room, {}).get('doors', []):
             if len(d) > 3 and d[2] == 'lock':
-                locks += 1
+                flags.add(lock_flag(romfs, room, d[0]) or (room, d[0]))
+    for room in set(layout.values()):
+        flags.update(('block', b) for b in lock_blocks(romfs, room))
+    locks = len(flags)
     jumped = set()
     for row in jump_rows:
         if row[0] != level:
@@ -273,7 +333,7 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
         if target not in layout:
             continue
         req = door_terms(own_doors(cat, layout[cell], side, own), n, room_types=cat[layout[cell]].get('types', ()),
-                         lock_id=f'{cell}{side}{own}')
+                         lock_id=lock_flag(romfs, layout[cell], side) or f'{cell}{side}{own}')
         if req is not None:
             edges[cell].append((target, req))
     for cell, room in layout.items():
@@ -295,12 +355,17 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
                 if (cell, side, slot) in jumped or (slot not in theirs and not home_pair):
                     continue
                 req_out = door_terms(own_doors(cat, room, side, slot), n, room_types=cat[room].get('types', ()),
-                                     lock_id=f'{cell}{side}{slot}')
+                                     lock_id=lock_flag(romfs, room, side) or f'{cell}{side}{slot}')
                 req_in = door_terms(own_doors(cat, layout[nb], OPP[side], slot), n, entering=True,
-                                    room_types=cat[layout[nb]].get('types', ()), lock_id=f'{nb}{OPP[side]}{slot}')
+                                    room_types=cat[layout[nb]].get('types', ()),
+                                    lock_id=lock_flag(romfs, layout[nb], OPP[side]) or f'{nb}{OPP[side]}{slot}')
                 if req_out is None or req_in is None:
                     continue
                 edges[cell].append((nb, req_out | req_in))
+    for cell, room in layout.items():  # leaving a room with keyhole blocks: they may guard the way (see lock_blocks)
+        bl = frozenset(f'LOCK|{n}|block{b}' for b in lock_blocks(romfs, room))
+        if bl:
+            edges[cell] = [(t, r | bl) for t, r in edges[cell]]
     for a, b in stairs_links(romfs, level, cat):
         ca, cb = a.rsplit('_', 1)[1], b.rsplit('_', 1)[1]
         if layout.get(ca) == a and layout.get(cb) == b:  # (stairs rooms stay home)
@@ -378,6 +443,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
     logic_defs['rs-shutter'] = {'type': 'interaction', 'condition-basic': SHUTTER}
     boss_cell = {}
     junk_delta = [0]
+    kcs = {}
     for level, layout in layouts.items():
         n, region = LEVELS[level]
         for cell, room in layout.items():
@@ -392,6 +458,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
         terms = reach_terms(edges, start, region)
         kc = key_counts(edges, start)
+        kcs[level] = (kc, n)
         nlocks = len(kc)
         locks = max(locks, nlocks)  # (keys: at least one per lock the layout can meet)
         for cell, t in terms.items():
@@ -403,22 +470,28 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
                 logic_defs[k]['condition-basic'] = cell_expr.get((level, cell)) or f'nightmare-key-D{n} & !nightmare-key-D{n}'
         # small keys: as many as the new layout has locks (the pool keeps its size: extra keys replace junk, fewer
         # keys leave room for junk - LAS has exactly one item per location)
-        if f'key-D{n}' in item_defs:
+        if f'key-D{n}' in item_defs:  # exactly one per lock (user: no spare keys)
             delta = locks - item_defs[f'key-D{n}']['quantity']
             item_defs[f'key-D{n}']['quantity'] = locks
             junk_delta[0] += delta
-    # balance the pool: take (or give back) junk for the keys added (or removed)
-    junk = sorted((k for k, d in item_defs.items() if k.startswith(('rupee-', 'chamber-stone')) and d.get('quantity', 0) > 0),
-                  key=lambda k: -item_defs[k]['quantity'])
+    # balance the pool (LAS: one item per location): take junk for keys added, give junk back for keys removed. Only
+    # what no check could still claim as its vanilla content is taken (the Color Dungeon's rupees stay vanilla and
+    # need their 5-rupee items: seed RapidBowWow994)
+    claimed = {}
+    for v in logic_defs.values():
+        if v.get('type') == 'item' and v.get('content'):
+            claimed[v['content']] = claimed.get(v['content'], 0) + 1
     left = junk_delta[0]
-    while left > 0 and junk:
-        for k in junk:
-            if left and item_defs[k]['quantity'] > 0:
-                item_defs[k]['quantity'] -= 1
-                left -= 1
-        junk = [k for k in junk if item_defs[k]['quantity'] > 0]
-    if left < 0 and junk:
-        item_defs[junk[0]]['quantity'] -= left
+    while left > 0:
+        spare = sorted((k for k, d in item_defs.items() if k.startswith(('rupee-', 'chamber-stone'))
+                        and d.get('quantity', 0) - claimed.get(k, 0) > 0),
+                       key=lambda k: claimed.get(k, 0) - item_defs[k]['quantity'])
+        if not spare:
+            break
+        item_defs[spare[0]]['quantity'] -= 1
+        left -= 1
+    if left < 0 and 'rupee-20' in item_defs:
+        item_defs['rupee-20']['quantity'] -= left
     shuffled = {LEVELS[lv][0] for lv in layouts}
     region_tok = {k for k, v in logic_defs.items() if v.get('type') in ('room', 'region')}
 
@@ -451,7 +524,15 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             v['condition-basic'] = re.sub(r'&\s*&', '&', v['condition-basic']).strip(' &') or LEVELS[lv][1]
             continue
         places = rooms_at.get(room, [])
-        reach = [cell_expr[p] for p in places if cell_expr.get(p)]
+        def with_blocks(p):  # a check in a room with keyhole blocks: they may guard it
+            e = cell_expr.get(p)
+            bl = lock_blocks(romfs, room)
+            if not e or not bl or p[0] not in kcs:
+                return e
+            kc, n = kcs[p[0]]
+            k = max(kc.get(f'LOCK|{n}|block{b}', 1) for b in bl)
+            return f'({e}) & key-D{n}:{k}'
+        reach = [with_blocks(p) for p in places if cell_expr.get(p)]
         if not reach and any(p[1] == room.rsplit('_', 1)[1] and p[0] == room.rsplit('_', 1)[0] for p in places):
             fallback += 1  # a room at home the graph can't enter (no doorways: Bottle Grotto 03C, reached by a fall):
             continue       # its vanilla condition, on the redefined cell regions
@@ -467,6 +548,21 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         lvl0 = next((p for p in places if LEVELS[p[0]][0] == home), places[0])[0]
         dungeon_of[loc] = f'D{LEVELS[lvl0][0]}'
         rewritten += 1
+    # can each dungeon be filled? (keysanity off: its keys go into its own checks; the first lock opened needs at least
+    # min(k) keys, all from checks reachable before any lock) - else the caller plans another layout
+    if settings.get('keysanity', 'off') == 'off':
+        free = {}
+        for loc, d in dungeon_of.items():
+            v = logic_defs.get(loc, {})
+            if loc in excluded or v.get('type') != 'item':
+                continue
+            cond = v.get('condition-basic', '')
+            if not re.search(r'key-D\d|nightmare-key', cond):
+                free[d] = free.get(d, 0) + 1
+        for level, (kc, n) in kcs.items():
+            need = (min(kc.values()) if kc else 0) + 1  # (+ the Nightmare Key)
+            if free.get(f'D{n}', 0) < need:
+                settings['room-logic-unfillable'] = f'{level}: {free.get(f"D{n}", 0)} checks before any lock, needs {need}'
     return (f'{len(layouts)} dungeons, {rewritten} checks rewritten, {unused} in unused rooms (excluded), '
             f'{fallback} without a room (vanilla condition), locks {dict(sorted(lock_count.items()))}')
 
