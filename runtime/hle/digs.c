@@ -41,7 +41,6 @@ bool flags_ext_get(int idx);
 void flags_ext_set(int idx);
 void flags_ext_clear(int idx);
 uint64_t doorjump_player(uint64_t frame);
-extern void ui_toast(const char *text);
 
 typedef struct { bool dig, hole; float y; char *name, *ops; } Tile;  // hole: reopen it (no plant grows there)
 static Tile *g_tiles;       // NTILES
@@ -51,6 +50,23 @@ static uint32_t g_zone = 1;       // zone id the shovel passes (1 on the Field; 
 static int g_queue[64], g_nq;     // dug tiles whose item is still to be given
 static FILE *g_test_out;          // (dig test: LARECOMP_DIG_TEST)
 static uint8_t g_spawns[NTILES];  // holes reopened per tile since the Field loaded (3 that didn't stay: give up)
+
+static int g_field_was;           // (the tick: on the Field / which scene, last frame)
+static uint64_t g_scene_was;
+static uint64_t g_scratch;        // guest memory for the hole spawn's arguments
+
+// Reboot (another seed / vanilla, in place): its own dig table and nothing dug; the holes were guest memory.
+RT_ON_RESET(digs_reset) {
+    if (g_tiles)
+        for (int g = 0; g < NTILES; g++) free(g_tiles[g].name), free(g_tiles[g].ops);
+    free(g_tiles);
+    g_tiles = NULL;
+    g_on = -1;
+    memset(g_alive, 0, sizeof g_alive);
+    memset(g_spawns, 0, sizeof g_spawns);
+    g_zone = 1, g_nq = 0;
+    g_field_was = 0, g_scene_was = 0, g_scratch = 0;
+}
 
 static bool enabled(void) {
     if (g_on >= 0) return g_on;
@@ -165,15 +181,12 @@ static void give(Cpu *c, int g) {
             break;
         }
     }
-    char msg[160];
-    snprintf(msg, sizeof msg, "Dug up: %s", t->name);
-    ui_toast(msg);
     LOG("[digs] gave %s (%s)\n", t->name, t->ops);
 }
 
 static void spawn_hole(Cpu *c, int g) {
-    static uint64_t scratch;
-    if (!scratch) scratch = (uint64_t)(uintptr_t)hle_alloc(0x100);
+    uint64_t scratch = g_scratch;
+    if (!scratch) scratch = g_scratch = (uint64_t)(uintptr_t)hle_alloc(0x100);
     uint64_t mgr = LD64(GAME_MGR);
     if (!mgr) return;
     uint8_t *s = (uint8_t *)(uintptr_t)scratch;
@@ -335,15 +348,13 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
     memcpy(saved, c->x, sizeof saved);
     for (int i = 0; i < g_nq; i++) give(c, g_queue[i]);
     g_nq = 0;
-    static int field_was;
     int field = on_field();
-    static uint64_t scene_was;
     uint64_t mgr = LD64(GAME_MGR), scene = mgr ? LD64(mgr + 0x4a8) : 0;
-    if (field != field_was || scene != scene_was) {  // left / (re)loaded the Field: drop the refs of holes gone
+    if (field != g_field_was || scene != g_scene_was) {  // left / (re)loaded the Field: drop the refs of holes gone
         for (int g = 0; g < NTILES; g++)
             if (g_alive[g] && !hole_alive(g)) { c->x[0] = g_alive[g]; g_alive[g] = 0; guest_call(c, WEAK_RELEASE); }
         memset(g_spawns, 0, sizeof g_spawns);
-        field_was = field, scene_was = scene;
+        g_field_was = field, g_scene_was = scene;
     }
     if (field && frame % 8 == 0) {
         uint64_t pc0 = doorjump_player(frame);

@@ -14,6 +14,7 @@
 
 #include "nvn.h"
 #include "renderer.h"
+#include "texpatch.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -161,6 +162,8 @@ typedef struct {
     uint64_t frame_cleared;  // LARECOMP_FRAME_CLEAR: frame it was last cleared at first use
     float sx, sy;        // allocation scale relative to the guest's size
     int reg;             // slot in g_reg (live textures, for the "largest textures" dump) + 1
+    int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
+    uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
 } TexBackend;
 
 // Live textures (diagnostics: the overworld slowdown at 32:9 - the same textures used 870 MB and 4x the GPU time
@@ -444,15 +447,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    if (!full) {
+    if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
+    if (!full && !restyle) {
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
     uint64_t h = hash_full(mem, total);
     b->full_frame = g_frame_counter;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->uploaded && h == b->data_hash) return;
-    if (b->uploaded) b->dynamic = true;
+    if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
     // callers without an encoder get a private upload command buffer, created only when needed
@@ -473,6 +479,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
+            if (b->tp > 0 && lv == 0 && layer == 0) texpatch_apply(b->tp - 1, lin, l.w, l.h, row);
             uint8_t *data = lin;
             uint32_t out_row = row;
             static int bc5log;  // LARECOMP_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
@@ -577,6 +584,51 @@ void backend_init(void) {
 }
 
 id<MTLCommandQueue> renderer_queue(void) { return queue; }
+
+// ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
+static NvnTexture *g_last_presented;
+// Every game texture goes (the NvnTexture structs themselves are leaked: guest memory pointed at them), the
+// renderer drops what is keyed by guest addresses / objects, and the heap wrapper is let go: guest memory is
+// about to be replaced (backend_guest_memory_reset wraps the new pages).
+void backend_reset(void) {
+    if (!queue) return;  // the game never initialised NVN
+    extern void renderer_reset(void);
+    extern void renderer_flush(void);
+    renderer_flush();  // (everything submitted has completed)
+    int n = g_reg_n;
+    while (g_reg_n > 0) backend_texture_destroyed(g_reg[g_reg_n - 1]);
+    renderer_reset();
+    g_last_presented = NULL;
+    g_guest_buffer = nil;
+    LOG("[metal] reboot: %d textures released (%d left alive, %.0f MB)\n", n, g_tex_live, g_tex_live_bytes / 1048576.0);
+}
+
+void backend_guest_memory_reset(void) {
+    if (!queue) return;
+    g_guest_buffer = [dev newBufferWithBytesNoCopy:(void *)HEAP_BASE length:HEAP_MAX
+                                           options:MTLResourceStorageModeShared deallocator:nil];
+    if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer\n");
+}
+
+// The window goes black while the game is down (instead of holding its last frame).
+void backend_clear_window(void) {
+    if (!layer || !dev) return;
+    @autoreleasepool {
+        id<CAMetalDrawable> drawable = [layer nextDrawable];
+        if (!drawable) return;
+        id<MTLCommandQueue> q = queue ? queue : [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = drawable.texture;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+        [cb presentDrawable:drawable];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
 
 // ================================================================== screenshots
 #import <ImageIO/ImageIO.h>
@@ -731,7 +783,6 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
 
 static double last_fps_time;
 
-static NvnTexture *g_last_presented;
 void backend_present(NvnTexture *t);
 // Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
 // keeps drawing and taking input.
@@ -778,18 +829,10 @@ void backend_present(NvnTexture *t) {
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         bool reshape = shape != 1.0;
-        // Interior frames (16:9 backdrop drawn): show only the centre 16:9 region of the image.
-        extern bool widescreen_frame_boxed(uint64_t frame);
-        float crop[4] = {0, 0, 1, 1};  // uv origin and size
-        if (shape != 1.0 && widescreen_frame_boxed(total_frames)) {
-            if (shape > 1.0) {
-                crop[0] = (float)((1.0 - 1.0 / shape) / 2); crop[2] = (float)(1.0 / shape);
-                double nw = vw / shape; vx += (vw - nw) / 2; vw = nw;
-            } else {
-                crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
-                double nh = vh * shape; vy += (vh - nh) / 2; vh = nh;
-            }
-        }
+        // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
+        extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
+        float crop[4];  // uv origin and size
+        widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         {   // (diagnostics) log output scale / drawable changes
             static double psx, psy, pdw, pdh;
@@ -835,7 +878,8 @@ void backend_present(NvnTexture *t) {
         static long win_shot = -1;  // LARECOMP_WINDOW_SHOT=<frame>: save the final window image (game + menu)
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         id<MTLTexture> shot_tex = nil;
-        if (win_shot && (long)total_frames + 1 == win_shot) {
+        extern char g_window_shot_request[256];  // test hooks (runtime/hle/hookshot.c): save the next frame here
+        if ((win_shot && (long)total_frames + 1 == win_shot) || g_window_shot_request[0]) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
                                          width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
             td.usage = MTLTextureUsageShaderRead;
@@ -849,8 +893,13 @@ void backend_present(NvnTexture *t) {
         if (shot_tex) {
             [cb waitUntilCompleted];
             // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
-            renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
-            if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+            if (g_window_shot_request[0]) {
+                renderer_save_texture(shot_tex, g_window_shot_request);
+                g_window_shot_request[0] = 0;
+            } else {
+                renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
+                if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+            }
         }
     }
     frames++;
@@ -865,6 +914,8 @@ void backend_present(NvnTexture *t) {
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
+    reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     static long shot_every = -1;
@@ -924,6 +975,8 @@ void ui_window_init(void) {
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow("Link's Awakening (LAS Recomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();
@@ -936,16 +989,18 @@ SDL_Window *ui_window(void) { return window; }
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 
-void ui_run(void) {
+int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
     // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
     static id activity;
-    activity = [[NSProcessInfo processInfo]
-        beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
-                          reason:@"Game emulation"];
+    if (!activity)
+        activity = [[NSProcessInfo processInfo]
+            beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
+                              reason:@"Game emulation"];
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
+        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }

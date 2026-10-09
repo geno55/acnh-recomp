@@ -108,9 +108,8 @@ const char *renderer_stats(void) {
     return stats_text;
 }
 
-void renderer_init(id<MTLDevice> d) {
-    dev = d;
-    cache = [NSMutableDictionary new];
+static void st_defaults(void) {
+    memset(&st, 0, sizeof st);
     for (int i = 0; i < 16; i++) {
         st.viewport[i][2] = 1280; st.viewport[i][3] = 720;
         st.scissor[i][2] = 16384; st.scissor[i][3] = 16384;
@@ -122,6 +121,12 @@ void renderer_init(id<MTLDevice> d) {
     st.ds[1] = 1; st.ds[2] = 2;
     st.poly[1] = 1; st.poly[2] = 2;
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
+}
+
+void renderer_init(id<MTLDevice> d) {
+    dev = d;
+    cache = [NSMutableDictionary new];
+    st_defaults();
 }
 
 static int g_passes_in_cb;  // render passes encoded into the open command buffer (chunked commits)
@@ -1305,13 +1310,14 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
 // few hardware cbuf slots, so the compiler reads the rest through global memory), 0x310 + 16*i
 // storage buffers; each table entry is {addr_lo, addr_hi, size, 0}.
 typedef struct { id<MTLComputePipelineState> pipe; ShaderInfo *si; uint32_t local[3]; bool failed; } CsProg;
+static NSMutableDictionary *g_cs_progs;  // code address -> CsProg
 
 static CsProg *compute_program(NvnProgram *p) {
     NvnShaderStage *ss = &p->stages[5];
     if (!ss->code_addr) return NULL;
     NSValue *key = [NSValue valueWithPointer:(void *)(uintptr_t)ss->code_addr];
-    static NSMutableDictionary *progs;
-    if (!progs) progs = [NSMutableDictionary new];
+    NSMutableDictionary *progs = g_cs_progs;
+    if (!progs) progs = g_cs_progs = [NSMutableDictionary new];
     NSValue *v = progs[key];
     if (v) { CsProg *cp = v.pointerValue; return cp->failed ? NULL : cp; }
     CsProg *cp = calloc(1, sizeof *cp);
@@ -1545,6 +1551,11 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
 
 // ---- pipeline cache keyed by a hash of the raw state that shapes the pipeline (avoids building a
 // descriptor and a string key per draw)
+// Pipelines are keyed by their shader functions' addresses: a reboot frees the old functions, so keys carry the
+// boot generation (a build still in flight can't land on a new function at a reused address).
+static unsigned g_boot_gen;
+static NSMutableDictionary *g_ready_pipes;
+
 static uint64_t hmix(uint64_t h, const void *p, size_t n) {
     const uint8_t *b = p;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
@@ -1619,6 +1630,8 @@ static void draw(CmdRec *r, bool indexed) {
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
+        extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
+        if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
         if (last_hash == 0x71fe31bbf03c3515ull && getenv("LARECOMP_LOG_INDOOR")) {
             static uint64_t lf;
             extern uint64_t renderer_present_count(void);
@@ -1720,7 +1733,7 @@ static void draw(CmdRec *r, bool indexed) {
         }
     }
     pd.alphaToCoverageEnabled = st.ms[0xC] != 0;
-    NSMutableString *pk = [NSMutableString stringWithFormat:@"%p %p %lu %lu", pr->vs, pr->fs,
+    NSMutableString *pk = [NSMutableString stringWithFormat:@"%u %p %p %lu %lu", g_boot_gen, pr->vs, pr->fs,
                            (unsigned long)pd.depthAttachmentPixelFormat, (unsigned long)pd.stencilAttachmentPixelFormat];
     for (int i = 0; i < 8; i++) {
         MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[i];
@@ -1736,9 +1749,9 @@ static void draw(CmdRec *r, bool indexed) {
         [pk appendFormat:@" l%lu/%lu/%lu", (unsigned long)vd.layouts[s].stride, (unsigned long)vd.layouts[s].stepFunction, (unsigned long)vd.layouts[s].stepRate];
     [pk appendFormat:@" s%lu a%d", (unsigned long)pd.rasterSampleCount, pd.alphaToCoverageEnabled];
     id pobj = cache[pk];
-    static NSMutableDictionary *ready_pipes;  // async pipeline builds finished on Metal's threads
+    NSMutableDictionary *ready_pipes = g_ready_pipes;  // async pipeline builds finished on Metal's threads
     static id pending;
-    if (!ready_pipes) { ready_pipes = [NSMutableDictionary new]; pending = [NSObject new]; }
+    if (!ready_pipes) { ready_pipes = g_ready_pipes = [NSMutableDictionary new]; pending = [NSObject new]; }
     if (pobj == pending) {
         @synchronized(ready_pipes) {
             id done = ready_pipes[pk];
@@ -2597,6 +2610,40 @@ static void exec_list(uint64_t handle, int depth) {
         }
         p += r->size;
     }
+}
+
+// In-place reboot (runtime/nvn/metal.m backend_reset; GPU idle, the game's textures already destroyed): drop
+// everything keyed by guest addresses or guest-owned objects - programs (by code address), pipelines (by program),
+// views, snapshots, bound state - so the next boot can't hit a stale entry. Metal's own shader cache stays warm.
+void renderer_reset(void) {
+    renderer_flush();
+    pthread_mutex_lock(&gone_lock);
+    ngone = 0;
+    pthread_mutex_unlock(&gone_lock);
+    for (int i = 0; i < VIEW_TAB; i++) {
+        if (view_tab[i].view) CFRelease(view_tab[i].view);
+        view_tab[i].view = view_tab[i].base = NULL;
+        view_tab[i].key = 0;
+    }
+    g_views_live = 0;
+    memset(prog_tab, 0, sizeof prog_tab);
+    memset(pipe_tab, 0, sizeof pipe_tab);
+    [cache removeAllObjects];
+    [g_cs_progs removeAllObjects];
+    @synchronized(g_ready_pipes) { [g_ready_pipes removeAllObjects]; }
+    g_boot_gen++;
+    [g_snap_copies removeAllObjects];
+    memset(snap_tex, 0, sizeof snap_tex);
+    memset(snap_ok, 0, sizeof snap_ok);
+    for (int i = 0; i < 4; i++) { feedback_tex[i] = NULL; feedback_copy[i] = nil; }
+    nfeedback = 0;
+    g_cur_fs_hash = 0;
+    last_bias_enc = nil;
+    pthread_mutex_lock(&cb_lock);
+    last_cb = nil;
+    for (int i = 0; i < CB_HIST; i++) cb_hist[i] = nil;  // (they retain the old guest heap buffer)
+    pthread_mutex_unlock(&cb_lock);
+    st_defaults();
 }
 
 void backend_execute(uint64_t handle) {

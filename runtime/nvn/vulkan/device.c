@@ -479,17 +479,10 @@ void backend_present(NvnTexture *t) {
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
-        extern bool widescreen_frame_boxed(uint64_t frame);
-        float crop[4] = {0, 0, 1, 1};
-        if (shape != 1.0 && widescreen_frame_boxed(total_frames)) {
-            if (shape > 1.0) {
-                crop[0] = (float)((1.0 - 1.0 / shape) / 2); crop[2] = (float)(1.0 / shape);
-                double nw = vw / shape; vx += (vw - nw) / 2; vw = nw;
-            } else {
-                crop[1] = (float)((1.0 - shape) / 2); crop[3] = (float)shape;
-                double nh = vh * shape; vy += (vh - nh) / 2; vh = nh;
-            }
-        }
+        // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
+        extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
+        float crop[4];  // uv origin and size
+        widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();
@@ -522,6 +515,8 @@ void backend_present(NvnTexture *t) {
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
+    reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
@@ -623,6 +618,8 @@ void ui_window_init(void) {
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow("Link's Awakening (LARecomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
@@ -639,10 +636,27 @@ void backend_init(void) {
     LOG("[vk] %s, swapchain %ux%u\n", g_vk.props.deviceName, g_vk.sc_extent.width, g_vk.sc_extent.height);
 }
 
-void ui_run(void) {
+// ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
+void backend_reset(void) {
+    if (!g_vk.dev) return;
+    vkDeviceWaitIdle(g_vk.dev);
+    extern void vk_textures_reset(void);
+    extern void vk_exec_reset(void);
+    vk_textures_reset();
+    vk_exec_reset();
+    g_last_presented = NULL;
+}
+void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
+void backend_clear_window(void) {
+    static const float black[4] = {0, 0, 0, 1};
+    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
+}
+
+int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
+        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) {

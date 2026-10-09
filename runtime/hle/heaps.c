@@ -45,6 +45,19 @@ typedef struct { uint64_t head; void *mem; } UnitBuf;
 static UnitBuf g_unit[256];
 static pthread_mutex_t g_unit_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// Reboot: our unit-heap buffers (host memory, not in the guest window) go with the game that made them.
+RT_ON_RESET(heaps_reset) {
+    for (int i = 0; i < 256; i++)
+        if (g_unit[i].mem) {
+#ifdef _WIN32
+            _aligned_free(g_unit[i].mem);
+#else
+            free(g_unit[i].mem);
+#endif
+            g_unit[i].mem = NULL;
+        }
+}
+
 static int unit_scale(void) {
     static int s = -1;
     if (s < 0) { const char *e = ENV("LARECOMP_UNIT_HEAP_SCALE"); s = e ? atoi(e) : 4; if (s < 1) s = 1; }

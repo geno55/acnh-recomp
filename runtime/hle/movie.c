@@ -145,6 +145,9 @@ static uint64_t make_vtable(HostFn *fns, int n, const char *prefix) {
     return (uint64_t)(uintptr_t)t;
 }
 
+// The game reads the audio and video tracks from different threads; FFmpeg's demuxer is not thread-safe.
+static pthread_mutex_t ex_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void *self_state(Cpu *c) { return (void *)(uintptr_t)((uint64_t *)(uintptr_t)c->x[0])[1]; }
 
 static void signal_guest_event(Cpu *c, uint64_t event) {
@@ -168,13 +171,16 @@ typedef struct {
     bool skippable;  // the launch opening on a randomizer seed: A / B / + ends it
 } Extractor;
 
+static bool g_skip_held;           // ex_fill: A / B held at the last look
+static double g_skip_pressed_at;    // when they were pressed (0 = not yet)
+
 static void ex_fill(Extractor *e) {
     if (e->skippable && !e->eof) {
         // the game skips the opening with Plus; on randomizer seeds A and B do too (we press Plus for it)
         extern uint64_t input_buttons_now(void);
         extern volatile int g_inject_plus;
-        static bool held;
-        static double pressed_at;
+        bool held = g_skip_held;
+        double pressed_at = g_skip_pressed_at;
         bool now = (input_buttons_now() & ((1u << 0) | (1u << 1))) != 0;
         if (now && !held) {
             LOG("[movie] opening: A/B -> Plus (skip)\n");
@@ -193,6 +199,7 @@ static void ex_fill(Extractor *e) {
                 LOG("[movie] opening: still playing -> seek to the end\n");
             }
         }
+        g_skip_held = held, g_skip_pressed_at = pressed_at;
     }
     while (!e->have_pkt && !e->eof) {
         if (av_read_frame(e->fmt, e->pkt) < 0) { e->eof = true; break; }
@@ -323,9 +330,22 @@ static void ex_cached_duration(Cpu *c) {
     c->x[0] = 0;
 }
 
+// Movie objects of this boot (host side; a reboot mid-movie closes them): vtables live in the HLE heap.
+static uint64_t g_ex_vt, g_dec_vt;
+#define MAX_MOVIE_OBJS 32
+static void *g_movie_objs[2][MAX_MOVIE_OBJS];  // [0] Extractor, [1] Decoder
+static pthread_mutex_t g_movie_lock = PTHREAD_MUTEX_INITIALIZER;
+static void movie_track(int kind, void *p, bool add) {
+    pthread_mutex_lock(&g_movie_lock);
+    for (int i = 0; i < MAX_MOVIE_OBJS; i++)
+        if (g_movie_objs[kind][i] == (add ? NULL : p)) { g_movie_objs[kind][i] = add ? p : NULL; break; }
+    pthread_mutex_unlock(&g_movie_lock);
+}
+
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
     if (e && e->fmt) avformat_close_input(&e->fmt);
+    if (e) movie_track(0, e, false);
     c->x[0] = 0;
 }
 
@@ -335,8 +355,6 @@ static void movie_log_slot(Cpu *c) {
     c->x[0] = 0;
 }
 
-// The game reads the audio and video tracks from different threads; FFmpeg's demuxer is not thread-safe.
-static pthread_mutex_t ex_lock = PTHREAD_MUTEX_INITIALIZER;
 #define EX_LOCKED(fn) \
     static void fn##_l(Cpu *c) { pthread_mutex_lock(&ex_lock); fn(c); pthread_mutex_unlock(&ex_lock); }
 EX_LOCKED(ex_dtor)
@@ -352,17 +370,19 @@ EX_LOCKED(ex_cached_duration)
 EX_LOCKED(ex_set_data_source)
 
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
-    static uint64_t vt;
+    uint64_t vt = g_ex_vt;
     if (!vt) {
         HostFn f[16] = {ex_dtor_l, ex_dtor_l, movie_log_slot, movie_log_slot, ex_get_track_count_l,
                         ex_get_track_config_l, ex_select_track_l, movie_log_slot, ex_seek_l, ex_get_sample_track_l,
                         ex_read_l, ex_advance_l, ex_get_sample_time_l, movie_log_slot, ex_cached_duration_l,
                         ex_set_data_source_l};
-        vt = make_vtable(f, 16, "Extractor");
+        vt = g_ex_vt = make_vtable(f, 16, "Extractor");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];
     self[0] = vt;
-    self[1] = (uint64_t)(uintptr_t)calloc(1, sizeof(Extractor));
+    Extractor *e = calloc(1, sizeof(Extractor));
+    self[1] = (uint64_t)(uintptr_t)e;
+    movie_track(0, e, true);
 }
 
 // ------------------------------------------------------------------ Decoder
@@ -398,8 +418,41 @@ typedef struct {
     int npending;
     bool eos_pending;
     int64_t eos_time;
+    bool stopped;  // Stop / destroyed: no more events (see dec_stop)
     pthread_mutex_t lock;
 } Decoder;
+
+// Input / output buffers live in the HLE heap, which only a reboot frees: buffers of destroyed decoders are kept
+// for the next movie (the title's attract loop replays the opening, ~37 MB of buffers per showing).
+static struct { uint8_t *mem; uint32_t size; } g_buf_pool[64];
+static int g_nbuf_pool;
+static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *buf_get(uint32_t size) {
+    pthread_mutex_lock(&g_pool_lock);
+    for (int i = 0; i < g_nbuf_pool; i++)
+        if (g_buf_pool[i].size == size) {
+            uint8_t *m = g_buf_pool[i].mem;
+            g_buf_pool[i] = g_buf_pool[--g_nbuf_pool];
+            pthread_mutex_unlock(&g_pool_lock);
+            return m;
+        }
+    pthread_mutex_unlock(&g_pool_lock);
+    return hle_alloc(size);
+}
+static void buf_put(uint8_t *m, uint32_t size) {
+    if (!m) return;
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_nbuf_pool < 64) g_buf_pool[g_nbuf_pool++].mem = m, g_buf_pool[g_nbuf_pool - 1].size = size;
+    pthread_mutex_unlock(&g_pool_lock);
+}
+
+// Signal one of the game's decoder events unless the decoder was stopped. Under the lock so a Stop on another
+// thread can't slip between the check and the signal.
+static void dec_signal(Cpu *c, Decoder *d, int i) {
+    pthread_mutex_lock(&d->lock);
+    if (!d->stopped) signal_guest_event(c, d->events[i]);
+    pthread_mutex_unlock(&d->lock);
+}
 
 typedef struct NvnTexture NvnTexture;
 void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride);
@@ -424,8 +477,8 @@ static void dec_configure(Cpu *c) {
     d->channels = p->ch_layout.nb_channels;
     d->in_cap = d->video ? 4 << 20 : 256 << 10;
     d->out_cap = d->video ? (uint32_t)(d->stride * ((d->height + 15) & ~15) * 3 / 2) : 64 << 10;
-    for (int i = 0; i < NIN; i++) d->in_mem[i] = hle_alloc(d->in_cap);
-    for (int i = 0; i < NOUT; i++) d->out_mem[i] = hle_alloc(d->out_cap);
+    for (int i = 0; i < NIN; i++) d->in_mem[i] = buf_get(d->in_cap);
+    for (int i = 0; i < NOUT; i++) d->out_mem[i] = buf_get(d->out_cap);
     LOG("[movie] decoder %s configured: %dx%d %d Hz %d ch\n", codec->name, d->width, d->height, d->sample_rate, d->channels);
     c->x[0] = 0;
 }
@@ -458,7 +511,33 @@ static void dec_get_output_buffer_format(Cpu *c) { dec_output_format(self_state(
 
 static void dec_start(Cpu *c) {
     Decoder *d = self_state(c);
-    signal_guest_event(c, d->events[0]);  // all input buffers are free
+    pthread_mutex_lock(&d->lock);
+    d->stopped = false;
+    pthread_mutex_unlock(&d->lock);
+    dec_signal(c, d, 0);  // all input buffers are free
+    c->x[0] = 0;
+}
+
+// slot 6: Stop. The game's player (0x7000912640) stops both decoders, stops its renderer threads, deletes the
+// decoders and nulls its pointers to them, and only then tells its decoder thread (0x70009114b0) to exit: an event
+// of ours still set by then wakes that thread into a virtual call through the null decoder (signal 11 after the
+// title's attract movie, when the thread was slow to run). A stopped hardware decoder signals nothing, so stop
+// signalling here and clear what is still set.
+static void dec_stop(Cpu *c) {
+    Decoder *d = self_state(c);
+    static uint64_t clear_event;
+    if (!clear_event) clear_event = guest_sym("_ZN2nn2os10ClearEventEPNS0_9EventTypeE");
+    pthread_mutex_lock(&d->lock);
+    if (!d->stopped) {
+        d->stopped = true;
+        LOG("[movie] decoder %s stopped\n", d->video ? "video" : "audio");
+        uint64_t saved[8];
+        memcpy(saved, c->x, sizeof saved);
+        for (int i = 0; i < 4; i++)
+            if (d->events[i]) { c->x[0] = d->events[i]; guest_call(c, clear_event); }
+        memcpy(c->x, saved, sizeof saved);
+    }
+    pthread_mutex_unlock(&d->lock);
     c->x[0] = 0;
 }
 
@@ -596,8 +675,8 @@ static void dec_send_input(Cpu *c) {
     produced |= flush_pending(d);
     if (idx >= 0 && idx < NIN) d->in_busy[idx] = false;
     pthread_mutex_unlock(&d->lock);
-    signal_guest_event(c, d->events[0]);
-    if (produced) signal_guest_event(c, d->events[1]);
+    dec_signal(c, d, 0);
+    if (produced) dec_signal(c, d, 1);
     c->x[0] = 0;
 }
 
@@ -649,20 +728,47 @@ static void dec_get_output_buffer(Cpu *c) {
 static void dec_release_output(Cpu *c) {
     Decoder *d = self_state(c);
     n_rel_out++;
-    signal_guest_event(c, d->events[0]);  // input may be accepted again
+    dec_signal(c, d, 0);  // input may be accepted again
     int i = (int)c->x[1];
     pthread_mutex_lock(&d->lock);
     if (i >= 0 && i < NOUT) d->out_busy[i] = false;
     bool produced = flush_pending(d);
     pthread_mutex_unlock(&d->lock);
-    if (produced) signal_guest_event(c, d->events[1]);
+    if (produced) dec_signal(c, d, 1);
     c->x[0] = 0;
 }
 
 static void dec_dtor(Cpu *c) {
     Decoder *d = self_state(c);
-    if (d && d->ctx) avcodec_free_context(&d->ctx);
+    if (!d) { c->x[0] = 0; return; }
+    dec_stop(c);
+    pthread_mutex_lock(&d->lock);
+    if (d->ctx) avcodec_free_context(&d->ctx);
+    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
+    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
+    for (int i = 0; i < d->npending; i++) av_frame_free(&d->pending[i]);
+    d->npending = d->nready = 0;
+    av_frame_free(&d->frame);
+    av_packet_free(&d->pkt);
+    if (d->sws) sws_freeContext(d->sws), d->sws = NULL;
+    free(d->rgba), d->rgba = NULL;
+    pthread_mutex_unlock(&d->lock);
+    movie_track(1, d, false);  // (d itself stays: the game's object may still point at it)
     c->x[0] = 0;
+}
+
+// Reboot: close what a movie left open (decoder threads, the file), new vtables in the next boot's HLE heap.
+RT_ON_RESET(movie_reset) {
+    for (int i = 0; i < MAX_MOVIE_OBJS; i++) {
+        Extractor *e = g_movie_objs[0][i];
+        if (e && e->fmt) avformat_close_input(&e->fmt);
+        Decoder *d = g_movie_objs[1][i];
+        if (d && d->ctx) avcodec_free_context(&d->ctx);
+        g_movie_objs[0][i] = g_movie_objs[1][i] = NULL;
+    }
+    g_ex_vt = g_dec_vt = 0;
+    g_nbuf_pool = 0;  // (the HLE heap starts over)
+    g_skip_held = false, g_skip_pressed_at = 0;
 }
 
 static void dec_get_counts(Cpu *c) {  // slot 14: (int*, int64*) queried after Configure
@@ -672,16 +778,17 @@ static void dec_get_counts(Cpu *c) {  // slot 14: (int*, int64*) queried after C
 }
 
 HLE_FUNC("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", movie_decoder_ctor) {
-    static uint64_t vt;
+    uint64_t vt = g_dec_vt;
     if (!vt) {
         HostFn f[19] = {dec_dtor, dec_dtor, dec_configure, dec_register_events, dec_get_output_format,
-                        dec_start, ok, ok, ok, dec_acquire_input, dec_get_input_buffer, dec_send_input,
+                        dec_start, dec_stop, ok, ok, dec_acquire_input, dec_get_input_buffer, dec_send_input,
                         dec_acquire_output, dec_get_output_buffer, dec_get_counts, dec_release_output, ok,
                         movie_log_slot, dec_get_output_buffer_format};
-        vt = make_vtable(f, 19, "Decoder");
+        vt = g_dec_vt = make_vtable(f, 19, "Decoder");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];
     Decoder *d = calloc(1, sizeof *d);
+    movie_track(1, d, true);
     pthread_mutex_init(&d->lock, NULL);
     self[0] = vt;
     self[1] = (uint64_t)(uintptr_t)d;

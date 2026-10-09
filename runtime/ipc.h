@@ -39,6 +39,8 @@ struct Service {
     const char *name;
     ServiceHandler handler;
     void *state;
+    int refs;                      // sessions + domain slots holding it
+    void (*on_close)(Service *s);  // optional: the last of them closed (stop threads, free state)
 };
 
 typedef struct {

@@ -31,7 +31,8 @@ AREAS = {'mabe-village': 'Mabe Village', 'toronbo-shores': 'Toronbo Shores', 'my
          'animal-village': 'Animal Village', 'yarna-desert': 'Yarna Desert', 'ancient-ruins': 'Ancient Ruins',
          'rapids-ride': 'Rapids Ride', 'taltal-mountains-east': 'Tal Tal Mountains (east)',
          'taltal-mountains-west': 'Tal Tal Mountains (west)', **DUNGEONS}
-ITEMS = {'seashell': 'Secret Seashell', 'heart-piece': 'Piece of Heart', 'heart-container': 'Heart Container',
+ITEMS = {'rooster': 'Flying Rooster (pet)', 'ghost': 'Ghost (pet)', 'marin-companion': 'Marin (pet)',
+         'seashell': 'Secret Seashell','heart-piece': 'Piece of Heart', 'heart-container': 'Heart Container',
          'rupee-5': '5 Rupees', 'rupee-20': '20 Rupees', 'rupee-50': '50 Rupees', 'rupee-100': '100 Rupees',
          'rupee-300': '300 Rupees', 'bracelet': 'Power Bracelet', 'feather': "Roc's Feather", 'boots': 'Pegasus Boots',
          'rod': 'Magic Rod', 'powder': 'Magic Powder', 'bomb': 'Bombs', 'bombs': 'Bombs', 'bow': 'Bow',
@@ -61,6 +62,8 @@ def pretty_item(it):
     m = re.match(r'^(small-key|key|nightmare-key|compass|map|stone-beak)-?(D\d)$', base)
     if m:
         return pretty_item(f'{m.group(2)}-{m.group(1)}')
+    if base.startswith('soul-'):  # boss souls (tools/rando/souls.py)
+        return base[5:].replace('-', ' ').title() + "'s Soul"
     return ITEMS.get(base) or base.replace('-', ' ').title()
 
 

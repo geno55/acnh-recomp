@@ -69,6 +69,10 @@ def build(seed_dir, romfs):
     if not os.path.exists(sheet_path):
         sheet_path = os.path.join(romfs, 'region_common', 'datasheets', 'GlobalFlags.gsheet')
     flags = {str(v['symbol']): int(v['index']) for v in oead_tools.readSheet(sheet_path)['values']}
+    check_flags = {}  # shopsanity / trendsanity checks: location -> done flag (shopsanity.py, trendsanity.py)
+    cf = os.path.join(seed_dir, 'check_flags.tsv')
+    if os.path.exists(cf):
+        check_flags = {ln.split('\t')[0]: int(ln.split('\t')[1]) for ln in open(cf) if '\t' in ln}
 
     def room_file(room):
         lv = re.match(r'(.+)_\d\d[A-Z]', room).group(1)
@@ -114,8 +118,8 @@ def build(seed_dir, romfs):
         room, level = lr.get('room'), lr.get('level')
         g = -1
         cell = None
-        if name.startswith('pot-') or re.match(r'D\d-pot-', name):
-            continue  # pots come from pots.tsv below
+        if name.startswith('pot-') or re.match(r'D\d-pot-', name) or name.startswith('bush-'):
+            continue  # pots and bushes come from pots.tsv / bushes.tsv below
         m = re.match(r'dig-(\d\d)([A-P])-(\d\d)$', name)
         if m:  # digsanity: one badge per screen; dug = flag 4096 + tile id (tools/rando/digs.py)
             row, col, tile = int(m.group(1)), ord(m.group(2)) - 65, int(m.group(3))
@@ -144,10 +148,12 @@ def build(seed_dir, romfs):
             cell = centroid.get(logic[name].get('region'))
         if not cell:
             continue
-        flag = -1
+        flag = check_flags.get(name, -1)
         sub = logic[name].get('subtype')
         try:
-            if name in getattr(las_data, 'HEART_FLAGS', {}):
+            if name in check_flags:
+                pass
+            elif name in getattr(las_data, 'HEART_FLAGS', {}):
                 flag = flags.get(las_data.HEART_FLAGS[name], -1)
             elif room and sub in ('chest', 'standing', 'drop'):
                 r = room_file(room)
@@ -185,6 +191,22 @@ def build(seed_dir, romfs):
             key = DUNGEONS.get(lv, lv)
             label = DUNGEONS.get(lv) or lv
             checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': group(key, label, cell), 'flag': int(fl)})
+    # bushsanity (bushes.tsv: level x y z flag): a dot on the bush's Field screen (bush-<screen>-<n>), hidden once cut
+    tsv = os.path.join(seed_dir, 'bushes.tsv')
+    if os.path.exists(tsv):
+        import bushes as bushes_mod
+        names = {}
+        for b in bushes_mod.scan(romfs, leb):
+            r = room_file(b['room'])
+            a = next((a for a in r.actors if a.key == b['key']), None) if r else None
+            if a:
+                names[(round(a.posX, 2), round(a.posZ, 2))] = bushes_mod.location_name(b)
+        for line in open(tsv):
+            lv, x, y, z, fl = line.split()
+            n = names.get((round(float(x), 2), round(float(z), 2)))
+            cell = n and cell_of_field('Field_' + n.split('-')[1])
+            if n in logic and cell:
+                checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': -1, 'flag': int(fl)})
     out = {'settings': {k: 1 for k, v in settings.items() if v is True}, 'nodes': nodes, 'checks': checks,
            'groups': groups, 'logic': settings.get('logic', 'basic')}
     with open(os.path.join(seed_dir, 'tracker.json'), 'w') as f:

@@ -21,6 +21,15 @@ static char g_level[64], g_locator[64];
 static volatile int g_pending;
 static volatile uint64_t g_request;
 
+static uint64_t g_req;  // our level-jump request (HLE heap)
+static volatile int g_give_pending;
+RT_ON_RESET(warp_reset) {  // (reboot: nothing queued; the request objects were in the wiped memory)
+    g_pending = 0;
+    g_request = 0;
+    g_req = 0;
+    g_give_pending = 0;
+}
+
 // Called from the generated code when a level registers its request object.
 void rt_warp_request_obj(uint64_t r) {
     if (r != g_request) LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
@@ -163,8 +172,8 @@ void warp_game_tick(Cpu *c) {
         LOG("[warp] ignored: not in a game\n");
         return;
     }
-    static uint64_t req;
-    if (!req) req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    if (!g_req) g_req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    uint64_t req = g_req;
     pthread_mutex_lock(&g_lock);
     size_t ll = strlen(g_level), lc = strlen(g_locator);
     memset((void *)(uintptr_t)req, 0, 0x200);
@@ -187,12 +196,74 @@ void warp_game_tick(Cpu *c) {
 // ---- give item (game thread): main+0x7e18b0 = AddItem(itemId, count, index, autoEquip), the call behind the
 // Inventory.AddItemByKey event action (itemId = row of datasheets/Items.gsheet, e.g. 78 PanelDungeonPiece).
 #define ADD_ITEM (MAIN_BASE + 0x7e18b0)
-static volatile int g_give_pending;
 static int g_give_id, g_give_count, g_give_index;
 
 void give_item_request(int id, int count, int index) {
     g_give_id = id; g_give_count = count; g_give_index = index;
     g_give_pending = 1;
+}
+
+// LARECOMP_FIND_FLOATS=<frame>:<f1>,<f2>,... (RE): log every address in writable guest memory holding these floats
+// in a row (e.g. a camera zone's box). For the first hit, LARECOMP_FIND_FLOATS_PATH=1 logs pointer paths towards it
+// (BFS, "MAIN+" = a global), LARECOMP_FIND_FLOATS_WATCH=1 reports the functions touching it (as LARECOMP_WATCH_ADDR).
+static void find_floats_tick(uint64_t frame) {
+    static long at = -2;
+    static float want[16];
+    static int nw;
+    if (at == -2) {
+        at = -1;
+        const char *e = getenv("LARECOMP_FIND_FLOATS");
+        if (e) {
+            at = strtol(e, (char **)&e, 10);
+            while (*e == ':' || *e == ',') { e++; if (nw < 16) want[nw++] = strtof(e, (char **)&e); }
+        }
+    }
+    if (at < 0 || (long)frame != at || !nw) return;
+    extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+    uint64_t ra[64], rs[64];
+    int nr = kernel_data_regions(ra, rs, 64), n = 0;
+    for (int i = 0; i < nr; i++) {
+        const float *p = (const float *)(uintptr_t)ra[i];
+        for (uint64_t k = 0; k + nw <= rs[i] / 4 && n < 200; k++) {
+            int j = 0;
+            while (j < nw && p[k + j] == want[j]) j++;
+            if (j != nw) continue;
+            uint64_t a = ra[i] + k * 4;
+            LOG("[findfloats] %llx:", (unsigned long long)a);
+            for (int d = -16; d < 32; d++) LOG(" %g", p[k + d]);
+            LOG("\n");
+            if (!n && ENV("LARECOMP_FIND_FLOATS_PATH")) {  // pointer paths from main's globals to the hit (BFS)
+                uint64_t lv[64] = {a}, nx[64];
+                int nl = 1;
+                for (int depth = 0; depth < 5 && nl; depth++) {
+                    int nn = 0;
+                    for (int r = 0; r < nr; r++)
+                        for (uint64_t q = 0; q + 8 <= rs[r]; q += 8) {
+                            uint64_t v = *(volatile uint64_t *)(uintptr_t)(ra[r] + q), loc = ra[r] + q;
+                            for (int t = 0; t < nl; t++)
+                                if (v <= lv[t] && v >= lv[t] - (depth ? 0x800 : 0x10)) {
+                                    bool gl = loc >= MAIN_BASE && loc < MAIN_BASE + 0x2000000;
+                                    LOG("[findfloats] path d%d %s%llx -> %llx (+%llx)\n", depth, gl ? "MAIN+" : "",
+                                        (unsigned long long)(gl ? loc - MAIN_BASE : loc), (unsigned long long)v,
+                                        (unsigned long long)(lv[t] - v));
+                                    if (!gl && nn < 64) nx[nn++] = loc;
+                                }
+                        }
+                    memcpy(lv, nx, sizeof(uint64_t) * nn);
+                    nl = nn;
+                }
+            }
+            if (!n && ENV("LARECOMP_FIND_FLOATS_WATCH")) {  // watch the first hit +-0x40 (LARECOMP_WATCH_ADDR)
+                extern uint64_t g_watch_lo, g_watch_hi;
+                extern void watch_arm(void);
+                g_watch_lo = a - 0x40, g_watch_hi = a + 0x40;
+                watch_arm();
+            }
+            n++;
+        }
+    }
+    LOG("[findfloats] %d hits\n", n);
+    at = -1;
 }
 
 // LARECOMP_FIND_MOVE=<A>,<B>,<C> (RE): snapshot writable guest memory at frames A and B; at C list the floats that
@@ -428,7 +499,8 @@ static void memdump_tick(uint64_t frame) {
     }
 }
 
-// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (RE: pane name at +0xB0,
+// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (addr 0 = LARECOMP_FNPROF_BT's
+// x0, 1 = the dungeon map page) (RE: pane name at +0xB0,
 // translate +0x30/+0x34, scale +0x48/+0x4C), following pointers up to <depth> levels (default 2)
 static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *seen, int *nseen) {
     extern int kernel_data_regions(uint64_t *a, uint64_t *s, int max);
@@ -438,7 +510,7 @@ static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *s
     for (uint32_t off = 0; off < 0x800; off += 8) {
         uint64_t p = LD64(obj + off);
         bool ok = false;
-        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 <= ra[i] + rs[i];
+        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];  // (-1: wraps)
         if (!ok) continue;
         bool dup = false;
         for (int i = 0; i < *nseen && !dup; i++) dup = seen[i] == p;
@@ -473,6 +545,7 @@ static void pane_scan_tick(uint64_t frame) {
     if (at < 0 || (long)frame != at) return;
     extern uint64_t g_bt_first_x0;  // fnprof.c: x0 of the first LARECOMP_FNPROF_BT function hit (addr 0 = use it)
     if (!addr) addr = g_bt_first_x0;
+    if (addr == 1) { extern uint64_t chaos_dgnmap_obj(void); addr = chaos_dgnmap_obj(); }  // 1 = the dungeon map page
     LOG("[pane] scanning from %llx\n", (unsigned long long)addr);
     if (!addr) return;
     static uint64_t seen[4096];
@@ -483,12 +556,15 @@ static void pane_scan_tick(uint64_t frame) {
 
 void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
+    { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
+    { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
     ptrscan_tick(frame);
     memdump_tick(frame);
     find_move_tick(frame);
+    find_floats_tick(frame);
     addf_tick(frame);
     {  // LARECOMP_WATCH_ADDR=<frame>:<hex lo>:<hex hi>: report host functions writing [lo,hi) (RE; one 16K page)
         static long wat = -2;
@@ -508,7 +584,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
             wat = -1;
         }
     }
-    static long at = -2;  // LARECOMP_GIVE_ITEM=<frame>:<id>:<count>:<index>[:<equip>][,...] (test hook)
+    static long at = -2;  // LARECOMP_GIVE_ITEM=<frame>:<id>:<count>:<index>[:<auto-equip 1>][,...] (test hook)
     static char spec[256];
     if (at == -2) {
         at = -1;
@@ -517,11 +593,11 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     }
     if (at >= 0 && (long)frame >= at && game_in_play()) {
         for (char *p = spec; p && *p;) {
-            long f; int id, cnt, idx, eq = 0;
-            if (sscanf(p, "%ld:%d:%d:%d:%d", &f, &id, &cnt, &idx, &eq) >= 4) {
+            long f; int id, cnt, idx, equip = 0;
+            if (sscanf(p, "%ld:%d:%d:%d:%d", &f, &id, &cnt, &idx, &equip) >= 4) {
                 uint64_t saved[31];
                 memcpy(saved, c->x, sizeof saved);
-                c->x[0] = (uint64_t)id; c->x[1] = (uint64_t)cnt; c->x[2] = (uint64_t)(int64_t)idx; c->x[3] = (uint64_t)eq;
+                c->x[0] = (uint64_t)id; c->x[1] = (uint64_t)cnt; c->x[2] = (uint64_t)(int64_t)idx; c->x[3] = (uint64_t)equip;
                 guest_call(c, ADD_ITEM);
                 memcpy(c->x, saved, sizeof saved);
                 LOG("[give] item %d x%d (index %d)\n", id, cnt, idx);

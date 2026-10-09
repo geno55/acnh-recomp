@@ -95,9 +95,12 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
-        'bushes': False,
+        'bushes': False, 'boss-souls': False,
         'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
-        'dungeon-room-shuffle': 'off',  # off / coherent / chaos (tools/rando/dungeon_gen.py)
+        'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
+        'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
+        'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
+        'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -191,12 +194,20 @@ def main():
     logic_defs = yaml.safe_load(rd.LOGIC_RAW)
     import copy
     item_defs = copy.deepcopy(rd.ITEM_DEFS)
+    # Escape Bottle (runtime/hle/escape.c): every seed starts with the game's third bottle as a warp item, so the pool
+    # has one Bottle less (the logic only ever needs one), a 50 Rupees in its place. Not a logic item: nothing may
+    # require it (the seed is marked only in the settings.json written at the end, never in LAS's access).
+    item_defs['bottle']['quantity'] -= 1
+    item_defs['rupee-50']['quantity'] += 1
     os.makedirs(out_dir, exist_ok=True)
     import shutil
     if os.path.isdir(os.path.join(out_dir, 'romfs')):  # regenerating into the same folder: start from vanilla files
         shutil.rmtree(os.path.join(out_dir, 'romfs'))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from RandomizerCore.Tools import leb
+    if settings.get('hookshot-anything'):  # new routes before anything reads the logic (room shuffle, entrances)
+        import hookshot_logic
+        print('hookshot anything:', hookshot_logic.apply(logic_defs), 'routes', flush=True)
 
     # keysanity: the freed dungeon items must be placed with logic (LAS only logic-checks 'important' items)
     ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
@@ -204,6 +215,12 @@ def main():
     for k, d in item_defs.items():
         if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
             d['type'] = 'important'
+
+    if settings.get('boss-souls'):  # boss souls: a boss only appears once its soul is found (tools/rando/souls.py)
+        import souls as souls_mod
+        from RandomizerCore.Randomizers import chests as las_chests
+        print('boss souls:', souls_mod.add_to_logic(logic_defs, item_defs), 'in the pool', flush=True)
+        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(b[1]) for b in souls_mod.BOSSES]
 
     pot_locs = {}
     if settings.get('pots'):
@@ -231,7 +248,24 @@ def main():
         dig_locs = digs_mod.add_to_logic(dig_tiles, logic_defs, item_defs)
         print('digs:', len(dig_locs), 'locations of', len(dig_tiles), 'dig tiles', flush=True)
 
-    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
+    import shopsanity
+    import trendsanity
+    for f in ('shopsanity.tsv', 'check_flags.tsv'):  # (appended to by both modules)
+        if os.path.exists(os.path.join(out_dir, f)):
+            os.remove(os.path.join(out_dir, f))
+    sanity_inside = {}  # their locations inside shuffled interiors: {door: [(location, condition)]}
+    if shopsanity.enabled(settings):
+        sanity_inside.update(shopsanity.add_to_logic(logic_defs, item_defs, settings))
+    if trendsanity.enabled(settings):
+        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs))
+
+    import pets as pets_mod  # companions as items (tools/rando/pets.py)
+    pets = pets_mod.add_to_pool(logic_defs, item_defs, settings)
+    if pets:
+        print('pets:', ', '.join(pets), flush=True)
+
+    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors,
+    # tier 3 = + connector caves
     tier = int(settings.get('entrance-tier', 0))
     ent = None
     if tier >= 1:
@@ -239,37 +273,84 @@ def main():
     if tier >= 2:
         import random as _random
         import entrance_logic as el
-        ent_doors = el.pool(el.load())
-        ent_entry, ent_exit = el.shuffle(ent_doors, bool(settings.get('entrance-decoupled', False)),
-                                         _random.Random(f"{settings['seed']}-entrances"))
-        extra = {}
+        ed = el.load()
+        ent_doors = el.pool(ed)
+        decoupled = bool(settings.get('entrance-decoupled', False))
+        ent_entry, ent_exit = el.shuffle(ent_doors, decoupled, _random.Random(f"{settings['seed']}-entrances"))
+        extra = {k: list(v) for k, v in sanity_inside.items()}
         lv_door = {d['dest_level']: d['id'] for d in ent_doors}
         for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
             if p['level'] in lv_door:
                 extra.setdefault(lv_door[p['level']], []).append((name, 'break-pot'))
-        moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
-        ent = (ent_doors, ent_entry, ent_exit)
-        print('entrances:', len(ent_entry), 'doors shuffled,', moved, 'locations moved', flush=True)
+        cave = ([], {}, {})
+        if tier >= 3:  # connector caves: their own pool, logic first (house exits are ORed into regions it rewrites)
+            cdoors = el.connector_pool(ed)
+            lv_node = el.connector_levels(cdoors)
+            cextra = {}
+            for name, p in pot_locs.items():
+                if p['level'] in lv_node:
+                    cextra.setdefault(lv_node[p['level']], []).append((name, 'break-pot'))
+            pockets = el.pocket_screens(cdoors)
+
+            def with_caves(cv):
+                lg = copy.deepcopy(logic_defs)
+                n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
+                for name, b in bush_locs.items():  # a bush on a pocket's screen may stand in the pocket: needs it
+                    if cv[0] and pockets.get(b['room']) and name in lg:
+                        lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
+                return lg, n + el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
+
+            items = lambda lg: {k for k in el.reach_all(lg, item_defs, settings) if lg[k].get('type') == 'item'}
+            want = items(with_caves(cave)[0])
+            for attempt in range(100):  # re-roll a cave layout that loses a location even with every item
+                rng = _random.Random(f"{settings['seed']}-connectors" + (f'-{attempt}' if attempt else ''))
+                cave = (cdoors,) + el.shuffle(cdoors, decoupled, rng)
+                lg, moved = with_caves(cave)
+                if not want - items(lg):
+                    break
+                print(f'caves: layout {attempt} loses', ', '.join(sorted(want - items(lg))[:6]), flush=True)
+            else:
+                raise RuntimeError('no connector cave layout keeps every location reachable')
+            logic_defs.clear()
+            logic_defs.update(lg)
+        else:
+            moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
+        ent = (ent_doors + cave[0], {**ent_entry, **cave[1]}, {**ent_exit, **cave[2]})
+        print('entrances:', len(ent_entry), 'doors +', len(cave[1]), 'cave doors shuffled,', moved, 'locations moved', flush=True)
 
     # ---- Dungeon room shuffle (Coherent / Chaos): the layouts are planned first, the item logic follows them
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
     room_mode = settings.get('dungeon-room-shuffle', 'off')
     room_plan = None
-    if room_mode in ('coherent', 'chaos'):
+    if room_mode in ('coherent', 'chaos', 'madness'):
         stage('Planning dungeon rooms', 0.03)
         import dungeon_gen
         import room_logic
         cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
-        if room_mode == 'chaos':
-            layouts, jumps = dungeon_gen.plan_all_chaos(cat, settings['seed'], romfs)
-            logic_rows = jumps
-        else:
-            layouts, jumps = dungeon_gen.plan_all(cat, settings['seed'], romfs), None
-            logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
-        room_plan = (layouts, jumps)
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
-        print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
-              flush=True)
+        base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
+        for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
+            sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
+            if room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
+                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
+                                                              settings=settings)
+                logic_rows = jumps
+            else:
+                layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
+                logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
+            logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
+            print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
+                  flush=True)
+            why = settings.pop('room-logic-unfillable', None)
+            if not why:
+                break
+            print('room layout can\'t be filled -', why, '- planning another', flush=True)
+        room_plan = (layouts, jumps)
+        if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only; =<names>: print those conditions)
+            for k in os.environ['LARECOMP_PLAN_ONLY'].split(','):
+                if k in logic_defs:
+                    print(k, '=', logic_defs[k].get('condition-basic'), flush=True)
+            sys.exit(0)
 
     result = {}
     errors = []
@@ -376,6 +457,15 @@ def main():
     if pot_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         import pots as _pots
         print('pot refills marked:', _pots.mark_refills(result['placements']), flush=True)
+    pl = result['placements']
+    bottles = {loc: i for loc, i in pl['indexes'].items() if pl.get(loc) == 'bottle'}
+    for loc, i in bottles.items():  # the third bottle slot (index 2) is the Escape Bottle's
+        if i == 2:
+            pl['indexes'][loc] = bottles[loc] = min({0, 1} - set(bottles.values()))
+    if pets:
+        print('pets placed:', pets_mod.mark_indexes(result['placements'], logic_defs), flush=True)
+    from RandomizerCore.Randomizers import item_get as _item_get
+    _item_get.GHOST_PET = 'ghost' in pets
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
@@ -391,6 +481,25 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
+    if shopsanity.enabled(settings) or trendsanity.enabled(settings):  # (before pots: they take the flags after ours)
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        import msbt
+        stage('Stocking the shop', 0.925)
+        if shopsanity.enabled(settings):
+            lines = shopsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, msbt)
+            print('shopsanity:\n' + '\n'.join(lines), flush=True)
+        if trendsanity.enabled(settings):
+            lines = trendsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, las_data,
+                                      shopsanity.alloc_flags)
+            print('trendsanity:\n' + '\n'.join(lines), flush=True)
+    if pets:
+        from RandomizerCore.Tools import event_tools, oead_tools
+        print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
+    if settings.get('boss-souls'):
+        import msbt
+        from RandomizerCore.Tools import event_tools, oead_tools
+        print('boss souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt), flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data
@@ -444,6 +553,11 @@ def main():
         if bush_locs:
             print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
 
+    import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
+    print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
+    import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
+    keysanity_text.apply(out_dir, romfs, result['placements'])
+
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
     if dig_locs:
@@ -458,6 +572,7 @@ def main():
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
+        s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker

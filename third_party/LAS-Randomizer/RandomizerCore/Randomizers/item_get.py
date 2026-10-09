@@ -1,6 +1,9 @@
 import RandomizerCore.Tools.event_tools as event_tools
 from RandomizerCore.Randomizers import data
 
+# LARecomp pets (tools/rando/pets.py, set by las_headless): the Ghost is an item, so the Surf Harp leaves his quest
+# at "take me to my grave" (Ghost4_Clear unset) - the grave and its Owl reward then need the Ghost found
+GHOST_PET = False
 
 
 # Inserts an AddItemByKey and a GenericItemGetSequenceByKey, or a progressive item switch (depending on the item).
@@ -197,11 +200,11 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False}),
             ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': ''})
         ], after)
-    
+
 
     ### tunics
     if item == 'ClothesRed':
@@ -343,6 +346,13 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
             ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': ''})
         ], after)
         
+    ### Boss souls (LAS Recomp, tools/rando/souls.py): not an inventory item - the flag of the same name lets the boss appear
+    if item.startswith('BossSoul'):
+        return event_tools.createActionChain(flowchart, before, [
+            ('EventFlags', 'SetFlag', {'symbol': item, 'value': True}),
+            ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': item})
+        ], after)
+
     ### everything else - play the get event before giving the item, otherwise it messes with index related messages
     # this is how the game normally does it, and so for the "you've collected them all" messages,
     # the game actually checks for 3 heart pieces and 4 golden leaves respectively
@@ -355,6 +365,9 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
 
 def insertItemWithoutAnimation(item, index):
     """Same as insertItemGetAnimation but without the Generic ItemGet animation"""
+
+    if item.startswith('BossSoul'):
+        return [('EventFlags', 'SetFlag', {'symbol': item, 'value': True})]
     
     if item == 'PowerBraceletLv1':
         return [
@@ -398,7 +411,7 @@ def insertItemWithoutAnimation(item, index):
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False})
         ]
     
@@ -649,7 +662,7 @@ def insertDampeItemGet(flowchart, item, index, after=None):
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False}),
         ], after)
     

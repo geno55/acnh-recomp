@@ -574,13 +574,8 @@ const char *renderer_stats(void) {
     return stats_text;
 }
 
-void vk_exec_init(void) {
-    prof = getenv("LARECOMP_VK_PROF") != NULL;
-    if (prof) {
-        prof_up_ns = 0;
-        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
-        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
-    }
+static void st_defaults(void) {
+    memset(&st, 0, sizeof st);
     for (int i = 0; i < 16; i++) {
         st.viewport[i][2] = 1280; st.viewport[i][3] = 720;
         st.scissor[i][2] = 16384; st.scissor[i][3] = 16384;
@@ -592,6 +587,16 @@ void vk_exec_init(void) {
     st.ds[1] = 1; st.ds[2] = 2;
     st.poly[1] = 1; st.poly[2] = 2;
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
+}
+
+void vk_exec_init(void) {
+    prof = getenv("LARECOMP_VK_PROF") != NULL;
+    if (prof) {
+        prof_up_ns = 0;
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
+        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
+    }
+    st_defaults();
 }
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
@@ -1472,6 +1477,8 @@ static bool gmem_import(uint64_t size) {
     return true;
 }
 
+static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
+
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
@@ -1494,12 +1501,29 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
-    static uint64_t tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != tried) { tried = kernel_heap_size(); gmem_info(); }
+    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
     *off = addr - HEAP_BASE;
     return true;
+}
+
+// In-place reboot (device.c backend_reset; GPU idle): drop what is keyed by guest addresses - programs by code
+// address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
+// programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
+void vk_exec_reset(void) {
+    memset(prog_tab, 0, sizeof prog_tab);
+    memset(pipe_tab, 0, sizeof pipe_tab);
+    g_cs_n = 0;
+    gcopy_gen++;
+    if (gmem_buf) {
+        vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
+        vkFreeMemory(g_vk.dev, gmem_mem, NULL);
+        gmem_buf = VK_NULL_HANDLE;
+        gmem_mem = VK_NULL_HANDLE;
+    }
+    gmem_size = gmem_tried = 0;
+    st_defaults();
 }
 
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2]) {
@@ -1631,14 +1655,17 @@ static void build_compute(void *arg) {
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }
 
+static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
+static int g_cs_n;
+
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
-    static struct { uint64_t addr; CsProg *cp; } tab[256];
-    static int n;
+    struct CsEnt *tab = g_cs_tab;
+    int n = g_cs_n;
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n++].cp = cp; }
+    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
@@ -1753,6 +1780,8 @@ static void draw_(CmdRec *r, bool indexed) {
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
+        extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
+        if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     resolve_feedback(pr);

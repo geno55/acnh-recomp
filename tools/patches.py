@@ -209,6 +209,21 @@ def _add_item(gen, a):
 PATCHES[ADD_ITEM_SITE] = _add_item
 
 
+# Trendsanity (runtime/hle/shopsanity.c): AddPrizeByKey (main+0x7e1c70) looked the prize row up (x0) and is about to
+# call AddPrize(row, count, index) (main+0x1489c0, rows 0-20 only): a randomized prize row sets its check's flags.
+PRIZE_ADD_SITE = 0x70007e1d10
+
+
+def _prize_add(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x2a1403e2, hex(w)  # mov w2, w20
+    return ('{ c->x[2] = (uint32_t)c->x[20]; extern void rt_add_prize(Cpu *); rt_add_prize(c); }'
+            f'  /* {a:#x}: mov w2, w20 (AddPrize index; trendsanity) */')
+
+
+PATCHES[PRIZE_ADD_SITE] = _prize_add
+
+
 # Inventory overlay (runtime/ui/inventory_overlay.mm): main+0xeb7cd0 runs once per frame only while the pause
 # menu's Items page is shown (found by profiling Items vs Map/System pages). Its prologue reports that.
 ITEMS_PAGE_SITE = 0x7000eb7cd0
@@ -335,3 +350,68 @@ def _hole_cap(gen, a):
 
 for _a in HOLE_CAP_SITES:
     PATCHES[_a] = _hole_cap
+# Escape Bottle (runtime/hle/escape.c): the player's per-item "use it now?" predicates (one per item slot, main+0xd50e60
+# .. 0xd52f00; each: X / Y newly pressed with that slot equipped on it) only run while Link may use items (no cutscene,
+# dialog, menu or transition). main+0xd50e60 is the third bottle's (slot 0xf): owned (PlayerStatus+0xa9 bit 7) and
+# empty (+0xc0 bit 2 clear) -> `cset w0, eq` = yes, and the bottle swing starts. In randomizer seeds that bottle is the
+# Escape Bottle: the runtime warps instead and the answer is no.
+BOTTLE3_USE_SITE = 0x7000d50f0c
+
+
+def _bottle3_use(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
+    return ('{ extern int rt_bottle3_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle3_use()) c->x[0] = 0; }'
+            f'  /* {a:#x}: cset w0, eq (third bottle used: Escape Bottle) */')
+
+
+PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
+
+
+# Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
+# create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
+# its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
+BOSS_SPAWN_SITE = 0x70008f5ed4
+
+
+def _boss_spawn(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+
+
+PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
+
+
+# Hookshot anything (runtime/hle/hookshot.c): the hookshot's Shot update (main+0xd7ecc0) loads the attribute word of
+# the surface its ray hit; bit 0x4000 (hookshot target) makes it latch (Adhere) instead of bouncing off (Return).
+HOOKSHOT_ATTR_SITE = 0x7000d7ee9c
+
+
+def _hookshot_attr(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9403bf7, hex(w)  # ldr w23, [sp, #0x38]
+    return ('{ extern uint32_t rt_hookshot_attr(Cpu *, uint32_t); '
+            'c->x[23] = rt_hookshot_attr(c, LD32(c->sp + 0x38)); }'
+            f'  /* {a:#x}: ldr w23, [sp, #0x38] (hookshot hit attribute) */')
+
+
+PATCHES[HOOKSHOT_ATTR_SITE] = _hookshot_attr
+
+
+# 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
+# to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
+# runtime returns the stick's own angle instead (as the community "360 Controls" mod does).
+SNAP_DIR_SITE = 0x7000ded9f0
+
+
+def _snap_dir(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
+    return ('{ extern int rt_snap_dir(Cpu *); if (rt_snap_dir(c)) return; c->sp -= 0x40; }'
+            f'  /* {a:#x}: sub sp, sp, #0x40 (8-way stick snap: 360-degree movement) */')
+
+
+PATCHES[SNAP_DIR_SITE] = _snap_dir
