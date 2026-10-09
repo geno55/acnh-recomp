@@ -93,10 +93,7 @@ int rt_pet_item(int n) {
         flag_put("Ghost3_Clear", true);
     }
     pets_call(c);
-    char t[96];
-    snprintf(t, sizeof t, "%s joins you!", kComp[c].name);
-    extern void ui_toast(const char *text);
-    ui_toast(t);
-    LOG("[pets] found pet %d (companion %d)\n", n, c);
+    // (no custom pop-up: the user wants item text in the game's own message box - a pet message is still open)
+    LOG("[pets] found pet %d (companion %d: %s)\n", n, c, kComp[c].name);
     return 1;
 }
