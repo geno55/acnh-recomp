@@ -15,6 +15,7 @@ extern "C" {
 #include "../hle.h"
 void warp_request(const char *level, const char *locator);
 int warp_available(void);
+bool warp_blocked(const char *locator);
 }
 
 #define PLAYER_STATUS_PTR 0x7001CC1368ull  // main + 0x1CC1368: PlayerStatus* (current level name at +0)
@@ -50,12 +51,15 @@ static bool matches(const WarpSpot &w, const char *f) {
 
 // Returns true when a warp was started (the menu then closes so the jump plays out).
 static bool spot(const WarpSpot &w, bool show_area, bool enabled) {
+    bool swim = warp_blocked(w.locator);
+    enabled = enabled && !swim;
     char lbl[256];
     if (show_area) snprintf(lbl, sizeof lbl, "%s  -  %s##%s/%s", w.area, w.label, w.level, w.locator);
     else snprintf(lbl, sizeof lbl, "%s##%s/%s", w.label, w.level, w.locator);
     ImGui::BeginDisabled(!enabled);
     bool go = ImGui::Selectable(lbl);
     ImGui::EndDisabled();
+    if (swim && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Link comes up out of deep water here: needs the Flippers.");
     if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) {
         ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.70f + ImGui::GetCursorStartPos().x);
         ImGui::TextDisabled("%s / %s", w.level, w.locator);

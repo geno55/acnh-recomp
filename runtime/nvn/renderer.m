@@ -32,7 +32,7 @@ static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path);
-static char stats_text[128];
+static char stats_text[320];
 
 // ------------------------------------------------------------------ state
 typedef struct {
@@ -283,13 +283,31 @@ static void views_forget(void *base) {
 static id<MTLTexture> view_cached(id<MTLTexture> base, uint64_t params, id<MTLTexture> (^make)(void)) {
     uint64_t k = ((uint64_t)(uintptr_t)(__bridge void *)base * 0x9E3779B97F4A7C15ull) ^ (params * 0xC2B2AE3D27D4EB4Full);
     if (!k) k = 1;
-    uint32_t slot = (uint32_t)(k ^ (k >> 32)) & (VIEW_TAB - 1);
+    if (k == ~0ull) k = 2;
+    // up to 8 probes; a miss is stored in the first free or tombstoned slot of those, else over the first one.
+    // (It used to go to the slot past the 8 probes - never found again - and tombstones were never reused: on the
+    // overworld, where textures stream in and out, more and more binds made a new view every time, the slowdown
+    // that grew with play time until a level change - user report 2026-10-08, 32:9.)
+    uint32_t start = (uint32_t)(k ^ (k >> 32)) & (VIEW_TAB - 1), slot = start;
+    int free_slot = -1;
     for (int probe = 0; probe < 8; probe++, slot = (slot + 1) & (VIEW_TAB - 1)) {
         if (view_tab[slot].key == k && view_tab[slot].base == (__bridge void *)base) return (__bridge id<MTLTexture>)view_tab[slot].view;
-        if (!view_tab[slot].key) break;
+        if (!view_tab[slot].key || view_tab[slot].key == ~0ull) {
+            if (free_slot < 0) free_slot = (int)slot;
+            if (!view_tab[slot].key) break;  // (end of the chain)
+        }
     }
+    slot = free_slot >= 0 ? (uint32_t)free_slot : start;
     id<MTLTexture> v = make();
     if (!v) return base;
+    if (ENV("LARECOMP_LOG_VIEWCREATE")) {  // (debug: what keeps making new views - overworld soak, views pile up)
+        extern uint64_t renderer_present_count(void);
+        static int n;
+        if (renderer_present_count() > (uint64_t)atol(ENV("LARECOMP_LOG_VIEWCREATE")) && n++ < 400)
+            LOG("[viewnew] f%llu base %p %s %lux%lu fmt %lu type %lu params %#llx live %d\n", (unsigned long long)renderer_present_count(),
+                (__bridge void *)base, base.label.UTF8String, (unsigned long)base.width, (unsigned long)base.height,
+                (unsigned long)base.pixelFormat, (unsigned long)base.textureType, (unsigned long long)params, g_views_live);
+    }
     if (view_tab[slot].view) { CFRelease(view_tab[slot].view); g_views_live--; }  // evict (8 probes all taken)
     g_views_live++;
     view_tab[slot].key = k;
