@@ -624,7 +624,7 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::Checkbox("Digsanity", &g_opts.digs);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("INSANE: every diggable tile on the overworld is a check - about 5,000 more checks, and most of\n"
-                          "the important items end up buried somewhere. The first dig of a tile gives its item; grass and\n"
+                          "the important items end up buried somewhere. The first dig of a tile brings its item up; grass and\n"
                           "bushes have to be cut first. Holes stay dug, so you can see where you have already dug.");
     ImGui::Checkbox("Boss souls", &g_opts.boss_souls);
     if (ImGui::IsItemHovered())

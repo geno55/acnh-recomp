@@ -571,10 +571,10 @@ def main():
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
     if dig_locs:
-        from RandomizerCore.Tools import oead_tools
-        from RandomizerCore.Randomizers import item_get
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
         stage('Burying items', 0.95)
-        lines = digs_mod.apply(dig_locs, dig_tiles, mods, out_dir, romfs, oead_tools, item_get)
+        lines = digs_mod.apply(dig_locs, dig_tiles, mods, out_dir, romfs, event_tools, oead_tools, item_get, las_data)
         with open(os.path.join(out_dir, f'digs_{settings["seed"]}.txt'), 'w') as f:
             f.write('Digs:\n' + '\n'.join(lines) + '\n')
         print('digs placed:', len(lines), flush=True)

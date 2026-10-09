@@ -75,6 +75,8 @@ static const char *level_name(void) {
 }
 
 uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info) {
+    extern bool rt_digs_skip_plant(uint32_t type, uint64_t info);  // digsanity: no grass / bush on a dug tile
+    if (rt_digs_skip_plant(type, info)) return 0;
     if (g_nsouls < 0) load();
     if (ENV("LARECOMP_LOG_SPAWN")) {  // (debug: every actor the factory makes; spawn info words)
         LOG("[spawn] type %#x:", type);
