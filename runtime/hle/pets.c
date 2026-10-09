@@ -25,25 +25,26 @@ static const struct { const char *name, *found, *gone; } kComp[5] = {
 };
 static const int kPetComp[NPETS] = {C_ROOSTER, C_MARIN, C_GHOST};  // pets.py ORDER
 
+static int g_nflags = -1;  // flags.tsv entries read (per seed: read again after an in-place reboot)
 static int flag_index(const char *name) {
     static char names[64][32];
-    static int idx[64], n = -1;
-    if (n < 0) {
-        n = 0;
+    static int idx[64];
+    if (g_nflags < 0) {
+        g_nflags = 0;
         char p[600], line[128];
         snprintf(p, sizeof p, "%s/flags.tsv", rando_seed_dir() ? rando_seed_dir() : ".");
         FILE *f = rando_seed_dir() ? fopen(p, "r") : NULL;
-        while (f && n < 64 && fgets(line, sizeof line, f)) {
+        while (f && g_nflags < 64 && fgets(line, sizeof line, f)) {
             char nm[64];
             int i;
             if (sscanf(line, "%63s %d", nm, &i) == 2) {
-                strlcpy(names[n], nm, sizeof names[n]);
-                idx[n++] = i;
+                strlcpy(names[g_nflags], nm, sizeof names[g_nflags]);
+                idx[g_nflags++] = i;
             }
         }
         if (f) fclose(f);
     }
-    for (int i = 0; name && i < n; i++)
+    for (int i = 0; name && i < g_nflags; i++)
         if (!strcmp(names[i], name)) return idx[i];
     return -1;
 }
@@ -97,3 +98,5 @@ int rt_pet_item(int n) {
     LOG("[pets] found pet %d (companion %d: %s)\n", n, c, kComp[c].name);
     return 1;
 }
+
+RT_ON_RESET(pets_reset) { g_nflags = -1; }  // (seed switch: the next seed's flags.tsv)

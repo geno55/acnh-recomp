@@ -20,3 +20,10 @@ echo $$ > "$L/pid"
 until [ "$(game_free_gb)" -ge "$GAME_MIN_FREE_GB" ]; do sleep 5; done
 ( sleep 20; rm -rf "$L" ) >/dev/null 2>&1 &
 GAME_SLOT=  # (nothing to release at exit)
+# test runs never write the player's larecomp.ini: a scratch copy unless the caller gave LARECOMP_SETTINGS
+if [ -z "$LARECOMP_SETTINGS" ]; then
+    mkdir -p build/test_ini
+    LARECOMP_SETTINGS="build/test_ini/settings_$$.ini"
+    cp larecomp.ini "$LARECOMP_SETTINGS" 2>/dev/null || : > "$LARECOMP_SETTINGS"
+    export LARECOMP_SETTINGS
+fi

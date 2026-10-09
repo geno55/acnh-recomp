@@ -63,3 +63,5 @@ int souls_owned(int dungeon) {
         if (g_souls[i].dungeon == dungeon) return flags_ext_get(g_souls[i].flag);
     return -1;
 }
+
+RT_ON_RESET(souls_reset) { g_nsouls = -1; }  // (seed switch: reload rando/<seed>/souls.tsv)

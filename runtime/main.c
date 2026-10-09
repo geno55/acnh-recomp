@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "settings.h"
 #include "hle.h"
 #include "kernel.h"
 #include "rando.h"
@@ -75,7 +76,9 @@ void reboot_test_frame(uint64_t frame) {
     next = strchr(next, ',');
     if (next) next++;
     if (!strcmp(what, "title")) { rt_request_reboot(RT_REBOOT_TITLE); return; }
-    rando_select(strcmp(what, "vanilla") ? what : "");
+    // (a test run: the next boot's seed without saving it - larecomp.ini is the player's choice)
+    strlcpy(g_settings.rando_seed, strcmp(what, "vanilla") ? what : "", sizeof g_settings.rando_seed);
+    unsetenv("LARECOMP_RANDO_SEED");
     rt_request_reboot(RT_REBOOT_GAME);
 }
 

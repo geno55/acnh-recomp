@@ -49,8 +49,8 @@ static const struct { const char *level; float x0, z0, x1, z1; } kBossArena[] = 
 static const char *const kHome[2] = {"MarinTarinHouse", "MarinTarinHouse_01A"};
 
 // LARECOMP_ESCAPE=1 / 0 forces it on / off (tests: also in vanilla)
+static int on = -1;  // (per seed: read again after an in-place reboot)
 static bool active(void) {
-    static int on = -1;
     if (on >= 0) return on;
     const char *e = getenv("LARECOMP_ESCAPE");
     if (e) return on = atoi(e) != 0;
@@ -143,3 +143,5 @@ bool escape_bottle_owned(void) {
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     return active() && ps && (LD8(ps + 0xa9) & 0x80);
 }
+
+RT_ON_RESET(escape_reset) { on = -1; }  // (seed switch: the next seed may differ)

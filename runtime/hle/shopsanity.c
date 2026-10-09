@@ -75,3 +75,5 @@ void rt_add_prize(Cpu *c) {
     LOG("[trendsanity] prize row %d won: flags %d %d, adds row %d\n", e->id, e->done, e->give, e->add);
     c->x[0] = (uint64_t)e->add;
 }
+
+RT_ON_RESET(shopsanity_reset) { g_n = -1; }  // (seed switch: reload the seed's table)

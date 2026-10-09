@@ -17,10 +17,10 @@
 
 #define HOOK_TARGET 0x4000u
 
+static int g_seed_on = -1;  // (per seed: read again after an in-place reboot)
 static int seed_on(void) {
-    static int on = -1;
-    if (on < 0) {
-        on = 0;
+    if (g_seed_on < 0) {
+        g_seed_on = 0;
         const char *dir = rando_seed_dir();
         char p[512];
         if (dir) {
@@ -31,12 +31,12 @@ static int seed_on(void) {
                 size_t n = fread(buf, 1, sizeof buf - 1, f);
                 buf[n] = 0;
                 fclose(f);
-                on = strstr(buf, "\"hookshot-anything\": true") != NULL;
+                g_seed_on = strstr(buf, "\"hookshot-anything\": true") != NULL;
             }
         }
-        LOG("[hookshot] hookshot anything %s by the seed\n", on ? "ON" : "off");
+        LOG("[hookshot] hookshot anything %s by the seed\n", g_seed_on ? "ON" : "off");
     }
-    return on;
+    return g_seed_on;
 }
 
 int rt_hookshot_anything(void) {
@@ -130,3 +130,5 @@ void hookshot_tour_tick(uint64_t frame) {
         }
     }
 }
+
+RT_ON_RESET(hookshot_reset) { g_seed_on = -1; }  // (seed switch)
