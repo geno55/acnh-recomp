@@ -47,6 +47,10 @@ OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 MAX_TERMS = 48
 
 
+# location subtypes LAS shuffles (shuffler.py: every other item location keeps its vanilla content)
+RANDOMIZED_SUBTYPES = ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')
+
+
 def cell_pos(cell):  # '06C' -> (col 2, row 6)
     return ord(cell[2]) - ord('A'), int(cell[:2])
 

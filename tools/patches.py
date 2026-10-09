@@ -337,6 +337,23 @@ def _bottle3_use(gen, a):
 PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
 
 
+# Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
+# create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
+# its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
+BOSS_SPAWN_SITE = 0x70008f5ed4
+
+
+def _boss_spawn(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+
+
+PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
+
+
 # 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
 # to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
 # runtime returns the stick's own angle instead (as the community "360 Controls" mod does).

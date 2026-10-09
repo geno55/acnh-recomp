@@ -95,7 +95,7 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
-        'bushes': False,
+        'bushes': False, 'boss-souls': False,
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
@@ -210,6 +210,12 @@ def main():
     for k, d in item_defs.items():
         if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
             d['type'] = 'important'
+
+    if settings.get('boss-souls'):  # boss souls: a boss only appears once its soul is found (tools/rando/souls.py)
+        import souls as souls_mod
+        from RandomizerCore.Randomizers import chests as las_chests
+        print('boss souls:', souls_mod.add_to_logic(logic_defs, item_defs), 'in the pool', flush=True)
+        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(b[1]) for b in souls_mod.BOSSES]
 
     pot_locs = {}
     if settings.get('pots'):
@@ -474,6 +480,10 @@ def main():
     if pets:
         from RandomizerCore.Tools import event_tools, oead_tools
         print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
+    if settings.get('boss-souls'):
+        import msbt
+        from RandomizerCore.Tools import event_tools, oead_tools
+        print('boss souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt), flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data
