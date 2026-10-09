@@ -181,7 +181,11 @@ RT_ON_RESET(tracker_reset) {  // (reboot: the next seed's tracker.tsv; the map p
     g_map_frame = g_map_opened = g_map_obj = 0;
     g_map_zoomed = 0;
 }
-static bool flag_set(int i) { return i >= 0 && i < 2048 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1; }
+extern "C" bool flags_ext_get(int idx);  // runtime/hle/flags_ext.c (bushes, digs: 2048+)
+static bool flag_set(int i) {
+    if (i >= 2048) return flags_ext_get(i);
+    return i >= 0 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1;
+}
 static int &A(int id) {  // access count; tokens interned after sizing (e.g. "x[pit]") grow the table
     if (id >= (int)g_acc.size()) g_acc.resize(id + 64, 0);
     return g_acc[id];
