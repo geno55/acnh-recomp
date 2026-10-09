@@ -115,15 +115,17 @@ struct GenOpts {
     int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
     bool pet_rooster = false, pet_ghost = false;  // pets in the pool (tools/rando/pets.py)
     bool pet_marin = false;   // Marin in the pool, the desert closed until she wakes the Walrus (open-desert off)
+    int shopsanity = 0;       // off / vanilla prices / random prices (tools/rando/shopsanity.py)
+    bool trendsanity = false; // every Trendy Game prize is a check (tools/rando/trendsanity.py)
 };
 static GenOpts g_opts;
 
 // ---- Seed IDs: a 25-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and
 // every generation option, with a checksum in the last 5 bits. Same ID + same LAS Recomp version = the same seed, so
 // IDs can be shared. The generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout
-// changes. v2: 36-bit random part; v3: + dungeon room shuffle; v4: 25 characters (v2 / v3 IDs had 20: they still
-// load, the yes/no options that didn't fit them are off).
-enum { SEED_ID_VERSION = 4, SEED_ID_BITS = 125, SEED_ID_BITS_V3 = 100 };
+// changes. v2: 36-bit random part; v3: + dungeon room shuffle; v4: 25 characters, + shopsanity, pets, Trendy Game
+// prizes (v2 / v3 IDs had 20: they still load, the options they don't hold are off).
+enum { SEED_ID_VERSION = 4, SEED_ID_BITS = 125, SEED_ID_BITS_V3 = 100, SEED_ID_FLAGS_V3 = 23 };
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 struct Bits {
@@ -138,7 +140,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
-                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin};
+                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -155,6 +157,7 @@ static void seed_id_encode(GenOpts &o, char *out, size_t cap) {
     x.put(o.logic, 3); x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
     x.put(o.tunic, 4); x.put(o.entrances, 2); x.put(o.start_rupees, 10);
     x.put(o.room_shuffle, 2);  // (v3)
+    x.put(o.shopsanity, 2);    // (v4)
     for (int i = 0; bool *f = opt_flags(o, i); i++) x.put(*f, 1);
     int data = x.n;
     x.put(0, SEED_ID_BITS - 5 - data);
@@ -184,21 +187,24 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
         x.put((uint64_t)(q - kB32), 5);
         chars++;
     }
-    if (chars != SEED_ID_BITS / 5 && chars != SEED_ID_BITS_V3 / 5) return "a seed ID has 25 characters";
-    int end = chars * 5 - 5;  // checksum position
-    if ((uint32_t)(x.b[end] | x.b[end + 1] << 1 | x.b[end + 2] << 2 | x.b[end + 3] << 3 | x.b[end + 4] << 4) != id_check(x, end))
-        return "typo? (checksum doesn't match)";
+    int bits = chars * 5;  // 25 characters (v4), or 20 (v2 / v3)
+    if (bits != SEED_ID_BITS && bits != SEED_ID_BITS_V3) return "a seed ID has 25 characters";
+    uint32_t sum = 0;
+    for (int i = 0; i < 5; i++) sum |= (uint32_t)x.b[bits - 5 + i] << i;
+    if (sum != id_check(x, bits - 5)) return "typo? (checksum doesn't match)";
     x.n = 0;
     int ver = (int)x.get(4);
-    if (chars == SEED_ID_BITS / 5 ? ver != SEED_ID_VERSION : ver != 2 && ver != 3)
+    if (bits == SEED_ID_BITS ? ver != SEED_ID_VERSION : ver != 2 && ver != 3)
         return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
     GenOpts t = o;
     t.rng = x.get(36);
     t.logic = (int)x.get(3); t.dungeon_items = (int)x.get(2); t.keysanity = (int)x.get(2); t.traps = (int)x.get(3);
     t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
     t.room_shuffle = ver >= 3 ? (int)x.get(2) : 0;
-    for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.n < end ? x.get(1) : false;  // (20-char IDs: beyond = off)
-    if (t.room_shuffle > 3 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 3 || t.start_rupees > 999)
+    t.shopsanity = ver >= 4 ? (int)x.get(2) : 0;
+    for (int i = 0; bool *f = opt_flags(t, i); i++) *f = ver >= 4 || i < SEED_ID_FLAGS_V3 ? x.get(1) : 0;
+    if (t.room_shuffle > 3 || t.shopsanity > 2 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 ||
+        t.entrances > 3 || t.start_rupees > 999)
         return "not a valid seed ID";
     t.ohko = false;
     o = t;
@@ -278,6 +284,8 @@ static void start_generation(void) {
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     static const char *rs[] = {"off", "coherent", "chaos", "madness"};
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
+    static const char *shop[] = {"off", "vanilla", "random"};
+    fprintf(f, " \"shopsanity\": \"%s\", \"trendsanity\": %s,\n", shop[g_opts.shopsanity], g_opts.trendsanity ? "true" : "false");
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
             g_opts.pet_ghost ? "true" : "false", g_opts.pet_marin ? "false" : "true");
@@ -603,6 +611,17 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
+    static const char *shopn[] = {"Off", "Vanilla prices", "Random prices"};
+    combo("Shopsanity", &g_opts.shopsanity, shopn, 3);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every good in the Mabe Village shop is a check: the shield, hearts, shovel, bow, arrows, bombs,\n"
+                          "the seven chamber stones and the piece of heart. The shelf shows the item and its name.\n"
+                          "Buy it, or steal it (the shopkeeper remembers a thief, as in the original game).");
+    ImGui::Checkbox("Trendy Game prizes", &g_opts.trendsanity);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every Trendy Game prize is a check: the Yoshi doll, the pieces of heart, the seashells, the\n"
+                          "chamber stone and the ten figures (they need the same instruments as in the original game).\n"
+                          "The prizes on the crane floor show the items you can win.");
     static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves", "+ connector caves"};
     combo("Entrance randomizer", &g_opts.entrances, ent, 4);
     if (ImGui::IsItemHovered())

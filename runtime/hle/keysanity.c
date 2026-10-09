@@ -35,6 +35,8 @@ static int refill(Cpu *c, int item, int count) {
 // x0 item, x1 count, x2 index: returns 1 when handled (AddItem then returns at once)
 int rt_add_item(Cpu *c) {
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
+    extern int rt_shop_add_item(Cpu *);  // shopsanity.c: a stolen shopsanity good
+    if (rt_shop_add_item(c)) return 1;
     if (index == REFILL_INDEX && (item == IT_BOMB || item == IT_POWDER || item == IT_ARROW)) return refill(c, item, count);
     extern int rt_pet_item(int n);  // pets.c: companions found as items (tools/rando/pets.py PET_INDEX 90)
     if (index >= 90 && index < 93) return rt_pet_item(index - 90);

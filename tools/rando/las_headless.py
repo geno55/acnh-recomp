@@ -98,6 +98,7 @@ def default_settings(seed):
         'bushes': False,
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
+        'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -224,6 +225,17 @@ def main():
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
 
+    import shopsanity
+    import trendsanity
+    for f in ('shopsanity.tsv', 'check_flags.tsv'):  # (appended to by both modules)
+        if os.path.exists(os.path.join(out_dir, f)):
+            os.remove(os.path.join(out_dir, f))
+    sanity_inside = {}  # their locations inside shuffled interiors: {door: [(location, condition)]}
+    if shopsanity.enabled(settings):
+        sanity_inside.update(shopsanity.add_to_logic(logic_defs, item_defs, settings))
+    if trendsanity.enabled(settings):
+        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs))
+
     import pets as pets_mod  # companions as items (tools/rando/pets.py)
     pets = pets_mod.add_to_pool(logic_defs, item_defs, settings)
     if pets:
@@ -242,7 +254,7 @@ def main():
         ent_doors = el.pool(ed)
         decoupled = bool(settings.get('entrance-decoupled', False))
         ent_entry, ent_exit = el.shuffle(ent_doors, decoupled, _random.Random(f"{settings['seed']}-entrances"))
-        extra = {}
+        extra = {k: list(v) for k, v in sanity_inside.items()}
         lv_door = {d['dest_level']: d['id'] for d in ent_doors}
         for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
             if p['level'] in lv_door:
@@ -437,6 +449,18 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
+    if shopsanity.enabled(settings) or trendsanity.enabled(settings):  # (before pots: they take the flags after ours)
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        import msbt
+        stage('Stocking the shop', 0.925)
+        if shopsanity.enabled(settings):
+            lines = shopsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, msbt)
+            print('shopsanity:\n' + '\n'.join(lines), flush=True)
+        if trendsanity.enabled(settings):
+            lines = trendsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, las_data,
+                                      shopsanity.alloc_flags)
+            print('trendsanity:\n' + '\n'.join(lines), flush=True)
     if pets:
         from RandomizerCore.Tools import event_tools, oead_tools
         print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)

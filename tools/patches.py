@@ -209,6 +209,21 @@ def _add_item(gen, a):
 PATCHES[ADD_ITEM_SITE] = _add_item
 
 
+# Trendsanity (runtime/hle/shopsanity.c): AddPrizeByKey (main+0x7e1c70) looked the prize row up (x0) and is about to
+# call AddPrize(row, count, index) (main+0x1489c0, rows 0-20 only): a randomized prize row sets its check's flags.
+PRIZE_ADD_SITE = 0x70007e1d10
+
+
+def _prize_add(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x2a1403e2, hex(w)  # mov w2, w20
+    return ('{ c->x[2] = (uint32_t)c->x[20]; extern void rt_add_prize(Cpu *); rt_add_prize(c); }'
+            f'  /* {a:#x}: mov w2, w20 (AddPrize index; trendsanity) */')
+
+
+PATCHES[PRIZE_ADD_SITE] = _prize_add
+
+
 # Inventory overlay (runtime/ui/inventory_overlay.mm): main+0xeb7cd0 runs once per frame only while the pause
 # menu's Items page is shown (found by profiling Items vs Map/System pages). Its prologue reports that.
 ITEMS_PAGE_SITE = 0x7000eb7cd0
