@@ -302,3 +302,19 @@ def _frame_steps(gen, a):
 
 
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
+
+
+# Hookshot anything (runtime/hle/hookshot.c): the hookshot's Shot update (main+0xd7ecc0) loads the attribute word of
+# the surface its ray hit; bit 0x4000 (hookshot target) makes it latch (Adhere) instead of bouncing off (Return).
+HOOKSHOT_ATTR_SITE = 0x7000d7ee9c
+
+
+def _hookshot_attr(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9403bf7, hex(w)  # ldr w23, [sp, #0x38]
+    return ('{ extern uint32_t rt_hookshot_attr(Cpu *, uint32_t); '
+            'c->x[23] = rt_hookshot_attr(c, LD32(c->sp + 0x38)); }'
+            f'  /* {a:#x}: ldr w23, [sp, #0x38] (hookshot hit attribute) */')
+
+
+PATCHES[HOOKSHOT_ATTR_SITE] = _hookshot_attr

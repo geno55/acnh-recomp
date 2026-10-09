@@ -22,6 +22,7 @@ typedef struct {
     bool cheat_hearts;   // health kept full
     bool cheat_ammo;     // bombs / arrows / magic powder kept full (for the bags Link owns)
     bool cheat_rupees;   // rupees kept at 999
+    bool cheat_hookshot; // hookshot latches onto any surface (runtime/hle/hookshot.c; seeds made with it: always)
     // difficulty (runtime/ui/difficulty.mm)
     float diff_damage;   // damage taken multiplier (1 = normal)
     bool diff_ohko;      // any hit kills
