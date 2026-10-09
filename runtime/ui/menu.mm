@@ -467,18 +467,6 @@ extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
 
-// Toasts: short notices any thread can post (e.g. keysanity "Small Key - Key Cavern"), shown top-centre ~3.5 s.
-static pthread_mutex_t g_toast_lock = PTHREAD_MUTEX_INITIALIZER;
-static char g_toast[160];
-static double g_toast_at = -100;
-extern "C" void ui_toast(const char *text) {
-    pthread_mutex_lock(&g_toast_lock);
-    strlcpy(g_toast, text, sizeof g_toast);
-    g_toast_at = SDL_GetTicks() / 1000.0;
-    pthread_mutex_unlock(&g_toast_lock);
-}
-static bool toast_active(void) { return SDL_GetTicks() / 1000.0 - g_toast_at < 3.5; }
-
 static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
     float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
@@ -566,12 +554,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
-    bool toast = toast_active();
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !toast) {
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -622,23 +609,6 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
         ImGui::Text("%.0f fps", io.Framerate);
         ImGui::End();
-    }
-
-    if (toast && !open) {
-        char t[160];
-        pthread_mutex_lock(&g_toast_lock);
-        strlcpy(t, g_toast, sizeof t);
-        double age = SDL_GetTicks() / 1000.0 - g_toast_at;
-        pthread_mutex_unlock(&g_toast_lock);
-        float a = age < 0.25 ? (float)(age / 0.25) : age > 3.0 ? (float)((3.5 - age) / 0.5) : 1.0f;
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 90 * scale), 0, ImVec2(0.5f, 0));
-        ImGui::SetNextWindowBgAlpha(0.72f * a);
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
-        ImGui::Begin("##toast", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.45f, 1), "%s", t);
-        ImGui::End();
-        ImGui::PopStyleVar();
     }
 
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
