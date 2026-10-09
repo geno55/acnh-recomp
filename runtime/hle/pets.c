@@ -1,10 +1,12 @@
 // Pets (tools/rando/pets.py): the Flying Rooster, Marin and the Ghost found as items. A pet item reaches the game's
-// AddItem (keysanity.c rt_add_item) with index PET_INDEX + n; it becomes the companion following Link (live save
-// +0x555D: 0 none, 1 BowWow, 2 Marin, 3 Ghost, 4 Flying Rooster - the game spawns it at the next screen / room
-// load) and is remembered in an event flag so the in-game menu can call any found pet back (runtime/ui/pets_ui.mm;
-// Link has one companion at a time). A companion a pet sends away (also BowWow, or a rooster revived the vanilla
-// way) is marked found too. The Ghost skips his house visit (Ghost2/3 flags): he asks for his grave, whose Owl
-// gives the ghost-reward check once he is laid to rest (Ghost4_Clear).
+// AddItem (keysanity.c rt_add_item) with index PET_INDEX + n; the Rooster / Marin become the companion following
+// Link (live save +0x555D: 0 none, 1 BowWow, 2 Marin, 3 Ghost, 4 Flying Rooster - the game spawns it at the next
+// screen / room load) and are remembered in an event flag so the pause menu's companion slot (runtime/ui/
+// inventory_overlay.mm) and the in-game menu can call any found pet back (Link has one companion at a time). A
+// companion a pet sends away (also BowWow, or a rooster revived the vanilla way) is marked found too.
+// The Ghost is an Items-page item, not a follower (seeds with settings.json "ghost-item"; older seeds: he follows):
+// found, he skips his house visit (Ghost2/3 flags) and the grave takes him without the companion slot (its trigger
+// reads his found flag, pets.py); laid to rest (Ghost4_Clear) his Owl gives the ghost-reward check (EighthClear).
 // Flag indices come from rando/<seed>/flags.tsv (tools/rando/seed_tables.py).
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +28,7 @@ static const struct { const char *name, *found, *gone; } kComp[5] = {
 static const int kPetComp[NPETS] = {C_ROOSTER, C_MARIN, C_GHOST};  // pets.py ORDER
 
 static int g_nflags = -1;  // flags.tsv entries read (per seed: read again after an in-place reboot)
+static int g_ghost_item = -1;  // settings.json "ghost-item" (per seed)
 static int flag_index(const char *name) {
     static char names[64][32];
     static int idx[64];
@@ -63,11 +66,33 @@ static void flag_put(const char *name, bool on) {
 
 int pets_current(void) { return *(volatile uint8_t *)(uintptr_t)COMPANION; }
 
+static bool ghost_item(void) {
+    if (g_ghost_item >= 0) return g_ghost_item;
+    g_ghost_item = 0;
+    char p[600], buf[16384];
+    snprintf(p, sizeof p, "%s/settings.json", rando_seed_dir() ? rando_seed_dir() : ".");
+    FILE *f = rando_seed_dir() ? fopen(p, "r") : NULL;
+    if (!f) return false;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return g_ghost_item = strstr(buf, "\"ghost-item\": true") != NULL;
+}
+
+// Items-page Ghost slot: -1 none (not an item in this seed / not found), 0 found, 1 laid to rest and his Owl's
+// check collected (EighthClear: the Owl's flow sets it as it gives the item)
+int pets_ghost_state(void) {
+    if (!ghost_item() || !flag_get(kComp[C_GHOST].found)) return -1;
+    return flag_get("Ghost4_Clear") && flag_get("EighthClear");
+}
+
 // Companions the menu can call (found, story not past them), current one included: count, values in out[]
 int pets_callable(int out[5]) {
     int n = 0;
     for (int c = C_BOWWOW; c <= C_ROOSTER; c++)
-        if ((flag_get(kComp[c].found) || pets_current() == c) && !(kComp[c].gone && flag_get(kComp[c].gone))) out[n++] = c;
+        if (pets_current() == c || (flag_get(kComp[c].found) && !(c == C_GHOST && ghost_item()) &&
+                                    !(kComp[c].gone && flag_get(kComp[c].gone))))
+            out[n++] = c;
     return n;
 }
 
@@ -83,6 +108,30 @@ void pets_call(int c) {
     LOG("[pets] companion %d -> %d\n", cur, c);
 }
 
+// Pause menu companion slot (runtime/ui/inventory_overlay.mm): the choices are "no companion" then every callable
+// one; out[0] = 0. Fewer than 2 = nothing to switch (no slot drawn).
+int pets_menu_options(int out[6]) {
+    out[0] = C_NONE;
+    return 1 + pets_callable(out + 1);
+}
+
+// Game thread, each pad read (input.c fill_state): on the Items page the right stick click (unused by the pause
+// menu) calls the next choice; the game never sees that press there. Returns the buttons the game gets.
+uint64_t pets_menu_buttons(uint64_t b) {
+    extern bool inventory_items_page_shown(void);
+    enum { RSTICK = 1ull << 5 };
+    static bool held;
+    bool down = b & RSTICK, edge = down && !held;
+    held = down;
+    if (!rando_seed_dir() || !inventory_items_page_shown()) return b;
+    int o[6], n = pets_menu_options(o), cur = pets_current(), i = 0;
+    if (edge && n >= 2) {
+        while (i < n && o[i] != cur) i++;
+        pets_call(o[i < n ? (i + 1) % n : 0]);
+    }
+    return b & ~(uint64_t)RSTICK;
+}
+
 // rt_add_item (keysanity.c): x2 index PET_INDEX + n. Returns 1 (handled: nothing is added to the inventory)
 int rt_pet_item(int n) {
     if (n < 0 || n >= NPETS) return 0;
@@ -93,10 +142,10 @@ int rt_pet_item(int n) {
         flag_put("Ghost2_Clear", true);
         flag_put("Ghost3_Clear", true);
     }
-    pets_call(c);
+    if (c != C_GHOST || !ghost_item()) pets_call(c);  // (the Ghost item leaves the follower alone)
     // (no custom pop-up: the user wants item text in the game's own message box - a pet message is still open)
     LOG("[pets] found pet %d (companion %d: %s)\n", n, c, kComp[c].name);
     return 1;
 }
 
-RT_ON_RESET(pets_reset) { g_nflags = -1; }  // (seed switch: the next seed's flags.tsv)
+RT_ON_RESET(pets_reset) { g_nflags = -1, g_ghost_item = -1; }  // (seed switch: the next seed's flags.tsv)

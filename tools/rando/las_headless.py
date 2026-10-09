@@ -556,6 +556,7 @@ def main():
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
+        s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker

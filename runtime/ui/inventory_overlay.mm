@@ -2,7 +2,9 @@
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
 // game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
 // dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found.
-// The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
+// Pets (runtime/hle/pets.c): the Ghost item sits in the equipment panel's free slot (left of the Secret Medicine),
+// ticked once laid to rest; a companion card left of the panel shows who follows Link and switches it (right stick
+// click). The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,7 +19,11 @@ extern "C" {
 #include "../settings.h"
 uint64_t renderer_present_count(void);
 int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in this seed
+int pets_ghost_state(void);    // runtime/hle/pets.c: -1 no Ghost item, 0 found, 1 laid to rest
+int pets_menu_options(int out[6]);
+int pets_current(void);
 }
+#include "../input_bind.h"
 
 #define DUNGEON_RECORDS (MAIN_BASE + 0x1CBB220 + 0xE0)  // live save: 0x10-byte records (+0 keys, +1 item bits)
 
@@ -67,11 +73,158 @@ static bool items_page_shown(void) {
     uint64_t f = g_items_frame;
     return f && renderer_present_count() - f <= 2;
 }
+extern "C" bool inventory_items_page_shown(void) { return items_page_shown(); }  // (pets.c: the companion button)
+
+static bool companion_card(void) {
+    int o[6];
+    return pets_menu_options(o) >= 2;
+}
 
 extern "C" bool escape_bottle_owned(void);  // runtime/hle/escape.c
 extern "C" bool inventory_overlay_wanted(void) {
-    return (g_settings.inv_keys || escape_bottle_owned()) && rando_seed_dir() && items_page_shown();
+    return (g_settings.inv_keys || escape_bottle_owned() || pets_ghost_state() >= 0 || companion_card()) &&
+           rando_seed_dir() && items_page_shown();
 }
+
+// ---- pets. Drawn glyphs (no game art): the Ghost, and a face per companion for the card.
+static ImU32 mul_alpha(ImU32 c, float a) { return (c & 0x00ffffff) | (ImU32)(((c >> 24) & 0xff) * a) << 24; }
+
+// The Ghost: a round head over a body with a scalloped hem and a tail; closed happy eyes, a blush
+static void ghost_icon(ImDrawList *dl, ImVec2 c, float s) {
+    ImU32 body = IM_COL32(236, 238, 255, 255), shade = IM_COL32(176, 182, 226, 255), line = IM_COL32(70, 70, 120, 255);
+    dl->AddCircleFilled(ImVec2(c.x + s * 0.04f, c.y + s * 0.08f), s * 0.42f, IM_COL32(0, 0, 0, 60), 32);  // shadow
+    float hr = s * 0.36f, hy = c.y - s * 0.08f, hem = c.y + s * 0.30f;
+    dl->AddCircleFilled(ImVec2(c.x, hy), hr, body, 32);
+    dl->AddRectFilled(ImVec2(c.x - hr, hy), ImVec2(c.x + hr, hem), body);
+    for (int k = 0; k < 3; k++)  // hem scallops
+        dl->AddCircleFilled(ImVec2(c.x - hr + hr / 3 + k * hr * 2 / 3, hem), hr / 3, body, 16);
+    dl->AddTriangleFilled(ImVec2(c.x - hr, hy + s * 0.18f), ImVec2(c.x - hr + s * 0.14f, hem + s * 0.06f),
+                          ImVec2(c.x - hr - s * 0.16f, hem + s * 0.14f), body);  // tail
+    dl->AddCircleFilled(ImVec2(c.x + s * 0.16f, c.y + s * 0.14f), s * 0.14f, mul_alpha(shade, 0.45f), 20);
+    // outline: head arc, sides, scallops, tail
+    float t = s * 0.045f;
+    dl->PathArcTo(ImVec2(c.x, hy), hr, 3.14159f, 6.28318f, 24);
+    dl->PathLineTo(ImVec2(c.x + hr, hem));
+    for (int k = 2; k >= 0; k--) dl->PathArcTo(ImVec2(c.x - hr + hr / 3 + k * hr * 2 / 3, hem), hr / 3, 0.0f, 3.14159f, 10);
+    dl->PathLineTo(ImVec2(c.x - hr - s * 0.16f, hem + s * 0.14f));
+    dl->PathLineTo(ImVec2(c.x - hr, hy + s * 0.18f));
+    dl->PathStroke(line, ImDrawFlags_Closed, t);
+    for (int e = -1; e <= 1; e += 2) {
+        ImVec2 ec(c.x + e * s * 0.13f, c.y - s * 0.08f);
+        dl->AddBezierQuadratic(ImVec2(ec.x - s * 0.06f, ec.y + s * 0.02f), ImVec2(ec.x, ec.y - s * 0.07f),
+                               ImVec2(ec.x + s * 0.06f, ec.y + s * 0.02f), line, t, 10);
+        dl->AddCircleFilled(ImVec2(ec.x + e * s * 0.04f, ec.y + s * 0.09f), s * 0.045f, IM_COL32(255, 150, 170, 200), 12);
+    }
+    dl->AddCircleFilled(ImVec2(c.x, c.y + s * 0.05f), s * 0.035f, line, 10);  // little "o" mouth
+}
+
+// "Turned in": a green tick with a dark outline over the slot's lower right
+static void tick(ImDrawList *dl, ImVec2 c, float s) {
+    ImVec2 p[3] = {ImVec2(c.x - s * 0.30f, c.y), ImVec2(c.x - s * 0.08f, c.y + s * 0.22f), ImVec2(c.x + s * 0.34f, c.y - s * 0.26f)};
+    dl->AddPolyline(p, 3, IM_COL32(30, 50, 20, 255), 0, s * 0.22f);
+    dl->AddPolyline(p, 3, IM_COL32(120, 230, 90, 255), 0, s * 0.12f);
+}
+
+// Companion faces: BowWow (black chain chomp, white eye, red mouth), Marin (red hair, hibiscus), the Flying Rooster
+// (white bird, red comb, yellow beak), the Ghost (older seeds: he follows), none (an empty ring)
+static void companion_icon(ImDrawList *dl, ImVec2 c, float s, int who) {
+    float r = s * 0.42f;
+    switch (who) {
+    case 1:
+        dl->AddCircleFilled(c, r, IM_COL32(28, 28, 34, 255), 32);
+        dl->AddCircleFilled(ImVec2(c.x - r * 0.35f, c.y - r * 0.45f), r * 0.18f, IM_COL32(120, 120, 140, 160), 12);
+        dl->AddCircleFilled(ImVec2(c.x + r * 0.25f, c.y - r * 0.25f), r * 0.26f, IM_COL32(255, 255, 255, 255), 16);
+        dl->AddCircleFilled(ImVec2(c.x + r * 0.30f, c.y - r * 0.25f), r * 0.11f, IM_COL32(20, 20, 20, 255), 10);
+        dl->AddTriangleFilled(ImVec2(c.x - r * 0.35f, c.y + r * 0.10f), ImVec2(c.x + r * 0.85f, c.y + r * 0.15f),
+                              ImVec2(c.x + r * 0.35f, c.y + r * 0.70f), IM_COL32(200, 40, 50, 255));
+        for (int t = 0; t < 3; t++)  // teeth
+            dl->AddTriangleFilled(ImVec2(c.x - r * 0.10f + t * r * 0.28f, c.y + r * 0.12f),
+                                  ImVec2(c.x + r * 0.18f + t * r * 0.28f, c.y + r * 0.13f),
+                                  ImVec2(c.x + r * 0.04f + t * r * 0.28f, c.y + r * 0.32f), IM_COL32(255, 255, 255, 255));
+        break;
+    case 2:
+        dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.05f), r, IM_COL32(190, 60, 50, 255), 32);  // hair
+        dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.18f), r * 0.66f, IM_COL32(255, 222, 190, 255), 28);  // face
+        dl->PathArcTo(ImVec2(c.x, c.y - r * 0.05f), r * 0.70f, 3.14159f, 6.28318f, 16);  // fringe
+        dl->PathFillConvex(IM_COL32(190, 60, 50, 255));
+        for (int e = -1; e <= 1; e += 2)
+            dl->AddCircleFilled(ImVec2(c.x + e * r * 0.25f, c.y + r * 0.22f), r * 0.09f, IM_COL32(60, 40, 40, 255), 10);
+        for (int k = 0; k < 5; k++) {  // hibiscus
+            float a = k * 1.2566f;
+            dl->AddCircleFilled(ImVec2(c.x + r * 0.62f + cosf(a) * r * 0.16f, c.y - r * 0.45f + sinf(a) * r * 0.16f),
+                                r * 0.14f, IM_COL32(255, 90, 140, 255), 10);
+        }
+        dl->AddCircleFilled(ImVec2(c.x + r * 0.62f, c.y - r * 0.45f), r * 0.08f, IM_COL32(255, 230, 120, 255), 8);
+        break;
+    case 4:
+        dl->AddTriangleFilled(ImVec2(c.x - r * 0.25f, c.y - r * 0.55f), ImVec2(c.x + r * 0.05f, c.y - r * 1.0f),
+                              ImVec2(c.x + r * 0.30f, c.y - r * 0.55f), IM_COL32(220, 40, 40, 255));  // comb
+        dl->AddCircleFilled(c, r * 0.80f, IM_COL32(250, 250, 245, 255), 28);
+        dl->AddTriangleFilled(ImVec2(c.x + r * 0.62f, c.y - r * 0.15f), ImVec2(c.x + r * 1.05f, c.y + r * 0.02f),
+                              ImVec2(c.x + r * 0.62f, c.y + r * 0.18f), IM_COL32(250, 190, 40, 255));  // beak
+        dl->AddCircleFilled(ImVec2(c.x + r * 0.55f, c.y + r * 0.35f), r * 0.13f, IM_COL32(220, 40, 40, 255), 10);
+        dl->AddCircleFilled(ImVec2(c.x + r * 0.30f, c.y - r * 0.18f), r * 0.10f, IM_COL32(20, 20, 20, 255), 10);
+        dl->AddBezierQuadratic(ImVec2(c.x - r * 0.55f, c.y + r * 0.05f), ImVec2(c.x - r * 0.15f, c.y + r * 0.55f),
+                               ImVec2(c.x + r * 0.20f, c.y + r * 0.15f), IM_COL32(190, 190, 200, 255), r * 0.10f, 12);
+        break;
+    case 3: ghost_icon(dl, c, s * 0.95f); break;
+    default:
+        dl->AddCircle(c, r * 0.7f, IM_COL32(150, 128, 90, 220), 28, s * 0.05f);
+        dl->AddLine(ImVec2(c.x - r * 0.45f, c.y + r * 0.45f), ImVec2(c.x + r * 0.45f, c.y - r * 0.45f),
+                    IM_COL32(150, 128, 90, 220), s * 0.05f);
+    }
+}
+
+// The button that clicks the right stick for the game, in the controller's words (as texpatch.c labels: RS / R3)
+static const char *switch_label(void) {
+    int h = bind_prompt_host(BIND_RSTICK), fam = bind_label_family();
+    if (h == 8) return fam == 2 ? "R3" : "RS";
+    if (h == 7) return fam == 2 ? "L3" : "LS";
+    return bind_pad_label(h, fam);
+}
+
+static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
+    // the Ghost: the equipment panel's bottom-left slot (game layout 188, 444; the Secret Medicine's is 242, 444)
+    int g = pets_ghost_state();
+    if (g >= 0) {
+        ImVec2 c(ox + 188 * u, oy + 444 * u);
+        ghost_icon(dl, c, 50 * u);
+        if (g > 0) tick(dl, ImVec2(c.x + 12 * u, c.y + 12 * u), 30 * u);
+    }
+    // companion card: the free strip left of the panel, under the heart container
+    int o[6], n = pets_menu_options(o), cur = pets_current();
+    if (n < 2) return;
+    static const char *const kShort[5] = {"None", "BowWow", "Marin", "Ghost", "Rooster"};
+    ImVec2 a(ox + 62 * u, oy + 214 * u), b(ox + 140 * u, oy + 486 * u);
+    float cx = (a.x + b.x) * 0.5f;
+    dl->AddRectFilled(a, b, IM_COL32(52, 38, 20, 215), 12 * u);
+    dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 12 * u, 0, 2 * u);
+    auto text = [&](const char *t, float y, float fs, ImU32 col) {
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, t);
+        dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, y), col, t);
+    };
+    text("Companion", a.y + 8 * u, 15 * u, IM_COL32(240, 206, 110, 255));
+    ImVec2 ic(cx, a.y + 64 * u);
+    dl->AddCircleFilled(ic, 28 * u, IM_COL32(120, 92, 40, 235), 32);
+    dl->AddCircle(ic, 28 * u, IM_COL32(255, 220, 120, 255), 32, 2 * u);
+    companion_icon(dl, ic, 44 * u, cur);
+    // every choice, the current one lit
+    for (int i = 0; i < n; i++) {
+        float y = a.y + 104 * u + i * 24 * u;
+        bool on = o[i] == cur;
+        if (on) dl->AddRectFilled(ImVec2(a.x + 6 * u, y - 2 * u), ImVec2(b.x - 6 * u, y + 20 * u), IM_COL32(120, 92, 40, 235), 6 * u);
+        text(kShort[o[i]], y, 16 * u, on ? IM_COL32(255, 240, 200, 255) : IM_COL32(170, 150, 115, 230));
+    }
+    // the button: a pill in the menu's prompt colours, "Switch" over it
+    const char *bl = switch_label();
+    float fs = 15 * u, y = b.y - 28 * u;
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, bl);
+    ImVec2 pa(cx - ts.x * 0.5f - 7 * u, y), pb(cx + ts.x * 0.5f + 7 * u, y + ts.y + 4 * u);
+    dl->AddRectFilled(pa, pb, IM_COL32(240, 232, 210, 255), (pb.y - pa.y) * 0.5f);
+    dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, y + 2 * u), IM_COL32(52, 38, 20, 255), bl);
+    text("Switch", y - 20 * u, 14 * u, IM_COL32(230, 215, 185, 255));
+}
+
 
 // Escape Bottle (runtime/hle/escape.c): item names are hidden in randomizer seeds, so the third bottle's slot (last of
 // the bottom row, game layout 1076, 428) gets a name tag under it
@@ -129,6 +282,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     ImVec2 p0(ox + 150 * u, oy + 512 * u), p1(ox + 1130 * u, oy + 630 * u);
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     if (escape_bottle_owned()) escape_tag(dl, font, ox, oy, u);
+    pets_draw(dl, font, ox, oy, u);
     if (!g_settings.inv_keys) return;
     dl->AddRectFilled(p0, p1, IM_COL32(52, 38, 20, 205), 14 * u);
     dl->AddRect(p0, p1, IM_COL32(214, 176, 92, 230), 14 * u, 0, 2.5f * u);

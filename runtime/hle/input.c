@@ -324,6 +324,7 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
+    { extern uint64_t pets_menu_buttons(uint64_t b); b = pets_menu_buttons(b); }  // (pause menu companion slot)
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     if (!menu && g_settings.dpad_move && lx == 0 && ly == 0) {  // d-pad / arrow keys walk (setting), stick left alone
