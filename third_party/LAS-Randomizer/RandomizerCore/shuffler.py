@@ -549,7 +549,9 @@ class ItemShuffler(QtCore.QThread):
             
             # Place the defined vanilla content
             placements[loc] = self.logic_defs[loc]['content']
-            
+
+            if placements[loc] not in items:  # (LAS Recomp: say which, instead of a bare ValueError)
+                raise ValueError(f"vanilla content {placements[loc]!r} of {loc} is not in the item pool")
             items.remove(placements[loc])
             access = self.removeAccess(access, placements[loc])
             locations.remove(loc)
@@ -623,6 +625,11 @@ class ItemShuffler(QtCore.QThread):
                         location_pool.append(location_pool.pop(0))
                         if location_pool[0] == first_location_tried: 
                             # If we tried every location and none work, undo the previous placement and try putting it somewhere else. Also rerandomize the location list to ensure things aren't placed back in the same spots
+                            if not placement_tracker:  # (LAS Recomp: say what, instead of an IndexError)
+                                raise RuntimeError(f"can't place {item} in D{i}: none of {sorted(location_pool)} is "
+                                                   "reachable without it" + ''.join(
+                                    f"\n  {l}: {self.logic_defs[l].get('condition-basic')}" for l in sorted(location_pool)
+                                    if verbose))
                             undo_location = placement_tracker.pop(0)
                             location_pool.append(undo_location)
                             locations.append(undo_location)
@@ -697,6 +704,16 @@ class ItemShuffler(QtCore.QThread):
             access = self.removeAccess(access, items.pop(0))
             locations.remove('tarin')
         
+        # LAS Recomp: one item per location - room shuffle key counts can leave the pool a few items over; drop junk
+        extra = len(items) - len(locations)
+        for k in range(len(items) - 1, -1, -1):
+            if extra <= 0:
+                break
+            if self.item_defs[items[k]]['type'] == 'junk':
+                if verbose: print(f'(pool over by {extra}: {items[k]} dropped)')
+                items.pop(k)
+                extra -= 1
+
         # Do a very similar process for all other items
         while items and self.thread_active:
             item = items[0]

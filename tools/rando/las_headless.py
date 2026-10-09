@@ -96,7 +96,7 @@ def default_settings(seed):
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
-        'dungeon-room-shuffle': 'off',  # off / coherent / chaos (tools/rando/dungeon_gen.py)
+        'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -247,21 +247,32 @@ def main():
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
     room_mode = settings.get('dungeon-room-shuffle', 'off')
     room_plan = None
-    if room_mode in ('coherent', 'chaos'):
+    if room_mode in ('coherent', 'chaos', 'madness'):
         stage('Planning dungeon rooms', 0.03)
         import dungeon_gen
         import room_logic
         cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
-        if room_mode == 'chaos':
-            layouts, jumps = dungeon_gen.plan_all_chaos(cat, settings['seed'], romfs)
-            logic_rows = jumps
-        else:
-            layouts, jumps = dungeon_gen.plan_all(cat, settings['seed'], romfs), None
-            logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
-        room_plan = (layouts, jumps)
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
-        print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
-              flush=True)
+        base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
+        for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
+            sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
+            if room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
+                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
+                                                              settings=settings)
+                logic_rows = jumps
+            else:
+                layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
+                logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
+            logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
+            print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
+                  flush=True)
+            why = settings.pop('room-logic-unfillable', None)
+            if not why:
+                break
+            print('room layout can\'t be filled -', why, '- planning another', flush=True)
+        room_plan = (layouts, jumps)
+        if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only)
+            sys.exit(0)
 
     result = {}
     errors = []
