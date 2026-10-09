@@ -716,6 +716,9 @@ class ItemShuffler(QtCore.QThread):
                     valid_placement = False
                 elif item in self.force_chests and subtype != 'chest':
                     valid_placement = False
+                # [LAS Recomp: digsanity gives items without an event flow - no traps there (tools/rando/digs.py)]
+                elif item.endswith('-trap') and self.logic_defs[locations[0]].get('no-traps'):
+                    valid_placement = False
                 # special case where if the actual check on the 5 chests room is a zol-trap, nothing happens with the 5th chest
                 elif item == 'zol-trap' and locations[0] == 'taltal-5-chest-puzzle':
                     valid_placement = False

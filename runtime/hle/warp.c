@@ -508,7 +508,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
             wat = -1;
         }
     }
-    static long at = -2;  // LARECOMP_GIVE_ITEM=<frame>:<id>:<count>:<index>[,...] (test hook)
+    static long at = -2;  // LARECOMP_GIVE_ITEM=<frame>:<id>:<count>:<index>[:<equip>][,...] (test hook)
     static char spec[256];
     if (at == -2) {
         at = -1;
@@ -517,11 +517,11 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     }
     if (at >= 0 && (long)frame >= at && game_in_play()) {
         for (char *p = spec; p && *p;) {
-            long f; int id, cnt, idx;
-            if (sscanf(p, "%ld:%d:%d:%d", &f, &id, &cnt, &idx) == 4) {
+            long f; int id, cnt, idx, eq = 0;
+            if (sscanf(p, "%ld:%d:%d:%d:%d", &f, &id, &cnt, &idx, &eq) >= 4) {
                 uint64_t saved[31];
                 memcpy(saved, c->x, sizeof saved);
-                c->x[0] = (uint64_t)id; c->x[1] = (uint64_t)cnt; c->x[2] = (uint64_t)(int64_t)idx; c->x[3] = 0;
+                c->x[0] = (uint64_t)id; c->x[1] = (uint64_t)cnt; c->x[2] = (uint64_t)(int64_t)idx; c->x[3] = (uint64_t)eq;
                 guest_call(c, ADD_ITEM);
                 memcpy(c->x, saved, sizeof saved);
                 LOG("[give] item %d x%d (index %d)\n", id, cnt, idx);

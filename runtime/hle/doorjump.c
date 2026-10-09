@@ -93,12 +93,14 @@ static int is_player_collision(uint64_t p) {
 // The component lives on the heap (16-byte aligned); scan for it after each level change (the previous level's
 // player can stay in freed memory looking valid) and when the cached pointer goes stale. Several candidates:
 // log them all (LARECOMP_DOORJUMP_LOG) and take the last one found (newest allocation is the live one - checked).
+static int g_player_rescan;  // (a warp within the same level: the old player can't be told apart either)
 static uint64_t find_player(uint64_t frame) {
     static uint64_t cached, last_scan;
     static char level[64];
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
-    if (strncmp(level, lv, sizeof level - 1)) {  // new level: rescan once it has settled
+    if (strncmp(level, lv, sizeof level - 1) || g_player_rescan) {  // new level: rescan once it has settled
+        g_player_rescan = 0;
         strlcpy(level, lv, sizeof level);
         cached = 0;
         last_scan = frame;
@@ -384,3 +386,6 @@ void doorjump_chaos_pair(int id, int *col, int *row, char *side, int *slot) {
     for (int e = 0; e < 2; e++) { col[e] = g_pairs[id].col[e]; row[e] = g_pairs[id].row[e]; side[e] = g_pairs[id].side[e]; slot[e] = g_pairs[id].slot[e]; }
 }
 bool doorjump_chaos_seen(int id) { extern bool flags_ext_get(int idx); return flags_ext_get(CHAOS_FLAG_BASE + id); }
+
+uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (digsanity: Link's position)
+void doorjump_player_rescan(void) { g_player_rescan = 1; }

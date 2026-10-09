@@ -96,6 +96,7 @@ def default_settings(seed):
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
+        'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos (tools/rando/dungeon_gen.py)
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
@@ -222,6 +223,13 @@ def main():
         bush_locs = bushes_mod.add_to_logic(bushes_mod.scan(romfs, leb), logic_defs, item_defs,
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
+
+    dig_locs, dig_tiles = {}, []
+    if settings.get('digs'):  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
+        import digs as digs_mod
+        dig_tiles = digs_mod.scan(romfs, leb)
+        dig_locs = digs_mod.add_to_logic(dig_tiles, logic_defs, item_defs)
+        print('digs:', len(dig_locs), 'locations of', len(dig_tiles), 'dig tiles', flush=True)
 
     # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
     tier = int(settings.get('entrance-tier', 0))
@@ -365,8 +373,9 @@ def main():
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
 
-    if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
-        print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
+    if pot_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
+        import pots as _pots
+        print('pot refills marked:', _pots.mark_refills(result['placements']), flush=True)
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
@@ -437,6 +446,14 @@ def main():
 
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
+    if dig_locs:
+        from RandomizerCore.Tools import oead_tools
+        from RandomizerCore.Randomizers import item_get
+        stage('Burying items', 0.95)
+        lines = digs_mod.apply(dig_locs, dig_tiles, mods, out_dir, romfs, oead_tools, item_get)
+        with open(os.path.join(out_dir, f'digs_{settings["seed"]}.txt'), 'w') as f:
+            f.write('Digs:\n' + '\n'.join(lines) + '\n')
+        print('digs placed:', len(lines), flush=True)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)

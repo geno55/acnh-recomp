@@ -172,7 +172,11 @@ static void load(void) {
 
 // ---- reachability
 static std::vector<int> g_acc;  // count per token
-static bool flag_set(int i) { return i >= 0 && i < 2048 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1; }
+extern "C" bool flags_ext_get(int idx);  // runtime/hle/flags_ext.c (bushes, digs: 2048+)
+static bool flag_set(int i) {
+    if (i >= 2048) return flags_ext_get(i);
+    return i >= 0 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1;
+}
 static int &A(int id) {  // access count; tokens interned after sizing (e.g. "x[pit]") grow the table
     if (id >= (int)g_acc.size()) g_acc.resize(id + 64, 0);
     return g_acc[id];

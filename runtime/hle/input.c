@@ -206,7 +206,9 @@ static void fill_state(Cpu *c) {
     { extern void give_item_tick(Cpu *c, uint64_t frame); extern uint64_t renderer_present_count(void);
       give_item_tick(c, renderer_present_count());
       extern void chamber_game_tick(Cpu *c, uint64_t frame);
-      chamber_game_tick(c, renderer_present_count()); }
+      chamber_game_tick(c, renderer_present_count());
+      extern void digs_game_tick(Cpu *c, uint64_t frame);
+      digs_game_tick(c, renderer_present_count()); }
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {

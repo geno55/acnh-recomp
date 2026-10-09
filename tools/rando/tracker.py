@@ -116,6 +116,13 @@ def build(seed_dir, romfs):
         cell = None
         if name.startswith('pot-') or re.match(r'D\d-pot-', name):
             continue  # pots come from pots.tsv below
+        m = re.match(r'dig-(\d\d)([A-P])-(\d\d)$', name)
+        if m:  # digsanity: one badge per screen; dug = flag 4096 + tile id (tools/rando/digs.py)
+            row, col, tile = int(m.group(1)), ord(m.group(2)) - 65, int(m.group(3))
+            cell = cell_of_field(f'Field_{m.group(1)}{m.group(2)}')
+            checks.append({'n': name, 'x': cell[0], 'y': cell[1], 'g': group(f'dig-{row}-{col}', 'Digs', cell),
+                           'flag': 4096 + ((row - 1) * 16 + col) * 80 + tile})
+            continue
         if level in DUNGEONS or (re.match(r'D(\d)-', name) and not room):
             dk = DUNGEONS.get(level) or name[:2]
             lvname = level or next(k for k, x in DUNGEONS.items() if x == dk)
