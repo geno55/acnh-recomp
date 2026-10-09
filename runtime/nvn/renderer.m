@@ -20,6 +20,8 @@ static id<MTLCommandBuffer> cmdbuf;
 static id<MTLRenderCommandEncoder> enc;
 static id<MTLRenderPipelineState> clear_pipes[64];
 static NSMutableDictionary<NSString *, id> *cache;
+// (stats) GPU wait time by cause: 0 = guest fence (nvnSyncWait), 1 = full flush (CPU reads GPU results / ring), 2 = sync all
+static uint64_t stat_wait_by[3], stat_wait_n[3];
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static double stat_gpu_s;
 // (forward: texture-lifetime cleanup and stats, defined further down)
@@ -93,13 +95,14 @@ const char *renderer_stats(void) {
     struct task_vm_info vmi;
     mach_msg_type_number_t vn = TASK_VM_INFO_COUNT;
     uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vn) == KERN_SUCCESS ? vmi.phys_footprint : 0;
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB", stat_draws, stat_skipped,
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB | waits fence %.0fms/%llu flush %.0fms/%llu all %.0fms/%llu", stat_draws, stat_skipped,
              stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies,
-             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0);
+             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2]);
     stat_compiles = 0;
     stat_feedback_copies = 0;
     stat_compile_ms = 0;
     stat_draws = stat_skipped = stat_passes = stat_dispatches = stat_flushes = stat_wait_ns = 0;
+    memset(stat_wait_by, 0, sizeof stat_wait_by); memset(stat_wait_n, 0, sizeof stat_wait_n);
     stat_gpu_s = 0;
     return stats_text;
 }
@@ -120,6 +123,7 @@ void renderer_init(id<MTLDevice> d) {
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
 }
 
+static int g_passes_in_cb;  // render passes encoded into the open command buffer (chunked commits)
 static id<MTLCommandBuffer> cb(void) {
     if (!cmdbuf) cmdbuf = [renderer_queue() commandBuffer];
     return cmdbuf;
@@ -169,11 +173,15 @@ static pthread_mutex_t cb_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t submit_seq;
 static id<MTLCommandBuffer> cb_hist[CB_HIST];
 
+static int g_wait_kind;
 static void wait_cb(id<MTLCommandBuffer> c) {
     if (!c) return;
     uint64_t t0 = mach_absolute_time();
     [c waitUntilCompleted];
-    stat_wait_ns += (mach_absolute_time() - t0);
+    uint64_t d = mach_absolute_time() - t0;
+    stat_wait_ns += d;
+    stat_wait_by[g_wait_kind] += d;
+    if (d > 24000) stat_wait_n[g_wait_kind]++;  // (> ~1 ms counts as a real wait)
 }
 
 // Textures the game destroyed (any thread): their cached views and snapshot copies are dropped on the render thread.
@@ -213,6 +221,7 @@ void renderer_submit(void) {
             if (done.error) LOG("[metal] command buffer error: %s\n", done.error.localizedDescription.UTF8String);
         }];
         [c commit];
+        g_passes_in_cb = 0;
         pthread_mutex_lock(&cb_lock);
         last_cb = c;
         submit_seq++;
@@ -228,7 +237,9 @@ void renderer_flush(void) {
     pthread_mutex_lock(&cb_lock);
     id<MTLCommandBuffer> c = last_cb;
     pthread_mutex_unlock(&cb_lock);
+    g_wait_kind = 1;
     wait_cb(c);
+    g_wait_kind = 0;
     ring_reset();
 }
 
@@ -238,7 +249,9 @@ void renderer_sync(void) {
     pthread_mutex_lock(&cb_lock);
     id<MTLCommandBuffer> c = last_cb;
     pthread_mutex_unlock(&cb_lock);
+    g_wait_kind = 2;
     wait_cb(c);
+    g_wait_kind = 0;
 }
 
 // Sequence number a fence placed now belongs to: the pending (uncommitted) work's submission, else the last one.
@@ -252,6 +265,27 @@ uint64_t renderer_fence_seq(void) {
 // Wait until submission `seq` has completed (0 = nothing to wait for).
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
+    if (ENV("LARECOMP_LOG_FENCES")) {  // (debug) how far behind the newest submission the waited fence is
+        extern uint64_t renderer_present_count(void);
+        static uint64_t f0, hist[6], frames_seen;
+        uint64_t f = renderer_present_count();
+        uint64_t pend = submit_seq + (cmdbuf ? 1 : 0);
+        uint64_t age = pend > seq ? pend - seq : 0;
+        bool done_already = false;
+        pthread_mutex_lock(&cb_lock);
+        if (seq <= submit_seq && submit_seq - seq < CB_HIST && cb_hist[seq % CB_HIST])
+            done_already = cb_hist[seq % CB_HIST].status >= MTLCommandBufferStatusCompleted;
+        pthread_mutex_unlock(&cb_lock);
+        hist[age > 4 ? 4 : age]++;
+        if (done_already) hist[5]++;
+        if (f - f0 >= 300) {
+            frames_seen = f - f0;
+            LOG("[fences] per %llu frames: waits by age (submissions behind newest) 0:%llu 1:%llu 2:%llu 3:%llu 4+:%llu, already done %llu; submissions now %llu\n",
+                (unsigned long long)frames_seen, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], (unsigned long long)submit_seq);
+            memset(hist, 0, sizeof hist);
+            f0 = f;
+        }
+    }
     pthread_mutex_lock(&cb_lock);
     id<MTLCommandBuffer> c = nil;
     if (seq > submit_seq) c = last_cb;  // not committed yet (other thread): wait for everything committed so far
@@ -397,6 +431,13 @@ static void begin_pass(void) {
         rp.renderTargetWidth = 16; rp.renderTargetHeight = 16;
         rp.defaultRasterSampleCount = 1;
     }
+    // Commit the frame in chunks: the GPU starts on the first passes while the CPU still encodes the rest. The
+    // game waits for its previous frame before it submits the next one, so with one command buffer per frame the
+    // GPU sat idle during our encoding and a frame cost GPU + encoding time (5120x1440 with the GPU clocked down:
+    // ~15.5 + a few ms -> missed vsync -> 30 fps). LARECOMP_CHUNK_PASSES=<n> (0 = one buffer per frame).
+    static int chunk = -1;
+    if (chunk < 0) { const char *e = ENV("LARECOMP_CHUNK_PASSES"); chunk = e ? atoi(e) : 8; }
+    if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;

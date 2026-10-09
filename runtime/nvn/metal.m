@@ -158,7 +158,48 @@ typedef struct {
     uint32_t level_gen;      // g_level_gen when last used as a render target
     uint64_t frame_cleared;  // LARECOMP_FRAME_CLEAR: frame it was last cleared at first use
     float sx, sy;        // allocation scale relative to the guest's size
+    int reg;             // slot in g_reg (live textures, for the "largest textures" dump) + 1
 } TexBackend;
+
+// Live textures (diagnostics: the overworld slowdown at 32:9 - the same textures used 870 MB and 4x the GPU time
+// until a window resize reallocated them; user 2026-10-09). Dumped when the frame rate stays low.
+static NvnTexture *g_reg[16384];
+static int g_reg_n;
+static void reg_add(NvnTexture *t, TexBackend *b) {
+    if (b->reg || g_reg_n >= 16384) return;
+    g_reg[g_reg_n++] = t;
+    b->reg = g_reg_n;
+}
+static void reg_remove(TexBackend *b) {
+    if (!b->reg) return;
+    int i = b->reg - 1;
+    NvnTexture *last = g_reg[--g_reg_n];
+    g_reg[i] = last;
+    if (last && last->backend) ((TexBackend *)last->backend)->reg = i + 1;
+    b->reg = 0;
+}
+static void dump_largest_textures(const char *why) {
+    int idx[16];
+    uint64_t sz[16];
+    int n = 0;
+    for (int i = 0; i < g_reg_n; i++) {
+        TexBackend *b = g_reg[i] ? (TexBackend *)g_reg[i]->backend : NULL;
+        if (!b || !b->tex) continue;
+        uint64_t a = b->tex.allocatedSize;
+        int k = n < 16 ? n++ : 15;
+        if (k == 15 && n == 16 && a <= sz[15]) continue;
+        while (k > 0 && sz[k - 1] < a) { sz[k] = sz[k - 1]; idx[k] = idx[k - 1]; k--; }
+        sz[k] = a; idx[k] = i;
+    }
+    LOG("[texdump] %s: %d live textures, largest:\n", why, g_reg_n);
+    for (int k = 0; k < n; k++) {
+        NvnTexture *t = g_reg[idx[k]];
+        TexBackend *b = (TexBackend *)t->backend;
+        LOG("[texdump]   %6.1f MB  guest %ux%u f%#x tgt %u lv %u | mtl %lux%lu lv %lu | scalable %d scale %.2fx%.2f %s\n",
+            sz[k] / 1048576.0, t->width, t->height, t->format, t->target, t->levels, (unsigned long)b->tex.width,
+            (unsigned long)b->tex.height, (unsigned long)b->tex.mipmapLevelCount, b->scalable, b->sx, b->sy, t->label);
+    }
+}
 
 static uint64_t frames, total_frames;
 uint64_t renderer_present_count(void) { return total_frames; }
@@ -283,6 +324,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
             t->flags, t->target, t->samples, t->levels, b->scalable, t->label);
     create_backend_texture(t, b);
     t->backend = b;
+    reg_add(t, b);
     return b;
 }
 
@@ -346,7 +388,7 @@ static void release_backend_texture(NvnTexture *t, TexBackend *b) {  // (also dr
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     renderer_texture_gone(t, NULL);  // its snapshot copy
-    if (b) { release_backend_texture(t, b); free(b); }
+    if (b) { reg_remove(b); release_backend_texture(t, b); free(b); }
     t->backend = NULL;
 }
 
@@ -715,6 +757,14 @@ void backend_present(NvnTexture *t) {
             }
         }
         widescreen_set_factor((float)shape);
+        {   // (diagnostics) log output scale / drawable changes
+            static double psx, psy, pdw, pdh;
+            static int nlog;
+            if ((sx != psx || sy != psy || dw != pdw || dh != pdh) && nlog++ < 200)
+                LOG("[scale] frame %llu drawable %.0fx%.0f -> render scale %.3fx%.3f (reshape %d)\n",
+                    (unsigned long long)total_frames, dw, dh, sx, sy, reshape);
+            psx = sx, psy = sy, pdw = dw, pdh = dh;
+        }
         renderer_set_scale((float)sx, (float)sy);
         if (b && b->tex) {
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
@@ -795,6 +845,14 @@ void backend_present(NvnTexture *t) {
         extern const char *game_level_name(void);
         if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
                                    frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        {   // (diagnostics) frame rate low for two periods in a row: what's allocated (at most once a minute)
+            static int slow;
+            static double last_dump = -100;
+            double fps = last_fps_time > 0 ? frames / (now - last_fps_time) : 60;
+            slow = fps < 40 ? slow + 1 : 0;
+            if (slow >= 2 && now - last_dump > 60) { last_dump = now; dump_largest_textures("low frame rate"); }
+            if (now - last_dump > 300 && now > 30) { last_dump = now; dump_largest_textures("periodic"); }
+        }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
