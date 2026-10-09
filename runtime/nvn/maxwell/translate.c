@@ -1760,7 +1760,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             int kind = key ? key->attr_kind[i] : 0;
             sp(&s, "layout(location = %d) in %s a%d;\n", i, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "vec4", i);
         }
-        sp(&s, "invariant gl_Position;\n");  // depth pre-pass + EQUAL test needs identical positions
+        // depth pre-pass + EQUAL test needs identical positions from different shaders: invariant, and precise so no
+        // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
+        // drawn twice flickered black)
+        sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
     } else if (stage == STAGE_FRAGMENT) {

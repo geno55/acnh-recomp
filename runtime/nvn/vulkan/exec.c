@@ -1,4 +1,5 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
+#include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -312,7 +313,11 @@ static void run_job(void (*fn)(void *), void *arg) {
     static bool started;
     if (!started) {
         started = true;
-        for (int i = 0; i < 4; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
+        // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
+        int n = SDL_GetNumLogicalCPUCores() - 4;
+        if (n < 4) n = 4;
+        if (n > 16) n = 16;
+        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
