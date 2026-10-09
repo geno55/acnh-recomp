@@ -1,11 +1,6 @@
-#include <dlfcn.h>
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <mach/mach_time.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -78,11 +73,10 @@ void kernel_signal(KObject *o) {
 }
 
 // ------------------------------------------------------------------ time
-static mach_timebase_info_data_t tb;
 
 uint64_t rt_ticks(void) {
     // 19.2 MHz system tick
-    uint64_t ns = mach_absolute_time() * tb.numer / tb.denom;
+    uint64_t ns = plat_now_ns();
     static double scale = -1;
     if (scale < 0) scale = getenv("LARECOMP_TICK_SCALE") ? atof(getenv("LARECOMP_TICK_SCALE")) : 1.0;
     if (scale != 1.0) ns = (uint64_t)(ns * scale);
@@ -113,6 +107,7 @@ static Region regions[1024];
 static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
+uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
@@ -125,6 +120,7 @@ int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
 
 static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
     if (nregions == 1024) FATAL("too many regions\n");
+    plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
     regions[i] = (Region){addr, size, type, perm};
@@ -479,9 +475,9 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     if (prof_svc && imm < 0x80) {
         uint64_t a0 = c->x[0], a1 = c->x[1], a2 = c->x[2], a3 = c->x[3], lr = c->x[30];
         uint32_t h0 = imm == 0x18 && a2 ? *(uint32_t *)(uintptr_t)a1 : 0;
-        uint64_t t0 = mach_absolute_time();
+        uint64_t t0 = plat_now_ns();
         svc_impl(c, imm, pc);
-        uint64_t dt = (mach_absolute_time() - t0) * tb.numer / tb.denom;
+        uint64_t dt = plat_now_ns() - t0;
         static _Atomic int nslow;
         if (((t_cur && t_cur->id == 80 && (imm == 0x18 || imm == 0x34)) || (dt > 10000000 && imm != 0x0b && imm != 0x1c)) && nslow < 20000) {
             nslow++;
@@ -492,7 +488,7 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
         svc_wait_ns[tid][imm] += dt;
         svc_calls[tid][imm]++;
         static _Atomic uint64_t last;
-        uint64_t now = mach_absolute_time() * tb.numer / tb.denom;
+        uint64_t now = plat_now_ns();
         if (now - last > 2000000000ull) {
             last = now;
             for (int t = 0; t < 32; t++) {
@@ -739,7 +735,6 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
 }
 
 void kernel_init(void) {
-    mach_timebase_info(&tb);
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {
@@ -755,7 +750,7 @@ KEvent *kernel_create_event_pair(uint32_t *w, uint32_t *r) {
     ev->type = KOBJ_EVENT;
     *w = kernel_new_handle(ev);
     *r = kernel_new_handle(ev);
-    if (ENV("LARECOMP_PROF_SVC")) { Dl_info di; dladdr(__builtin_return_address(0), &di); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, di.dli_sname); }
+    if (ENV("LARECOMP_PROF_SVC")) { const char *s = plat_symbol((uint64_t)(uintptr_t)__builtin_return_address(0), NULL); LOG("[evt] hle w=%x r=%x from %s\n", *w, *r, s ? s : "?"); }
     return ev;
 }
 

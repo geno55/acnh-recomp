@@ -1,9 +1,6 @@
 // nn::vi (display/layer) and nv:: (graphics driver init), implemented on the host.
 #include <stdlib.h>
 #include <time.h>
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-#include <mach/thread_policy.h>
 
 #include "../hle.h"
 #include "../kernel.h"
@@ -11,36 +8,18 @@
 static uint32_t vsync_r, vsync_w;
 static KEvent *vsync_event;
 
-// Real-time (time-constraint) thread: exempt from the timer coalescing macOS applies to
-// ordinary threads when the app isn't frontmost, which otherwise stretches 16ms waits to ~100ms.
-static void make_realtime(uint64_t period_ns) {
-    mach_timebase_info_data_t tb;
-    mach_timebase_info(&tb);
-    uint64_t period = period_ns * tb.denom / tb.numer;
-    thread_time_constraint_policy_data_t pol = {
-        .period = (uint32_t)period,
-        .computation = (uint32_t)(period / 20),
-        .constraint = (uint32_t)(period / 4),
-        .preemptible = 1,
-    };
-    thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
-                      THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-}
-
 static void *vsync_thread(void *arg) {
     (void)arg;
-    make_realtime(16666667);
-    mach_timebase_info_data_t tb;
-    mach_timebase_info(&tb);
-    uint64_t period = 16666667ull * tb.denom / tb.numer;
-    uint64_t next = mach_absolute_time();
+    const uint64_t period = 16666667;
+    plat_thread_realtime(period);
+    uint64_t next = plat_now_ns();
     for (;;) {
         next += period;
-        mach_wait_until(next);
-        uint64_t now = mach_absolute_time();
+        plat_sleep_until_ns(next);
+        uint64_t now = plat_now_ns();
         if (now > next + period * 3) {
             static int warned;
-            if (warned++ < 20) LOG("[vi] vsync timer late by %llums (host throttling?)\n", (unsigned long long)((now - next) * tb.numer / tb.denom / 1000000));
+            if (warned++ < 20) LOG("[vi] vsync timer late by %llums (host throttling?)\n", (unsigned long long)((now - next) / 1000000));
             next = now;  // don't burst-signal to catch up
         }
         pthread_mutex_lock(&g_klock);

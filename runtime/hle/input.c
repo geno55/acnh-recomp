@@ -98,6 +98,14 @@ bool input_user_blocked(const SDL_Event *e) {
 }
 
 void input_handle_event(const SDL_Event *e) {
+    static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
+    if (!scanned) {
+        scanned = true;
+        int n = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&n);
+        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); }
+        SDL_free(ids);
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;

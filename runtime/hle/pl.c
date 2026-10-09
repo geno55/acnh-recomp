@@ -2,7 +2,8 @@
 //  1. LARECOMP_FONT=<file> (.ttf / .otf / .ttc face 0 / .bfttf)
 //  2. a dump from the user's own console in fonts/: nintendo_udsg-r_std_003.bfttf (Standard, Morisawa UD Shin Go)
 //     and nintendo_ext_003.bfttf (NintendoExt button glyphs); plain .ttf versions of those names also work
-//  3. Hiragino Sans W4 (macOS; a Japanese gothic like UD Shin Go: much closer to the game's look than Arial)
+//  3. a Japanese gothic like UD Shin Go (much closer to the game's look than Arial): Hiragino Sans W4 on macOS,
+//     Yu Gothic Regular / Medium on Windows
 //  4. Arial
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key.
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
@@ -109,7 +110,9 @@ static void load_fonts(void) {
     const char *env = getenv("LARECOMP_FONT");
     const char *std[] = {env, "fonts/nintendo_udsg-r_std_003.bfttf", "fonts/nintendo_udsg-r_std_003.ttf",
                          "fonts/nintendo_udsgr_std_003.ttf", "fonts/nintendo_udsgr_std_003.bfttf",
-                         "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", "/System/Library/Fonts/Supplemental/Arial.ttf"};
+                         "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", "C:/Windows/Fonts/YuGothR.ttc",
+                         "C:/Windows/Fonts/YuGothM.ttc", "/System/Library/Fonts/Supplemental/Arial.ttf",
+                         "C:/Windows/Fonts/arial.ttf"};
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i]) load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");

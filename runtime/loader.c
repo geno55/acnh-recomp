@@ -1,7 +1,6 @@
 // NSO loading, relocation, and symbol resolution.
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 
 #include "rt.h"
 
@@ -59,8 +58,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
     uint32_t bss = *(uint32_t *)(raw + 0x3C);
     uint64_t size = (seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
-    void *p = mmap((void *)base, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
-    if (p != (void *)base) FATAL("mmap %s at %llx failed\n", path, base);
+    plat_commit(base, size);  // inside the guest window: zero-filled, read/write
     for (int i = 0; i < 3; i++) {
         uint32_t csize = *(uint32_t *)(raw + 0x60 + i * 4);
         uint8_t *dst = (uint8_t *)base + seg[i][1];

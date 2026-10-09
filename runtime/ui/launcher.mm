@@ -6,32 +6,49 @@
 //
 // Skipped with --play, LARECOMP_NO_LAUNCHER=1, or any scripted test run (LARECOMP_INPUT): tests boot straight in.
 // Choosing a seed here (or vanilla) is how seeds change without the in-game restart dance.
+#ifdef __APPLE__
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#endif
 #include <SDL3/SDL.h>
 #include <dirent.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <string>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <vector>
+#include <algorithm>
 
 #include "imgui.h"
+#ifdef __APPLE__
 #include "imgui_impl_metal.h"
+#else
+#include "imgui_impl_vulkan.h"
+#endif
 #include "imgui_impl_sdl3.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include "platform.h"
+#include "ui/ui_scale.h"
 #include "settings.h"
 void ui_window_init(void);
 SDL_Window *ui_window(void);
+#ifdef __APPLE__
 void *ui_metal_layer(void);
 void *ui_metal_device(void);
-extern char **environ;
+#else
+// runtime/nvn/vulkan: window frames and ImGui plumbing
+bool vk_frame_begin(const float clear[4]);
+void vk_frame_end(const char *shot_path);
+void *vk_frame_cmd(void);
+bool vk_imgui_backend_init(void);
+void vk_imgui_backend_shutdown(void);
+uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
+#endif
 }
+#ifdef __APPLE__
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -50,6 +67,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
     CGImageDestinationFinalize(dest);
     CFRelease(dest), CFRelease(url), CGImageRelease(img), CGContextRelease(ctx), CGColorSpaceRelease(cs);
 }
+#endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
 #define LARECOMP_VERSION "0.1"
@@ -89,20 +107,12 @@ static void set_job(const std::string &s, bool failed = false) {
 }
 
 static int run(const std::vector<std::string> &args, const std::string &log) {
-    std::vector<char *> av;
-    for (auto &a : args) av.push_back((char *)a.c_str());
+    std::vector<const char *> av;
+    for (auto &a : args) av.push_back(a.c_str());
     av.push_back(NULL);
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-    posix_spawn_file_actions_adddup2(&fa, 1, 2);
-    pid_t pid;
-    int rc = posix_spawn(&pid, av[0], &fa, NULL, av.data(), environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc) return -1;
-    int st = 0;
-    waitpid(pid, &st, 0);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    PlatProc p = plat_spawn(av.data(), log.c_str(), true);
+    if (!p) return -1;
+    return plat_proc_wait(p, true);
 }
 
 static std::string largest_with(const std::string &dir, const char *ext) {
@@ -125,7 +135,7 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     dump = g_dump, keys = g_keys;
     pthread_mutex_unlock(&g_lock);
-    std::string hactool = "tools/hactool/hactool", tmp = g_root + "/.extract", log = g_root + "/extract.log";
+    std::string hactool = "tools/hactool/hactool" PLAT_EXE_SUFFIX, tmp = g_root + "/.extract", log = g_root + "/extract.log";
     mkdir(g_root.c_str(), 0755);
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
@@ -165,7 +175,7 @@ static void *extract_thread(void *) {
         set_job(why.empty() ? "Game files ready." : why, !why.empty());
     }
 done:
-    run({"/bin/rm", "-rf", tmp}, "/dev/null");
+    plat_remove_tree(tmp.c_str());
     pthread_mutex_lock(&g_lock);
     g_busy = false;
     pthread_mutex_unlock(&g_lock);
@@ -237,10 +247,18 @@ static void remove_fonts() {
 }
 
 // ------------------------------------------------------------------ background: a title movie frame
+#ifdef __APPLE__
 static id<MTLTexture> g_bg;
+#define BG_TEXID ((ImTextureID)(__bridge void *)g_bg)
+typedef id<MTLDevice> GpuDevice;
+#else
+static uint64_t g_bg;  // ImGui texture id (Vulkan descriptor set)
+#define BG_TEXID ((ImTextureID)g_bg)
+typedef void *GpuDevice;
+#endif
 static int g_bg_w, g_bg_h;
 
-static void load_background(id<MTLDevice> dev) {
+static void load_background(GpuDevice dev) {
     std::string path = g_root + "/romfs/region_common/movie/title.webm";
     AVFormatContext *fmt = NULL;
     if (avformat_open_input(&fmt, path.c_str(), NULL, NULL) < 0) return;
@@ -270,10 +288,15 @@ static void load_background(id<MTLDevice> dev) {
                 int dst_ls[1] = {w * 4};
                 sws_scale(sws, fr->data, fr->linesize, 0, h, dst, dst_ls);
                 sws_freeContext(sws);
+#ifdef __APPLE__
                 MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                               width:w height:h mipmapped:NO];
                 g_bg = [dev newTextureWithDescriptor:td];
                 [g_bg replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:rgba.data() bytesPerRow:w * 4];
+#else
+                (void)dev;
+                g_bg = vk_imgui_texture_rgba(rgba.data(), w, h);
+#endif
                 g_bg_w = w, g_bg_h = h;
             }
             av_frame_free(&fr);
@@ -331,9 +354,13 @@ extern "C" void launcher_run(const char *root) {
     g_root = root;
     ui_window_init();
     SDL_Window *win = ui_window();
+#ifdef __APPLE__
     CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
     id<MTLCommandQueue> queue = [dev newCommandQueue];
+#else
+    GpuDevice dev = NULL;
+#endif
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -341,7 +368,7 @@ extern "C" void launcher_run(const char *root) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
     const char *fonts[] = {"fonts/nintendo_udsgr_std_003.ttf", "/System/Library/Fonts/Avenir Next.ttc",
-                           "/System/Library/Fonts/Helvetica.ttc"};
+                           "/System/Library/Fonts/Helvetica.ttc", "C:/Windows/Fonts/segoeui.ttf"};
     static const ImWchar ranges[] = {0x20, 0xFF, 0x2039, 0x203A, 0x2713, 0x2713, 0x25B8, 0x25B8, 0};  // + ‹ › ✓ ▸
     for (const char *p : fonts) {
         if (g_font_menu || !file_exists(p)) continue;
@@ -356,8 +383,13 @@ extern "C" void launcher_run(const char *root) {
     st.Colors[ImGuiCol_HeaderActive] = ImVec4(1, 1, 1, 0.14f);
     st.Colors[ImGuiCol_NavCursor] = ImVec4(0.95f, 0.78f, 0.35f, 1);
     st.FrameRounding = st.WindowRounding = 10;
+#ifdef __APPLE__
     ImGui_ImplSDL3_InitForMetal(win);
     ImGui_ImplMetal_Init(dev);
+#else
+    ImGui_ImplSDL3_InitForVulkan(win);
+    vk_imgui_backend_init();
+#endif
 
     std::string status = check_game_files(g_root);
     if (status.empty()) load_background(dev);
@@ -372,7 +404,9 @@ extern "C" void launcher_run(const char *root) {
     // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
+#ifdef __APPLE__
         layer.framebufferOnly = NO;
+#endif
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
@@ -407,6 +441,7 @@ extern "C" void launcher_run(const char *root) {
         }
         was_busy = busy;
 
+#ifdef __APPLE__
         int w, h;
         SDL_GetWindowSizeInPixels(win, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);
@@ -421,19 +456,25 @@ extern "C" void launcher_run(const char *root) {
             id<MTLCommandBuffer> cb = [queue commandBuffer];
             id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
             ImGui_ImplMetal_NewFrame(rp);
+#else
+        {
+            static const float clear_col[4] = {0.04f, 0.05f, 0.06f, 1};
+            if (!vk_frame_begin(clear_col)) { SDL_Delay(16); continue; }
+            ImGui_ImplVulkan_NewFrame();
+#endif
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
-            ImGui::GetIO().FontGlobalScale = s * 0.5f;
+            ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
             if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
                 ImVec2 uv0(0, 0), uv1(1, 1);
                 if (wa > ia) { float v = ia / wa; uv0.y = (1 - v) / 2; uv1.y = 1 - uv0.y; }
                 else { float u = wa / ia; uv0.x = (1 - u) / 2; uv1.x = 1 - uv0.x; }
-                bg->AddImage((ImTextureID)(__bridge void *)g_bg, ImVec2(0, 0), ds, uv0, uv1);
+                bg->AddImage(BG_TEXID, ImVec2(0, 0), ds, uv0, uv1);
             } else {
                 bg->AddRectFilledMultiColor(ImVec2(0, 0), ds, IM_COL32(18, 34, 40, 255), IM_COL32(40, 70, 64, 255),
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
@@ -476,11 +517,13 @@ extern "C" void launcher_run(const char *root) {
                 if (menu_item("QUIT", true)) exit(0);
             } else {
                 // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
-                ImGui::SetCursorPos(ImVec2(x0 - 24 * s, 300 * s));
+                // larger text (ui_scale.h) gets a taller panel: it starts closer to the title, ends closer to the status
+                float grow = ui_text_scale() - 1, top = (300 - 50 * grow) * s, bottom = (140 - 25 * grow) * s;
+                ImGui::SetCursorPos(ImVec2(x0 - 24 * s, top));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.78f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
-                ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - 300 * s - 140 * s), ImGuiChildFlags_AlwaysUseWindowPadding,
+                ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - top - bottom), ImGuiChildFlags_AlwaysUseWindowPadding,
                                   ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
                 ImGui::PopStyleColor();
@@ -599,6 +642,7 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PopStyleColor();
 
             ImGui::Render();
+#ifdef __APPLE__
             ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
             [enc endEncoding];
             id<MTLTexture> shot = nil;
@@ -618,13 +662,23 @@ extern "C" void launcher_run(const char *root) {
                 save_png(shot, "build/launcher.png");
                 exit(0);
             }
+#else
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
+            bool shot = shot_at && ++frame == shot_at;
+            vk_frame_end(shot ? "build/launcher.png" : NULL);
+            if (shot) exit(0);
+#endif
         }
     }
     // play: remember the choice, hand the window to the game
     snprintf(g_settings.rando_seed, sizeof g_settings.rando_seed, "%s", choice ? choices[choice].c_str() : "");
     settings_save();
+#ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();
+#else
+    vk_imgui_backend_shutdown();
+#endif
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    g_bg = nil;
+    g_bg = 0;
 }

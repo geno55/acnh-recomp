@@ -1,4 +1,30 @@
-// Maxwell (GM20B) shader translation to Metal Shading Language.
+// Maxwell (GM20B) shader translation to Metal Shading Language (macOS) or Vulkan GLSL (Windows; compiled to
+// SPIR-V at runtime with shaderc). ShaderKey.glsl selects the dialect; the MSL output does not depend on it.
+//
+// GLSL contract (what the Vulkan renderer binds):
+//  - `#version 460`, entry point `main`. Descriptor set: vertex 0, fragment 1, compute 0.
+//  - hardware cbuf k -> binding k: `layout(std140, set=S, binding=k) uniform CB<k> { uvec4 cb<k>[N]; };`
+//    (anonymous block). N = max(cbuf_size[k] / 16, highest constant-index vec4 + 1), and at least 4096 when
+//    cbuf_dynamic has bit k (the renderer binds up to 64 KB). Register-indexed reads are clamped to N - 1.
+//  - global memory (LDG/STG) -> binding GMEM_BUFFER_INDEX (17):
+//    `layout(std430, set=S, binding=17) [readonly] buffer GMem { uint w[]; } gmem_;`, 32-bit words relative to
+//    maxwell_gmem_base. `readonly` unless the shader stores (needs vertexPipeline/fragmentStoresAndAtomics then);
+//    byte / short stores are atomicAnd + atomicOr on the containing word.
+//  - rscale table -> binding 18: `uniform RScale { vec4 rscale[65]; };` (std140, the MSL buffer 18 contents).
+//  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
+//  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
+//    1DArray/2DArray/CubeArray, or its *Shadow variant when tex[i].shadow.
+//  - vertex inputs `layout(location=i) in vec4|ivec4|uvec4 a<i>;` (key->attr_kind); varyings: location i =
+//    generic attribute i, `vec4 v<i>` (fragment side flat / noperspective as in MSL); `invariant gl_Position`;
+//    gl_PointSize when writes_point_size. Fragment outputs `layout(location=rt) out vec4|ivec4|uvec4 c<rt>;`,
+//    gl_FragDepth when writes_depth.
+//  - clip space exactly as the MSL output (key->flip_y / depth_minus_one epilogue unchanged): the renderer uses
+//    a negative-height viewport so Vulkan matches Metal's y-up NDC, clip z in [0, 1].
+//  - compute: `layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;` (spec constants 0..2).
+//  - extensions: GL_EXT_shader_explicit_arithmetic_types_int64 (64-bit carry / address math -> shaderInt64),
+//    GL_KHR_shader_subgroup_basic/_shuffle/_shuffle_relative (SHFL, FSWZADD lane: fragment/compute subgroup
+//    support), GL_EXT_texture_shadow_lod (explicit-LOD array / cube shadow lookups).
+//  - not in GLSL: the maxwell_dbg_vs position dump (buffer 29) is MSL only.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -16,6 +42,7 @@ typedef struct {
     bool depth_minus_one;   // NVN depth mode [-1,1]: remap clip z
     bool flip_y;            // lower-left window origin
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
+    uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
 } ShaderKey;
 
 typedef struct {
@@ -27,7 +54,7 @@ typedef struct {
 
 typedef struct {
     int stage;
-    char *msl;              // complete MSL source, entry point "main0"
+    char *msl;              // complete MSL or GLSL source (MSL entry "main0", GLSL "main"); NULL on failure
     uint32_t cbuf_mask;     // hardware constant buffers read
     uint32_t cbuf_size[18];
     uint32_t cbuf_dynamic;  // cbufs indexed with a register: bind the whole buffer

@@ -1,10 +1,13 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N]
+Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [--simd asm|c]
+
+--simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
 """
 import argparse
 import bisect
 import os
+import platform
 import re
 import struct
 import sys
@@ -35,7 +38,7 @@ def sanitize(sym):
 
 
 class Module:
-    def __init__(self, name, path, base):
+    def __init__(self, name, path, base, simd='asm'):
         self.name = name
         self.nso = Nso(path)
         self.base = base
@@ -43,7 +46,7 @@ class Module:
         self.lo = base + n.text[0]
         self.hi = base + n.text[0] + n.text[1]
         self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
-        self.lifter = Lifter(base)
+        self.lifter = Lifter(base, simd)
         self.cache = {}
         self.stats = Counter()
         self.mu = None
@@ -495,10 +498,12 @@ def main():
     ap.add_argument('--hle')
     ap.add_argument('--chunk', type=int, default=1500)
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--simd', choices=('asm', 'c'),
+                    default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
     args = ap.parse_args()
 
     t0 = time.time()
-    m = Module(args.name, args.nso, args.base)
+    m = Module(args.name, args.nso, args.base, args.simd)
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
@@ -573,7 +578,7 @@ def main():
             refs |= getattr(m, '_refs', set())
             m._refs = set()
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
-        text = ['#include "cpu.h"\n']
+        text = ['#include "cpu.h"\n' + ('#include "simd.h"\n' if m.lifter.sc else '')]
         text += [f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs)]
         text += [f'void {sanitize(hle[a])}(Cpu *c);\n' for a in sorted(set(hle) & set(order[ci:ci + args.chunk]))]
         text += ['\n'.join(body), '\n']
