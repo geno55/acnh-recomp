@@ -282,7 +282,14 @@ static void dig_test(uint64_t frame) {
         state = 0;
         return;
     }
-    if (frame < warp_at + 200 || !on_field()) return;
+    if (frame < warp_at + 200) return;
+    if (!on_field()) {  // walked into a door / cave on the way: skip this tile, warp back
+        if (frame > warp_at + 500) {
+            fprintf(g_test_out, "LEFT %d\n", en->g);
+            cur++, stand = 0, warped[0] = 0, state = 0;
+        }
+        return;
+    }
     if (frame == warp_at + 200) { void doorjump_player_rescan(void); doorjump_player_rescan(); }
     uint64_t pc = doorjump_player(frame);
     if (!pc) return;
