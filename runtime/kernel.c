@@ -107,6 +107,7 @@ static Region regions[1024];
 static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
+uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;

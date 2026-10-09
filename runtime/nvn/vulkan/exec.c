@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "../../kernel.h"
 #include "shaders.h"
 #include "vk.h"
 #include "../renderer.h"
@@ -1166,9 +1167,57 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     return ubo_span(vk_transient_copy((void *)(uintptr_t)r.addr, size, 256), size);  // snapshot: later CPU writes must not leak in
 }
 
+// Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): the guest heap imported as a GPU buffer
+// (VK_EXT_external_memory_host), zero-copy like metal.m's g_guest_buffer, so compute results land in guest
+// memory. The import pins its pages, so it covers only the heap the game set up (SetHeapSize), made on first use.
+// LARECOMP_VK_NO_GMEM=1: no import, reads return zero.
+static VkBuffer gmem_buf;
+static VkDeviceMemory gmem_mem;
+static uint64_t gmem_size;
+
+static bool gmem_import(uint64_t size) {
+    PFN_vkGetMemoryHostPointerPropertiesEXT props =
+        (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
+    VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)HEAP_BASE, &mp) != VK_SUCCESS ||
+        !mp.memoryTypeBits)
+        return false;
+    VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+                                            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                                            .pHostPointer = (void *)(uintptr_t)HEAP_BASE};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
+                               .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
+    VkDeviceMemory mem;
+    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) return false;
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VkBuffer buf;
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
+    vkBindBufferMemory(g_vk.dev, buf, mem, 0);
+    if (gmem_buf) {  // the heap grew: the old import may still be in use by submitted work
+        vk_wait_seq(submit_seq);
+        vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
+        vkFreeMemory(g_vk.dev, gmem_mem, NULL);
+    }
+    gmem_buf = buf;
+    gmem_mem = mem;
+    gmem_size = size;
+    LOG("[vk] guest heap imported for shader global memory: %llu MB\n", (unsigned long long)(size >> 20));
+    return true;
+}
+
 static VkDescriptorBufferInfo gmem_info(void) {
-    static int warned;
-    if (!warned++) LOG("[vk] shader uses global memory (LDG/STG): not supported yet, reads return zero\n");
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
+    uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
+    if (want > HEAP_MAX) want = HEAP_MAX;
+    if (!off && want > gmem_size && !gmem_import(want)) {
+        LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
+        off = 1;
+    }
+    if (gmem_buf) return (VkDescriptorBufferInfo){gmem_buf, 0, gmem_size};
     static uint32_t zero[1024];
     VkSpan s = vk_transient_copy(zero, sizeof zero, 256);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
