@@ -1,15 +1,16 @@
 # Building LARecomp on Windows (x86-64)
 
-Status: work in progress on the `windows-port` branch. The platform layer (runtime/platform/windows.c) builds;
-the Vulkan renderer (runtime/nvn/vulkan/) and the portable FP/SIMD lowering in the lifter are in progress.
+Status: work in progress on the `windows-port` branch. Builds and runs the start screen on Vulkan; booting the game
+needs the portable FP/SIMD lowering in the lifter (in progress) and your own game files.
 
 ## One-time setup
 Run in PowerShell from the repo root:
 
     powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1
 
-This installs MSYS2 (UCRT64: clang, lld, make, SDL3, FFmpeg, Vulkan loader + headers, shaderc), Python 3.12
-for the tools (`tools\venv`: unicorn, capstone, lz4), and switches the clone to LF line endings.
+This installs MSYS2 (UCRT64: clang, lld, make, SDL3, FFmpeg, Vulkan loader + headers, shaderc, Vulkan Memory
+Allocator, validation layers), Python 3.12 for the tools (`tools\venv`: unicorn, capstone, lz4) and the randomizer
+(`third_party\LAS-Randomizer\venv`), builds hactool (`tools\hactool`), and switches the clone to LF line endings.
 
 ## Build
 From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
@@ -31,3 +32,9 @@ Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (SDL3, FFmpeg, Vulkan, 
 - Renderer: Vulkan (runtime/nvn/vulkan) instead of Metal; shaders are translated to GLSL and compiled with
   shaderc. macOS keeps Metal.
 - Restart (seed switch, "Title screen") starts a new process and exits instead of exec().
+
+## Tests
+- `tools/test_translate.sh`: shader translator fuzz (MSL output unchanged, GLSL compiles and validates).
+- `tools/test_vk_pipelines.sh`: fuzzed shaders through the backend's compile/reflection into real pipelines.
+- `LARECOMP_VK_VALIDATION=1` with `VK_ADD_LAYER_PATH` pointing at `C:\msys64\ucrt64\bin`: Khronos validation layer.
+- Run test windows directly, not under MSYS `timeout` (it stalls the window).
