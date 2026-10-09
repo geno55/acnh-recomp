@@ -59,7 +59,7 @@ static bool spot(const WarpSpot &w, bool show_area, bool enabled) {
     ImGui::BeginDisabled(!enabled);
     bool go = ImGui::Selectable(lbl);
     ImGui::EndDisabled();
-    if (swim && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Link comes up out of deep water here: needs the Flippers.");
+    if (swim && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip(strncmp(w.locator, "Warp_", 5) ? "Link comes up out of deep water here: needs the Flippers." : "A Manbo's Mambo arrival point: can't be warped to directly.");
     if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) {
         ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.70f + ImGui::GetCursorStartPos().x);
         ImGui::TextDisabled("%s / %s", w.level, w.locator);

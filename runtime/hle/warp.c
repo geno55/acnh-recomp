@@ -28,7 +28,26 @@ void rt_warp_request_obj(uint64_t r) {
 }
 
 // Any thread: queue a warp (applied by warp_frame).
+// Manbo's Mambo arrival points (start modes OcarinaWarpInWait / OcarinaWarpDungeonIn) throw in the game when warped
+// to directly (they expect the song's warp sequence; found 2026-10-09): use a plain start of the same screen
+// (dungeons: the entrance room) instead. Points without one are blocked (warp_blocked).
+static const char *const kManboRemap[][3] = {
+    {"Field", "Warp_TalTalMtWest", "Field_02D"},          {"Field", "Warp_TalTalMtEastEast", "Field_02P_a"},
+    {"Field", "Warp_MambogaPond", "Field_05F"},           {"Field", "Warp_MarthasBayWest", "Field_15H"},
+    {"Lv01TailCave", "OcarinaWarpPoint", "Lv01TailCave_08D"}, {"Lv02BottleGrotto", "OcarinaWarpPoint", "Lv02BottleGrotto_08C"},
+    {"Lv03KeyCavern", "OcarinaWarpPoint", "Lv03KeyCavern_08B"}, {"Lv04AnglersTunnel", "OcarinaWarpPoint", "Lv04AnglersTunnel_08D"},
+    {"Lv05CatfishsMaw", "OcarinaWarpPoint", "Lv05CatfishsMaw_08H"}, {"Lv06FaceShrine", "OcarinaWarpPoint", "Lv06FaceShrine_08D"},
+    {"Lv07EagleTower", "OcarinaWarpPoint", "Lv07EagleTower_08B_a"}, {"Lv08TurtleRock", "OcarinaWarpPoint", "Lv08TurtleRock_08D_b"},
+    {"Lv09WindFishsEgg", "OcarinaWarpPoint", "Lv09WindFishsEgg_08D"}, {"Lv10ClothesDungeon", "OcarinaWarpPoint", "Lv10ClothesDungeon_08C"},
+};
+
 void warp_request(const char *level, const char *locator) {
+    for (size_t i = 0; i < sizeof kManboRemap / sizeof kManboRemap[0]; i++)
+        if (!strcmp(level, kManboRemap[i][0]) && !strcmp(locator, kManboRemap[i][1])) {
+            LOG("[warp] %s / %s is a Manbo arrival point: using %s\n", level, locator, kManboRemap[i][2]);
+            locator = kManboRemap[i][2];
+            break;
+        }
     pthread_mutex_lock(&g_lock);
     strlcpy(g_level, level, sizeof g_level);
     strlcpy(g_locator, locator, sizeof g_locator);
@@ -46,10 +65,13 @@ int game_in_play(void) {
 
 int warp_available(void) { return game_in_play(); }
 
-// Spawn points where Link comes up out of deep water (start mode WaterTopOutForward): arriving there without the
+// Spawn points the warp menu can't use: Manbo's arrival points with no plain start on their screen, and those where
+// Link comes up out of deep water (start mode WaterTopOutForward): arriving there without the
 // Flippers throws in the game (crash; found by the overworld soak test 2026-10-09). The warp menu and the shader
 // tour leave them out until Link has the Flippers (live save +0x556C key items, bit 0).
 bool warp_blocked(const char *locator) {
+    if (!strcmp(locator, "Warp_DanpeiHouse") || !strcmp(locator, "Warp_ShellHouseEast")) return true;  // (Manbo, no
+                                                                                                    // plain start)
     static const char *const kSwim[] = {"Field_03O", "Field_15K", "Field_03K", "EagleTowerExit_01A_b"};
     for (size_t i = 0; i < sizeof kSwim / sizeof kSwim[0]; i++)
         if (!strcmp(locator, kSwim[i])) return !(LD32(MAIN_BASE + 0x1CBB220 + 0x556C) & 1);
