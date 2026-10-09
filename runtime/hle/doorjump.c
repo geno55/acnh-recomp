@@ -280,6 +280,14 @@ void doorjump_tick(uint64_t frame) {
     if (!pc) return;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     float x = pos[0], z = pos[2];
+    // after a jump to a room that isn't next door, the game hasn't loaded that room's floor yet (it streams the
+    // rooms around Link) and he'd fall through: hold him at the landing spot for a moment
+    static float hold_x, hold_y, hold_z;
+    static uint64_t hold_until;
+    if (frame < hold_until) {
+        pos[0] = pos2[0] = hold_x, pos[1] = pos2[1] = hold_y, pos[2] = pos2[2] = hold_z;
+        x = hold_x, z = hold_z;
+    }
     if ((long)frame <= trace_until) {
         LOG("[doorjump-trace] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, x, pos[1], z);
         if (ENV("LARECOMP_DOORJUMP_DUMP")) {  // every float of the PlayerCollision object that looks like x or z
@@ -318,7 +326,10 @@ void doorjump_tick(uint64_t frame) {
         // push) position writes are undone (Angler's 03G -> 02G: 12 frames failed, 20 passed). LARECOMP_DJ_REST: frames
         static int rest = -1;
         if (rest < 0) rest = getenv("LARECOMP_DJ_REST") ? atoi(getenv("LARECOMP_DJ_REST")) : 24;
-        if (j->still < rest || (fabsf(out) > 0.02f && j->still < rest + 8)) continue;
+        // ...unless he's dropping: where the neighbour has no wall at this doorway there's nothing under him past the
+        // edge - jump at once, before he falls (Tail Cave 05F south in a generated layout: fell, then respawned)
+        bool falling = pos[1] < -0.3f;
+        if (!falling && (j->still < rest || (fabsf(out) > 0.02f && j->still < rest + 8))) continue;
         j->still = 0;
         float nx = x, nz = z, across = j->depth;  // just past the edge, in front of the partner doorway
         // just inside the target room's doorway on its side (for a neighbour: just past the shared edge)
@@ -333,7 +344,9 @@ void doorjump_tick(uint64_t frame) {
             j->trow, 'A' + j->tcol, j->tside, nx, nz);
         pos[0] = pos2[0] = nx;
         pos[2] = pos2[2] = nz;
+        if (falling) pos[1] = pos2[1] = 0.0f;  // back on the floor (doorways are at floor height 0)
         px = nx, pz = nz;
+        if (abs(j->tcol - col) + abs(j->trow - row) != 1) { hold_x = nx, hold_y = pos[1], hold_z = nz; hold_until = frame + 30; }
         g_jumps_fired++;
         if (j->pair >= 0) { extern void flags_ext_set(int idx); flags_ext_set(CHAOS_FLAG_BASE + j->pair); }
         if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;

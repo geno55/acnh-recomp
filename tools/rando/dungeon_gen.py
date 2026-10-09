@@ -20,6 +20,7 @@ import functools
 import json
 import os
 import random
+import re
 import struct
 import sys
 
@@ -186,8 +187,12 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         dc, dr = rooms.STEP[s]
         return c + dc, r + dr
 
+    # cells whose name belongs to one of the level's side-view rooms (Face Shrine's passages are 01B, 01D...): a grid
+    # room there would share the name - the game found the side-view record, the room never activated, Link fell
+    taken = {cell_pos(n) for n in offgrid if re.match(r'.*_\d\d[A-Z]$', n)}
+
     def inside(c, r):
-        return 0 <= c < COLS and 1 <= r <= ROWS
+        return 0 <= c < COLS and 1 <= r <= ROWS and (c, r) not in taken
 
     for attempt in range(tries):
         rng = random.Random(f'{seed}-{level}-{attempt}')
@@ -235,8 +240,13 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                     if home and placed[n] == orig_nb[room][s]:
                         continue
                     a, b = op[room][s], side_open(placed[n], rooms.OPP[s])
+                    exact = [x[0] for x in a] == [x[0] for x in b] and (not a or _heights_ok(a, b))
                     if not _openings_match(a, b) and not (seal and (not a or can_seal(room, s))
                                                           and (not b or can_seal(placed[n], rooms.OPP[s]))):
+                        return None
+                    # not an exact match: whatever opens on either side will be a door jump -> needs a wall across
+                    if not exact and ((a and not wall_behind(cat, room, s, placed[n])) or
+                                      (b and not wall_behind(cat, placed[n], rooms.OPP[s], room))):
                         return None
                 elif op[room][s]:
                     if not inside(*n):
@@ -428,6 +438,25 @@ def seals(cat, level, layout):
     return out
 
 
+def wall_behind(cat, room, side, other):
+    """A door jump needs Link to stop in his doorway: `other` (the room across `side`) must have a wall at every
+    doorway of `room` on that side - no open tile of its facing edge opposite them. Open there (a pit, a lower
+    floor, a passage), Link walks on into it and falls (Face Shrine 03D south next to Turtle Rock 07E)."""
+    def tiles_of(sl):
+        return {sl // 2 - 1, sl // 2} if sl % 2 == 0 else {sl // 2}
+    # open tiles across that aren't part of the other room's own doorways there (its doorway half a tile off is
+    # what the jump is for - fine)
+    theirs = set()
+    for y in openings(cat, other)[rooms.OPP[side]]:
+        if not isinstance(y[0], str):
+            theirs |= tiles_of(y[0])
+    stray = set(cat[other]['tiles'][rooms.OPP[side]]) - theirs
+    for x in openings(cat, room)[side]:
+        if not isinstance(x[0], str) and tiles_of(x[0]) & stray:
+            return False
+    return True
+
+
 def _heights_ok(a, b):
     return all(x[1] is None or y[1] is None or abs(x[1] - y[1]) < 0.3 for x, y in zip(a, b))
 
@@ -447,6 +476,10 @@ def _openings_match(a, b):
     if not JUMPS or len(a) != len(b):
         return False
     if any(isinstance(x[0], str) or x[2] for x in a + b):
+        return False
+    # raised floors (Face Shrine 03D at 1.5 next to Turtle Rock 07E): Link walked off his doorway and fell - door
+    # jumps only between doorways at ground level
+    if any(x[1] is not None and abs(x[1]) > 0.3 for x in a + b):
         return False
     return _heights_ok(a, b)
 
@@ -651,7 +684,36 @@ def plan_all(cat, seed, romfs, levels=None, stats=None, rounds=None):
     return {lv: out[lv] for lv in levels}
 
 
-def chaos_pairs(cat, level, layout, entrance, rng):
+_grid_cache = {}
+
+
+def landing_depth(romfs, room, side, slot, min_tile):
+    """How far past the edge Link lands at a doorway (Chaos jumps): the centre of the first tile inward from the edge,
+    along the doorway's line, that is floor - no collision, no deep water / lava / pit (Turtle Rock 07D: lava right
+    inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
+    import struct
+    from RandomizerCore.Tools import leb
+    if room not in _grid_cache:
+        r = leb.Room(open(rooms._leb_path(romfs, room), 'rb').read())
+        _grid_cache[room] = rooms._grid(r)[b'data'].data
+    raw = _grid_cache[room]
+    along = int(slot // 2) if not isinstance(slot, str) else 0  # tile index along the edge (slot in half tiles)
+
+    def tile(row, col):
+        o = 0x10 * (row * 10 + col)
+        return raw[o:o + 3], struct.unpack_from('<f', raw, o + 12)[0]
+    for i in range(min_tile, 4):
+        row, col = {'N': (i, along), 'S': (7 - i, along), 'W': (min(along, 7), i), 'E': (min(along, 7), 9 - i)}[side]
+        col = min(col, 9)
+        t, h = tile(row, col)
+        solid = bool(t[0] & 2) and not t[2] & 8
+        hazard = (t[2] & 4 and h < -0.3) or h < -1.0
+        if not solid and not hazard:
+            return round(i * 1.5 + 0.75, 2)
+    return 2.2 if min_tile else 0.9
+
+
+def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
     """Chaos: pairs every free doorway that isn't physically joined with another one (any room of the level, any
     side) -> door_jumps rows (level, cell, side, own centre, partner centre, partner cell, partner side), both ways.
     Pieces joined physically (incl. the stairs network) are linked first (a random spanning tree), the rest pair at
@@ -728,7 +790,7 @@ def chaos_pairs(cat, level, layout, entrance, rng):
     out = []
     for a, b in pairs:
         for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
-            depth = 2.2 if own_door(y[1], y[2], y[3]) else 0.9
+            depth = landing_depth(romfs_for_tiles, layout[y[1]], y[2], y[3], 1 if own_door(y[1], y[2], y[3]) else 0)
             out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth))
     return out
 
@@ -776,8 +838,14 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
             for lv in sorted(levels, key=lambda lv: (sum(1 for v in out[lv].values() if v in pool) - share[lv],
                                                       rng.random())):
                 L = out[lv]
+                # (the level's map texture archive has a budget: the leftover room's textures must fit too)
+                tex = set().union(*(room_textures(romfs, k) for k in L.values()))
+                if len(tex | room_textures(romfs, room)) > TEXTURE_BUDGET:
+                    continue
                 taken = {cell_pos(k) for k in L}
-                free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1) if (c, r) not in taken]
+                reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
+                free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
+                              if (c, r) not in taken and (c, r) not in reserved]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
                     ok = True
@@ -800,7 +868,7 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
                 break
         jumps = []
         for lv in levels:
-            j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng)
+            j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs)
             if j is None:
                 break
             jumps += j
