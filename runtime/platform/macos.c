@@ -28,6 +28,12 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED) == KERN_SUCCESS;
 }
 
+// Fresh zero pages over the whole window (the old ones are released at once).
+bool plat_reset_guest(uint64_t lo, uint64_t hi) {
+    mach_vm_address_t a = lo;
+    return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE) == KERN_SUCCESS;
+}
+
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {

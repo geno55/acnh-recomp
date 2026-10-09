@@ -88,6 +88,8 @@ typedef struct {
     SDL_AudioStream *stream;
     FILE *wav;
     uint32_t wav_bytes;
+    pthread_t thread;
+    volatile bool quit;  // reboot (audio_reset)
 } Renderer;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -638,9 +640,9 @@ static void *renderer_tick(void *arg) {
                 target / (2 * (int)sizeof(float)));
         }
     }
-    for (;;) {
+    while (!r->quit) {
         if (r->stream) {
-            while (SDL_GetAudioStreamQueued(r->stream) >= target) {
+            while (SDL_GetAudioStreamQueued(r->stream) >= target && !r->quit) {
                 struct timespec ts = {0, 1000000};
                 nanosleep(&ts, NULL);
             }
@@ -986,6 +988,9 @@ static void audio_device(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
+typedef struct AudioOut AudioOut;
+static void audio_track(Renderer *r, AudioOut *a);
+
 SERVICE("audren:u", audren_u) {
     (void)s;
     switch (req->cmd) {
@@ -1007,8 +1012,8 @@ SERVICE("audren:u", audren_u) {
         r->fx = calloc(r->effects ? r->effects : 1, sizeof(Effect));
         renderer_open_output(r);
         r->event = kernel_create_event_pair(&r->event_w, &r->event_r);
-        pthread_t t;
-        pthread_create(&t, NULL, renderer_tick, r);
+        pthread_create(&r->thread, NULL, renderer_tick, r);
+        audio_track(r, NULL);
         LOG("[audren] renderer %u Hz, %u samples/frame, %u voices, %u mixes, %u mix buffers, %u splitters, %u effects\n",
             r->sample_rate, r->sample_count, r->voices, r->nmix, r->mix_buffers, r->splitters, r->effects);
         ipc_return_object(resp, service_new("IAudioRenderer", audio_renderer, r));
@@ -1021,7 +1026,7 @@ SERVICE("audren:u", audren_u) {
 }
 
 // ------------------------------------------------------------------ audout (buffers released in real time)
-typedef struct {
+typedef struct AudioOut {
     uint32_t rate, channels, state;
     uint64_t tags[64], sizes[64], datas[64];
     SDL_AudioStream *stream;
@@ -1033,7 +1038,52 @@ typedef struct {
     KEvent *event;
     uint64_t played;
     pthread_mutex_t lock;
+    pthread_t thread;
+    volatile bool quit;  // reboot (audio_reset)
 } AudioOut;
+
+// Every renderer / audio out of this boot: a reboot stops their threads (they read guest memory and signal this
+// boot's kernel events) and closes their output streams.
+static Renderer *g_rens[8];
+static AudioOut *g_outs[8];
+static pthread_mutex_t g_track_lock = PTHREAD_MUTEX_INITIALIZER;
+static void audio_track(Renderer *r, AudioOut *a) {
+    pthread_mutex_lock(&g_track_lock);
+    for (int i = 0; i < 8; i++) {
+        if (r && !g_rens[i]) { g_rens[i] = r; r = NULL; }
+        if (a && !g_outs[i]) { g_outs[i] = a; a = NULL; }
+    }
+    pthread_mutex_unlock(&g_track_lock);
+}
+
+RT_ON_RESET(audio_reset) {
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        Renderer *r = g_rens[i];
+        if (r) {
+            r->quit = true;
+            pthread_join(r->thread, NULL);
+            if (r->stream) SDL_DestroyAudioStream(r->stream);
+            if (r->wav) { wav_header(r->wav, r->wav_bytes); fclose(r->wav); }
+            for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
+            free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx);  // (reverb delay lines leak)
+            free(r);
+            g_rens[i] = NULL;
+            n++;
+        }
+        AudioOut *a = g_outs[i];
+        if (a) {
+            a->quit = true;
+            pthread_join(a->thread, NULL);
+            if (a->stream) SDL_DestroyAudioStream(a->stream);
+            if (a->wav) fclose(a->wav);
+            free(a);
+            g_outs[i] = NULL;
+            n++;
+        }
+    }
+    LOG("[audio] reboot: %d outputs closed\n", n);
+}
 
 // Buffers are copied into an SDL stream and released once the stream has drained below its target, so the
 // stream plays the role of the hardware queue. Without a device, buffers are released in real time.
@@ -1048,7 +1098,7 @@ static void *audout_thread(void *arg) {
             dev_frames = 1024;
         target = 2 * dev_frames * 2 * (int)ch;  // bytes of s16 at the source rate (close enough at 48 kHz)
     }
-    for (;;) {
+    while (!a->quit) {
         pthread_mutex_lock(&a->lock);
         uint64_t size = 0, tag = 0, data = 0;
         if (a->state == 0 && a->queued) { size = a->sizes[0]; tag = a->tags[0]; data = a->datas[0]; }
@@ -1058,7 +1108,7 @@ static void *audout_thread(void *arg) {
         if (a->stream) {
             apply_gain(a->stream);
             if (data) SDL_PutAudioStreamData(a->stream, (const void *)(uintptr_t)data, (int)size);
-            while (SDL_GetAudioStreamQueued(a->stream) > target) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
+            while (SDL_GetAudioStreamQueued(a->stream) > target && !a->quit) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
         } else {
             uint64_t ns = frames * 1000000000ull / (a->rate ? a->rate : 48000);
             struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)};
@@ -1168,8 +1218,8 @@ SERVICE("audout:u", audout_u) {
                 SDL_ResumeAudioStreamDevice(a->stream);
             }
         }
-        pthread_t t;
-        pthread_create(&t, NULL, audout_thread, a);
+        pthread_create(&a->thread, NULL, audout_thread, a);
+        audio_track(NULL, a);
         IpcBuf *b = out_buf(req, 0);
         if (b && b->size) strncpy((char *)(uintptr_t)b->addr, "DeviceOut", b->size);
         OUT(uint32_t, 0) = a->rate;

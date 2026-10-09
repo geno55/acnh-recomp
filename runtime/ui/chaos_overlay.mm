@@ -28,6 +28,8 @@ bool doorjump_chaos_seen(int id);
 
 static volatile uint64_t g_dm_frame, g_dm_obj;
 
+RT_ON_RESET(chaos_overlay_reset) { g_dm_frame = g_dm_obj = 0; }
+
 extern "C" void rt_dgnmap_tick(Cpu *c) {
     g_dm_frame = renderer_present_count();
     g_dm_obj = c->x[0];

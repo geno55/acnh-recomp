@@ -522,6 +522,8 @@ void backend_present(NvnTexture *t) {
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
+    reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
@@ -639,10 +641,27 @@ void backend_init(void) {
     LOG("[vk] %s, swapchain %ux%u\n", g_vk.props.deviceName, g_vk.sc_extent.width, g_vk.sc_extent.height);
 }
 
-void ui_run(void) {
+// ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
+void backend_reset(void) {
+    if (!g_vk.dev) return;
+    vkDeviceWaitIdle(g_vk.dev);
+    extern void vk_textures_reset(void);
+    extern void vk_exec_reset(void);
+    vk_textures_reset();
+    vk_exec_reset();
+    g_last_presented = NULL;
+}
+void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
+void backend_clear_window(void) {
+    static const float black[4] = {0, 0, 0, 1};
+    if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
+}
+
+int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
+        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) {
