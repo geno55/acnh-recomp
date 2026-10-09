@@ -43,13 +43,14 @@ void flags_ext_clear(int idx);
 uint64_t doorjump_player(uint64_t frame);
 extern void ui_toast(const char *text);
 
-typedef struct { bool dig; float y; char *name, *ops; } Tile;
+typedef struct { bool dig, hole; float y; char *name, *ops; } Tile;  // hole: reopen it (no plant grows there)
 static Tile *g_tiles;       // NTILES
 static int g_on = -1;
 static uint64_t g_alive[NTILES];  // control block of the tile's hole (weak ref held), 0 = none known
 static uint32_t g_zone = 1;       // zone id the shovel passes (1 on the Field; refreshed by every real dig)
 static int g_queue[64], g_nq;     // dug tiles whose item is still to be given
 static FILE *g_test_out;          // (dig test: LARECOMP_DIG_TEST)
+static uint8_t g_spawns[NTILES];  // holes reopened per tile since the Field loaded (3 that didn't stay: give up)
 
 static bool enabled(void) {
     if (g_on >= 0) return g_on;
@@ -65,14 +66,16 @@ static bool enabled(void) {
     char line[512];
     int n = 0, items = 0;
     while (fgets(line, sizeof line, f)) {
-        char scr[8], name[128], ops[256];
+        char scr[8], name[128], ops[256], blocker[16] = "-";
         int tile;
         float y;
-        if (line[0] == '#' || sscanf(line, "%7s %d %f %127[^\t] %255s", scr, &tile, &y, name, ops) != 5) continue;
+        if (line[0] == '#' || sscanf(line, "%7s %d %f %127[^\t] %255s %15s", scr, &tile, &y, name, ops, blocker) < 5)
+            continue;
         int row = atoi(scr), col = scr[2] - 'A';
         if (row < 1 || row > 16 || col < 0 || col > 15 || tile < 0 || tile >= 80) continue;
         Tile *t = &g_tiles[((row - 1) * 16 + col) * 80 + tile];
         t->dig = true, t->y = y;
+        t->hole = strcmp(blocker, "grass") && strcmp(blocker, "bush");
         if (strcmp(ops, "-")) { t->name = strdup(name); t->ops = strdup(ops); items++; }
         n++;
     }
@@ -303,11 +306,11 @@ static void dig_test(uint64_t frame) {
     } else if (t == dig) {
         g_test_buttons = 8;  // Y: shovel
         g_test_buttons_until = frame + 6;
-    } else if (t >= dig + 50) {
+    } else if (t >= dig + 40) {
         prev_screen = en->g / 80;
         state = 0;
         if (flags_ext_get(DIG_FLAG_BASE + en->g)) return;  // (the loop above reports it)
-        if (++stand < en->ns) return;
+        if (++stand < en->ns && stand < 2) return;  // (two stands: a third rarely helps)
         fprintf(g_test_out, "MISS %d\n", en->g);
         fflush(g_test_out);
         cur++, stand = 0;
@@ -327,10 +330,13 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
     g_nq = 0;
     static int field_was;
     int field = on_field();
-    if (field != field_was || !field) {  // left (or entered) the Field: its holes are gone - drop our refs
+    static uint64_t scene_was;
+    uint64_t mgr = LD64(GAME_MGR), scene = mgr ? LD64(mgr + 0x4a8) : 0;
+    if (field != field_was || scene != scene_was) {  // left / (re)loaded the Field: drop the refs of holes gone
         for (int g = 0; g < NTILES; g++)
-            if (g_alive[g]) { c->x[0] = g_alive[g]; g_alive[g] = 0; guest_call(c, WEAK_RELEASE); }
-        field_was = field;
+            if (g_alive[g] && !hole_alive(g)) { c->x[0] = g_alive[g]; g_alive[g] = 0; guest_call(c, WEAK_RELEASE); }
+        memset(g_spawns, 0, sizeof g_spawns);
+        field_was = field, scene_was = scene;
     }
     if (field && frame % 8 == 0) {
         uint64_t pc0 = doorjump_player(frame);
@@ -344,9 +350,10 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
                         if (r < 0 || r > 15 || k < 0 || k > 15) continue;
                         for (int t = 0; t < 80 && spawned < 12; t++) {
                             int g = (r * 16 + k) * 80 + t;
-                            if (!g_tiles[g].dig || !flags_ext_get(DIG_FLAG_BASE + g) || hole_alive(g)) continue;
+                            if (!g_tiles[g].hole || g_spawns[g] >= 3 || !flags_ext_get(DIG_FLAG_BASE + g) || hole_alive(g)) continue;
                             if (g_alive[g]) { c->x[0] = g_alive[g]; g_alive[g] = 0; guest_call(c, WEAK_RELEASE); }
                             spawn_hole(c, g);
+                            g_spawns[g]++;
                             spawned++;
                         }
                     }

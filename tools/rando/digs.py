@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Digsanity (LAS Recomp addition): every diggable tile of Koholint's overworld is a check - about 7600 of them.
+"""Digsanity (LAS Recomp addition): every diggable tile of Koholint's overworld is a check - thousands of them.
 
 Dig spots: each Field screen's .leb grid (10 x 8 tiles of 1.5 units) marks soft ground with the tile flag LAS calls
 'isdigspot' (byte 2 bit 0); the shovel snaps its hole to the centre of the tile in front of Link. Tiles that also
-carry collision are left out (partly blocked: not reliably diggable).
+carry collision are left out. The flag alone over-counts (about a quarter of those tiles are house fronts, cliff bases,
+doorways: 3D collision the grid doesn't know), so checks are the tiles the in-game dig test proved diggable
+(dig_tiles.txt, see VERIFIED). Grass and bushes on a tile have to be cut first (logic: sword / break-bush).
 
 No actors and no event flow: the runtime (runtime/hle/digs.c) sees the hole the shovel makes, and the first dig of
 a tile gives that tile's item through AddItem directly, with what LAS's item-get flow would do around it (progressive
@@ -11,7 +13,8 @@ items, found-flags, instrument / trade flags - see give_program). Traps need a f
 locations never hold traps (LAS shuffler: 'no-traps'). Dug tiles are event flags 4096 + tile id in the runtime's
 extended flag store (runtime/hle/flags_ext.c), so the holes stay open (reopened whenever the Field loads).
 
-rando/<seed>/digs.tsv: screen, tile, ground height, item name, give program ('-' = no check: no logic region).
+rando/<seed>/digs.tsv: screen, tile, ground height, item name, give program ('-' = no check), blocker (grass / bush:
+the plant grows back when the Field reloads and a hole can't stay under it - such tiles stay dug but show no hole).
 
 Logic: the shovel AND the logic regions of the tile's screen (the same screen regions as bushsanity: bushes.py).
 Filler: what digging turns up in the original game - rupees and hearts mostly, a few refills.
@@ -23,6 +26,10 @@ import bushes
 import pots
 
 FLAG_BASE = 4096  # runtime/hle/digs.c DIG_FLAG_BASE: flag of tile g = FLAG_BASE + g
+HERE = os.path.dirname(os.path.abspath(__file__))
+# Tiles proven diggable in game (the dig test, LARECOMP_DIG_TEST, dug a hole there): the grid flag alone isn't enough
+# - walls, cliff bases and doorways are 3D collision the grid doesn't know about. Tile ids only (no game data).
+VERIFIED = os.path.join(HERE, 'dig_tiles.txt')
 # (own rupee items: LAS's trapsanity turns every rupee-20 - and with blupsanity every rupee-5 - into a trap, and
 # traps can't go into dig spots)
 JUNK_MIX = [('dig-rupee-1', 0.42), ('dig-rupee-5', 0.18), ('pot-heart', 0.26), ('dig-rupee-20', 0.06),
@@ -98,9 +105,21 @@ def location_name(d):
     return f"dig-{d['room'].split('_')[-1]}-{d['tile']:02d}"
 
 
+def verified_tiles():
+    """Tile ids from dig_tiles.txt (None without the file: every dig tile counts)."""
+    if not os.path.exists(VERIFIED):
+        return None
+    out = set()
+    for line in open(VERIFIED):
+        if not line.startswith('#'):
+            out.update(int(v) for v in line.split())
+    return out
+
+
 def add_to_logic(digs, logic_defs, item_defs):
-    """A location per dig tile in LAS's logic + matching filler in the pool. Returns {location: dig}."""
+    """A location per proven dig tile in LAS's logic + matching filler in the pool. Returns {location: dig}."""
     regions = bushes.screen_regions()
+    proven = verified_tiles()
     spoiler_of = {}
     for k, v in logic_defs.items():
         if v.get('type') == 'item' and v.get('region') and v.get('spoiler-region'):
@@ -108,7 +127,7 @@ def add_to_logic(digs, logic_defs, item_defs):
     locs = {}
     for d in digs:
         regs = sorted(r for r in regions.get(d['room'], ()) if r in logic_defs)
-        if not regs or d['blocker'] == 'other':
+        if not regs or d['blocker'] == 'other' or (proven is not None and tile_id(d) not in proven):
             continue
         name = location_name(d)
         logic_defs[name] = {'type': 'item', 'subtype': 'standing', 'content': 'rupee-5', 'region': regs[0], 'no-traps': True,
@@ -161,7 +180,7 @@ def apply(locs, digs, mods, out_dir, romfs, oead_tools, item_get):
     flag_index = {v['symbol']: int(v['index']) for v in oead_tools.readSheet(path('datasheets/GlobalFlags.gsheet'))['values']}
     import spoiler_view
     by_tile = {tile_id(d): name for name, d in locs.items()}
-    lines, spoiler = ['# screen\ttile\ty\titem\tgive (tools/rando/digs.py)\n'], []
+    lines, spoiler = ['# screen\ttile\ty\titem\tgive\tblocker (tools/rando/digs.py)\n'], []
     for d in sorted(digs, key=tile_id):
         name = by_tile.get(tile_id(d))
         label, prog = '-', '-'
@@ -174,7 +193,7 @@ def apply(locs, digs, mods, out_dir, romfs, oead_tools, item_get):
             else:
                 prog = give_program(item_key, item_index, item_ids, flag_index, item_get)
             spoiler.append(f'  {name:34} {item}')
-        lines.append(f"{d['room'].split('_')[-1]}\t{d['tile']}\t{d['y']:g}\t{label}\t{prog}\n")
+        lines.append(f"{d['room'].split('_')[-1]}\t{d['tile']}\t{d['y']:g}\t{label}\t{prog}\t{d['blocker'] or '-'}\n")
     with open(os.path.join(out_dir, 'digs.tsv'), 'w') as f:
         f.writelines(lines)
     open(os.path.join(out_dir, 'flags_ext'), 'w').write('digsanity / bushsanity: event flags 2048+ (runtime/hle/flags_ext.c)\n')
@@ -215,13 +234,25 @@ def test_list(romfs, leb, out_path):
     return len(rows)
 
 
-if __name__ == '__main__':  # digs.py --test-list <romfs> <out>: the in-game dig test's list
+def write_verified(results):
+    """dig_tiles.txt from dig test outputs (their 'DUG <tile>' lines)."""
+    tiles = sorted({int(line.split()[1]) for f in results for line in open(f) if line.startswith('DUG ')})
+    with open(VERIFIED, 'w') as f:
+        f.write('# Field tiles the shovel digs (tile id = ((row - 1) * 16 + column) * 80 + tile): the in-game dig test\n'
+                '# (runtime/hle/digs.c LARECOMP_DIG_TEST) dug a hole on each; tools/rando/digs.py --verified <results>\n')
+        for i in range(0, len(tiles), 16):
+            f.write(' '.join(str(t) for t in tiles[i:i + 16]) + '\n')
+    return len(tiles)
+
+
+if __name__ == '__main__':  # digs.py --test-list <romfs> <out> | --verified <test results...>
     import sys
     import types
-    HERE = os.path.dirname(os.path.abspath(__file__))
     sys.modules['PySide6'] = types.ModuleType('PySide6')
     sys.modules['PySide6.QtCore'] = types.ModuleType('PySide6.QtCore')
     sys.path.insert(0, os.path.normpath(os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer')))
     from RandomizerCore.Tools import leb as _leb
     if sys.argv[1] == '--test-list':
         print(test_list(sys.argv[2], _leb, sys.argv[3]), 'tiles')
+    elif sys.argv[1] == '--verified':
+        print(write_verified(sys.argv[2:]), 'proven dig tiles ->', VERIFIED)
