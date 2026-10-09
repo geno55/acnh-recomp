@@ -886,7 +886,7 @@ def _madness_rows(level, layout, order, by_comp, rng, romfs, cat):
     return [_jump_row(cat, level, layout, romfs, x, y) for x, y in sorted(link.items())]
 
 
-def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False):
+def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, settings=None):
     """Chaos dungeon room shuffle for every dungeon of a seed: each room used once (no duplicates); physical
     placement keeps doorways that can't jump matched; free doorways are paired by chaos_pairs.
     Returns ({level: layout}, [door_jumps rows])."""
@@ -970,7 +970,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False):
             for _ in range(60):
                 j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs, madness=madness)
                 if j is None or (room_logic.boss_door_ok(cat, romfs, lv, out[lv], j) and
-                                 room_logic.fill_ok(cat, romfs, lv, out[lv], j)):
+                                 (settings is None or settings.get('keysanity', 'off') != 'off' or
+                                  room_logic.fill_ok(cat, romfs, lv, out[lv], j, settings))):
                     break
             else:
                 j = None

@@ -59,6 +59,20 @@ def cell_name(col, row):
 TOK = re.compile(r'\s*(\(|\)|&|\||!|[^\s()&|!]+)')
 
 
+def top_level_or(s):
+    """'a | (b & c) | d' -> ['a', '(b & c)', 'd'] (alternatives outside parentheses)."""
+    out, depth, cur = [], 0, ''
+    for ch in s:
+        depth += ch == '('
+        depth -= ch == ')'
+        if ch == '|' and depth == 0:
+            out.append(cur)
+            cur = ''
+        else:
+            cur += ch
+    return out + [cur] if cur.strip() else out
+
+
 def parse(s):
     toks = [t for t in TOK.findall(s or '') if t.strip()]
     pos = [0]
@@ -444,8 +458,20 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
     boss_cell = {}
     junk_delta = [0]
     kcs = {}
+    cell_keys = {}
+    check_keys = {}  # location -> fewest keys reaching it takes
     for level, layout in layouts.items():
         n, region = LEVELS[level]
+        # a dungeon region defined by its own cells (Face Shrine: "D6-8D | D6-3A"): the cells now hang off the region,
+        # so the region becomes the way in from outside - the entrance cell's vanilla alternatives that don't go
+        # through the dungeon itself (seed RapidBowWow994: no D6 check was reachable)
+        rc = logic_defs.get(region, {}).get('condition-basic', '')
+        if re.search(rf'\bD{n}-\d', rc):
+            start0 = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
+            ent = logic_defs.get(f'D{n}-{start0.lstrip("0")}', {}).get('condition-basic', '')
+            outside = [a.strip() for a in top_level_or(ent) if not re.search(rf'\bD{n}-\d', a)]
+            if outside:
+                logic_defs[region]['condition-basic'] = ' | '.join(f'({a})' for a in outside)
         for cell, room in layout.items():
             rooms_at.setdefault(room, []).append((level, cell))
             for d in cat.get(room, {}).get('doors', []):
@@ -463,6 +489,10 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         lock_count[n] = locks
         for cell, t in terms.items():
             cell_expr[(level, cell)] = dnf_str(resolve_keys(t, kc, n, locks))
+            ks = [min(max([kc.get(a, locks) for a in x if a.startswith('LOCK|')] or [0]), locks) for x in t
+                  if not any(a.startswith('nightmare-key') for a in x)]
+            if ks:
+                cell_keys[(level, cell)] = min(ks)  # (fewest keys any way in; the fill check below)
         # LAS's cell regions of this dungeon: "reach that cell of the new layout"
         for k, v in logic_defs.items():
             if v.get('type') == 'room' and re.match(rf'D{n}-\d\d?[A-P]$', k):
@@ -533,6 +563,15 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             k = max(kc.get(f'LOCK|{n}|block{b}', 1) for b in bl)
             return f'({e}) & key-D{n}:{k}'
         reach = [with_blocks(p) for p in places if cell_expr.get(p)]
+        ck = [cell_keys[p] for p in places if p in cell_keys]
+        if ck:
+            k = min(ck)
+            bl = lock_blocks(romfs, room)
+            p0 = next((p for p in places if p in cell_keys and cell_keys[p] == k), None)
+            if bl and p0 and p0[0] in kcs:
+                kc0, n0 = kcs[p0[0]]
+                k = max([k] + [kc0.get(f'LOCK|{n0}|block{b}', 1) for b in bl])
+            check_keys[loc] = k
         if not reach and any(p[1] == room.rsplit('_', 1)[1] and p[0] == room.rsplit('_', 1)[0] for p in places):
             fallback += 1  # a room at home the graph can't enter (no doorways: Bottle Grotto 03C, reached by a fall):
             continue       # its vanilla condition, on the redefined cell regions
@@ -554,21 +593,20 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         need_k = {}  # 'Dn' -> [keys each check of the dungeon needs]
         for loc, d in dungeon_of.items():
             v = logic_defs.get(loc, {})
-            cond = v.get('condition-basic', '')
-            if loc in excluded or v.get('type') != 'item' or 'nightmare-key' in cond:
+            if loc in excluded or v.get('type') != 'item' or loc not in check_keys:
                 continue
-            need_k.setdefault(d, []).append(max([int(k) for k in re.findall(rf'key-{d}:(\d+)', cond)] or [0]))
+            need_k.setdefault(d, []).append(check_keys[loc])
         for level, (kc, n) in kcs.items():
-            ks = sorted(need_k.get(f'D{n}', []))
             total = lock_count[n]
+            ks = sorted(need_k.get(f'D{n}', []) + [total] * roomless_checks(settings).get(n, 0))
             for j in range(1, total + 1):
                 if sum(1 for k in ks if k <= j - 1) < j:
                     settings['room-logic-unfillable'] = (f'{level}: key {j} of {total} has '
                                                          f'{sum(1 for k in ks if k <= j - 1)} checks to go in')
                     break
             else:
-                if len(ks) < total + DUNGEON_ITEMS:  # (room for the Nightmare Key, Map, Compass, Stone Beak too)
-                    settings['room-logic-unfillable'] = f'{level}: {len(ks)} checks for {total + DUNGEON_ITEMS} dungeon items'
+                if len(ks) < total + dungeon_items(settings):  # (room for the Nightmare Key, Map, Compass, Beak too)
+                    settings['room-logic-unfillable'] = f'{level}: {len(ks)} checks for {total + dungeon_items(settings)} dungeon items'
     return (f'{len(layouts)} dungeons, {rewritten} checks rewritten, {unused} in unused rooms (excluded), '
             f'{fallback} without a room (vanilla condition), locks {dict(sorted(lock_count.items()))}')
 
@@ -613,10 +651,26 @@ def boss_door_ok(cat, romfs, level, layout, rows):
     return not (behind - allowed)
 
 
-DUNGEON_ITEMS = 4  # besides the small keys: Nightmare Key, Map, Compass, Stone Beak
+def dungeon_items(settings):
+    """How many items besides the small keys stay in their dungeon: Nightmare Key, Map, Compass, Stone Beak, less
+    what the dungeon-items setting sends anywhere."""
+    return 4 - {'mc': 2, 'mcb': 3, 'stone-beak': 1}.get(settings.get('dungeon-items', 'none'), 0)
 
 
-def fill_ok(cat, romfs, level, layout, rows):
+def roomless_checks(settings):
+    """{dungeon number: checks LAS counts in that dungeon (by name) that have no room (owl statues...)} - they keep
+    their vanilla condition, which needs every key of the new layout."""
+    lr = json.load(open(os.path.join(HERE, 'location_rooms.json')))
+    excluded = settings.get('excluded-locations', ())
+    out = {}
+    for k, v in lr.items():
+        m = re.match(r'D(\d)-', k)
+        if m and not v.get('room') and v.get('subtype') != 'boss' and k not in excluded:
+            out[int(m.group(1))] = out.get(int(m.group(1)), 0) + 1
+    return out
+
+
+def fill_ok(cat, romfs, level, layout, rows, settings=None):
     """The generator's other check (keysanity off: a dungeon's keys go into its own checks): key j needs a check that
     takes at most j-1 keys (by the worst-case key rule) - the first lock reached needs as many checks before it as
     locks reachable from the start. layout: dungeon_gen's. (Only checks with a known room count; apply() checks the
@@ -649,5 +703,7 @@ def fill_ok(cat, romfs, level, layout, rows):
         if bl:
             k = max([k] + [kc.get(f'LOCK|{n}|block{b}', 1) for b in bl])
         ks += [k] * count
+    settings = settings or {}
+    ks += [total] * roomless_checks(settings).get(n, 0)
     return (all(sum(1 for k in ks if k <= j - 1) >= j for j in range(1, total + 1)) and
-            sum(1 for k in ks if k <= total) >= total + DUNGEON_ITEMS)
+            len(ks) >= total + dungeon_items(settings))

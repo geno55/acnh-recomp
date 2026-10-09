@@ -257,7 +257,8 @@ def main():
         for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
             sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
             if room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
-                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness')
+                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
+                                                              settings=settings)
                 logic_rows = jumps
             else:
                 layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
