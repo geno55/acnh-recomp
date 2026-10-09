@@ -14,13 +14,17 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t excl_addr;      // 296
     uint64_t excl_val;       // 304
     void *thread;            // 312: runtime thread object
-    uint8_t _pad[512 - 320];
+    uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
+    uint64_t fpsr;           // 328
+    uint8_t _pad[512 - 336];
     __uint128_t v[32];       // 512
 } Cpu;
 
 _Static_assert(offsetof(Cpu, sp) == 256, "sp");
 _Static_assert(offsetof(Cpu, pc) == 264, "pc");
 _Static_assert(offsetof(Cpu, nzcv) == 272, "nzcv");
+_Static_assert(offsetof(Cpu, fpcr) == 320, "fpcr");
+_Static_assert(offsetof(Cpu, fpsr) == 328, "fpsr");
 _Static_assert(offsetof(Cpu, v) == 512, "v");
 
 typedef void (*GuestFn)(Cpu *);
@@ -32,10 +36,19 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 uint64_t rt_ticks(void);
 
+#if defined(__aarch64__)
 static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
 static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
 static inline void rt_set_fpcr(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
 static inline void rt_set_fpsr(uint64_t v) { __asm__ volatile("msr fpsr, %0" :: "r"(v)); }
+#else
+// Host FP state is not the guest's here: code lifted with --simd=c keeps FPCR/FPSR in Cpu (c->fpcr, zeroed
+// with the Cpu), so the host-side reset in thread start-up has nothing to do.
+static inline uint64_t rt_get_fpcr(void) { return 0; }
+static inline uint64_t rt_get_fpsr(void) { return 0; }
+static inline void rt_set_fpcr(uint64_t v) { (void)v; }
+static inline void rt_set_fpsr(uint64_t v) { (void)v; }
+#endif
 
 // ---- memory: guest addresses are host addresses
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
@@ -176,3 +189,9 @@ static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
     if ((int32_t)a == INT32_MIN && (int32_t)b == -1) return a;
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
+
+// Portable FP/SIMD helpers for code lifted with --simd=c (default off AArch64; gen.py includes simd.h itself
+// in that mode, so AArch64 hosts can build it too).
+#if !defined(__cplusplus) && !defined(__aarch64__)
+#include "simd.h"
+#endif

@@ -1,9 +1,9 @@
 """AArch64 -> C static recompiler.
 
-Integer, memory, and control flow are translated to C. FP/SIMD instructions are
-re-emitted as inline assembly (the host is AArch64 too), with guest V registers
+Integer, memory, and control flow are translated to C. FP/SIMD instructions (and CRC32) are
+either re-emitted as inline assembly (simd='asm', AArch64 hosts), with guest V registers
 loaded from / stored to the Cpu struct around each batch, so their semantics are
-bit-exact by construction.
+bit-exact by construction, or lowered to portable C (simd='c', tools/simd_c.py + runtime/simd.h).
 """
 import struct
 
@@ -168,8 +168,14 @@ def is_ldst(w):
 
 
 class Lifter:
-    def __init__(self, base):
+    def __init__(self, base, simd='asm'):
         self.base = base  # absolute load address of the module (guest == host)
+        if simd not in ('asm', 'c'):
+            raise ValueError(f'simd={simd!r}')
+        self.sc = None
+        if simd == 'c':
+            from simd_c import SimdC
+            self.sc = SimdC()
 
     def lift(self, w, pc):
         """pc is absolute. Returns an Insn."""
@@ -333,8 +339,8 @@ class Lifter:
                 (3, 3, 14, 0, 1): 'rt_ticks()',
                 (3, 3, 14, 0, 2): 'rt_ticks()',
                 (3, 3, 4, 2, 0): 'c->nzcv',
-                (3, 3, 4, 4, 0): 'rt_get_fpcr()',
-                (3, 3, 4, 4, 1): 'rt_get_fpsr()',
+                (3, 3, 4, 4, 0): 'c->fpcr' if self.sc else 'rt_get_fpcr()',
+                (3, 3, 4, 4, 1): 'c->fpsr' if self.sc else 'rt_get_fpsr()',
                 (3, 3, 0, 0, 7): '4ull',
                 (3, 3, 0, 0, 1): '0x8444c004ull',
             }.get(key)
@@ -344,8 +350,8 @@ class Lifter:
         dst = {
             (3, 3, 13, 0, 2): 'c->tpidr = {v};',
             (3, 3, 4, 2, 0): 'c->nzcv = {v} & 0xf0000000ull;',
-            (3, 3, 4, 4, 0): 'rt_set_fpcr({v});',
-            (3, 3, 4, 4, 1): 'rt_set_fpsr({v});',
+            (3, 3, 4, 4, 0): 'c->fpcr = {v} & 0x7c00000ull;' if self.sc else 'rt_set_fpcr({v});',
+            (3, 3, 4, 4, 1): 'c->fpsr = {v} & 0xf800009full;' if self.sc else 'rt_set_fpsr({v});',
         }.get(key)
         if dst is None:
             raise Unsupported(f'msr {key}')
@@ -356,6 +362,8 @@ class Lifter:
     def ldst(self, w, pc):
         V = bits(w, 26, 1)
         if V:
+            if self.sc:
+                return Insn('op', self.sc.ldst(w, pc))
             return self.ldst_simd(w, pc)
         if bits(w, 24, 6) == 0b001000:
             return self.ldst_excl(w, pc)
@@ -603,6 +611,8 @@ class Lifter:
                     raise Unsupported('dp1')
                 return Insn('op', set_reg(sf, rd, expr))
             if 16 <= opcode <= 23:  # CRC32: host has the same instruction
+                if self.sc:
+                    return Insn('op', self.sc.crc(w))
                 gprs = [(p, r) for p, r in ((0, rd), (5, rn), (16, rm)) if r != 31]
                 return Insn('asm', asm=AsmInsn(w, set(), gprs))
             a, b = R(sf, rn), R(sf, rm)
@@ -622,6 +632,8 @@ class Lifter:
     # ------------------------------------------------------------ FP / SIMD data processing
 
     def fp_simd(self, w, pc):
+        if self.sc:
+            return Insn('op', self.sc.dp(w, pc))
         rd, rn, rm, ra = bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5), bits(w, 10, 5)
         vregs = {rd, rn, rm, ra}
         gprs = []
