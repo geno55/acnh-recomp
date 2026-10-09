@@ -1056,6 +1056,28 @@ static void audio_track(Renderer *r, AudioOut *a) {
     pthread_mutex_unlock(&g_track_lock);
 }
 
+static void audout_free(AudioOut *a) {
+    a->quit = true;
+    pthread_join(a->thread, NULL);
+    if (a->stream) SDL_DestroyAudioStream(a->stream);
+    if (a->wav) fclose(a->wav);
+    free(a);
+}
+
+// The game closes its IAudioOut after every movie (the title's attract loop opens one per showing): stop the
+// thread and the output stream then, or each showing leaves both running and fills g_outs.
+static void audout_close(Service *s) {
+    AudioOut *a = s->state;
+    bool mine = false;
+    pthread_mutex_lock(&g_track_lock);
+    for (int i = 0; i < 8; i++) if (g_outs[i] == a) { g_outs[i] = NULL; mine = true; }
+    pthread_mutex_unlock(&g_track_lock);
+    if (!mine) return;  // (a reboot already closed it)
+    s->state = NULL;
+    audout_free(a);
+    LOG("[audout] closed\n");
+}
+
 RT_ON_RESET(audio_reset) {
     int n = 0;
     for (int i = 0; i < 8; i++) {
@@ -1071,16 +1093,7 @@ RT_ON_RESET(audio_reset) {
             g_rens[i] = NULL;
             n++;
         }
-        AudioOut *a = g_outs[i];
-        if (a) {
-            a->quit = true;
-            pthread_join(a->thread, NULL);
-            if (a->stream) SDL_DestroyAudioStream(a->stream);
-            if (a->wav) fclose(a->wav);
-            free(a);
-            g_outs[i] = NULL;
-            n++;
-        }
+        if (g_outs[i]) { audout_free(g_outs[i]); g_outs[i] = NULL; n++; }
     }
     LOG("[audio] reboot: %d outputs closed\n", n);
 }
@@ -1227,7 +1240,9 @@ SERVICE("audout:u", audout_u) {
         OUT(uint32_t, 8) = 2;  // PCM16
         OUT(uint32_t, 12) = 1; // stopped
         resp_size(resp, 16);
-        ipc_return_object(resp, service_new("IAudioOut", audio_out, a));
+        Service *svc = service_new("IAudioOut", audio_out, a);
+        svc->on_close = audout_close;
+        ipc_return_object(resp, svc);
         LOG("[audout] opened %u Hz, %u ch\n", a->rate, a->channels);
         break;
     }
