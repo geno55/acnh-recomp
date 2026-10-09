@@ -10,6 +10,9 @@
 
 // Which of the known textures `t` is (by its contents: the user's own game files are read once to know them), or -1.
 int texpatch_identify(const NvnTexture *t);
+// Known texture `id` is the empty bottle's item icon (1) or its 3D model's colour map (2), else 0 (the gold Escape
+// Bottle: runtime/hle/escape.c).
+int texpatch_bottle_kind(int id);
 // Changes whenever the wanted look of the known textures changes (prompt style, controller, Hero icon setting):
 // backends re-upload identified textures when it differs from the value they uploaded with.
 uint32_t texpatch_generation(void);
