@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "vk.h"
+#include "../astc.h"
 #include "../renderer.h"
 
 // ================================================================== formats
@@ -272,11 +273,20 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     if (samples > 1) levels = 1;
     VkFormat vf = mf.vf;
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    b->astc_bw = b->astc_bh = 0;
     if (!format_supports(vf, need)) {
-        static int nlog;
-        if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead%s\n", vf, t->format,
-                             vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK ? " (ASTC decode TODO)" : "");
-        vf = VK_FORMAT_R8G8B8A8_UNORM;
+        bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+        const FormatInfo *fi = t->layout.fmt;
+        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
+            b->astc_bw = fi->bw;
+            b->astc_bh = fi->bh;
+            b->astc_srgb = t->format >= 0x87;
+            vf = b->astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+        } else {
+            static int nlog;
+            if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead\n", vf, t->format);
+            vf = VK_FORMAT_R8G8B8A8_UNORM;
+        }
     }
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -422,7 +432,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (b->uploaded) b->dynamic = true;
     b->data_hash = h;
     b->uploaded = true;
-    if (b->format != mf.vf) return;  // unsupported format (ASTC): nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
@@ -432,6 +442,19 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
+            if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
+                const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
+                uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * 16);
+                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
+                else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
+                VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
+                astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
+                free(blocks);
+                VkBufferImageCopy rg = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
+                                        .imageExtent = {l.w, l.h, 1}};
+                vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+                continue;
+            }
             uint32_t row = l.wb * fi->bpb;
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = mf.expand_rgb && fi->bpb == 3;
