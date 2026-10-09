@@ -333,6 +333,12 @@ static TexBackend *tex_backend(NvnTexture *t) {
     return b;
 }
 
+// runtime/nvn/texpatch.c id of a texture already in use (-1: none / not identified yet)
+int renderer_texpatch_of(NvnTexture *t) {
+    const TexBackend *b = (const TexBackend *)t->backend;
+    return b && b->tp > 0 ? b->tp - 1 : -1;
+}
+
 static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     MtlFormat mf = mtl_format(t->format);
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
