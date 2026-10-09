@@ -11,7 +11,7 @@ else
     until mkdir build/.shot.lock 2>/dev/null; do sleep 1; done
     LOCKED=1
 fi
-. "$(dirname "$0")/game_slot.sh"  # (at most 6 test copies at once, machine-wide)
+. "$(dirname "$0")/game_slot.sh"  # (waits for 10 GB free before starting a copy)
 trap 'rm -rf "$GAME_SLOT"; [ -n "$LOCKED" ] && rmdir build/.shot.lock 2>/dev/null' EXIT
 LARECOMP_NO_AUDIO=${LARECOMP_NO_AUDIO:-1} LARECOMP_SHOT_PATH=$PNG LARECOMP_WINDOW_SHOT=$F LARECOMP_EXIT_AFTER_SHOT=1 ./build/larecomp extracted > "$LOGF" 2>&1 &
 P=$!

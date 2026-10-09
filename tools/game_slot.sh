@@ -1,15 +1,22 @@
-# Sourced by the test scripts before they start ./build/larecomp: machine-wide cap on test copies of the game (each
-# takes ~2 GB; too many at once ran the Mac out of memory). One slot directory per running copy, shared by every
-# checkout; a slot whose holder died is taken over. LARECOMP_TEST_SLOTS (default 6), LARECOMP_SLOT_DIR.
-GAME_SLOTS=${LARECOMP_TEST_SLOTS:-6}
+# Sourced by the test scripts before they start ./build/larecomp: a new test copy of the game starts only while the
+# Mac has at least 10 GB free (each copy takes ~2 GB; too many at once ran it out of memory). Launches are taken one
+# at a time and the next waits ~20 s, so the copy just started has grown before memory is measured again.
+# LARECOMP_MIN_FREE_GB (default 10), LARECOMP_SLOT_DIR.
+GAME_MIN_FREE_GB=${LARECOMP_MIN_FREE_GB:-10}
 GAME_SLOT_DIR=${LARECOMP_SLOT_DIR:-$HOME/.cache/larecomp_test_slots}
 mkdir -p "$GAME_SLOT_DIR"
-GAME_SLOT=
-until [ -n "$GAME_SLOT" ]; do
-    for i in $(seq 1 "$GAME_SLOTS"); do
-        d="$GAME_SLOT_DIR/slot$i"
-        if [ -d "$d" ] && ! kill -0 "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; then rm -rf "$d"; fi
-        if mkdir "$d" 2>/dev/null; then echo $$ > "$d/pid"; GAME_SLOT=$d; break; fi
-    done
-    [ -n "$GAME_SLOT" ] || sleep 2
+game_free_gb() {  # free + inactive + speculative + purgeable pages (what macOS can hand out without swapping)
+    vm_stat | awk '/page size of/ {ps = $8} /Pages (free|inactive|speculative|purgeable):/ {gsub("\\.", "", $NF); n += $NF}
+                   END {printf "%d", n * ps / 1073741824}'
+}
+L="$GAME_SLOT_DIR/launch"
+until mkdir "$L" 2>/dev/null; do
+    if ! kill -0 "$(cat "$L/pid" 2>/dev/null)" 2>/dev/null && [ -n "$(find "$L" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+        rm -rf "$L"  # (stale: holder gone for 2+ minutes)
+    fi
+    sleep 2
 done
+echo $$ > "$L/pid"
+until [ "$(game_free_gb)" -ge "$GAME_MIN_FREE_GB" ]; do sleep 5; done
+( sleep 20; rm -rf "$L" ) >/dev/null 2>&1 &
+GAME_SLOT=  # (nothing to release at exit)
