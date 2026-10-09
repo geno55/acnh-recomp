@@ -1552,13 +1552,14 @@ static void draw(CmdRec *r, bool indexed) {
     vkCmdSetDepthTestEnable(cb, dt);
     vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
-    // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees): on the Switch (and on
-    // Metal) both land on identical depths; here some meshes differ in the last bits and EQUAL leaves black holes.
-    // LESS_OR_EQUAL with a tiny bias towards the camera accepts the pre-pass's own surface within rounding (nothing
-    // can be nearer than what the pre-pass kept). LARECOMP_VK_EXACT_EQUAL=1: strict EQUAL (A/B).
-    static int exact = -1;
-    if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_EQUAL") != NULL;
-    bool equal_tol = dop == VK_COMPARE_OP_EQUAL && !exact;
+    // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
+    // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
+    // it in fp16, differently per shader: black slashes in foliage). LARECOMP_VK_EQUAL_TOL=1 brings back the old
+    // workaround: LESS_OR_EQUAL with a few ulps of bias towards the camera, which also let walls paint over the
+    // plants stuck flat on them (beach) - so it is off.
+    static int tol = -1;
+    if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
+    bool equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
     if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
     vkCmdSetDepthCompareOp(cb, dop);
     bool sten = st.ds[3] && pass_stencil;

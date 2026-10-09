@@ -1039,7 +1039,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x5cb0000000000000ull, 0xfff8000000000000ull) || OPM(0x4cb0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x38b0000000000000ull, 0xfef8000000000000ull)) {  // F2I (src fmt bits 10-11: 1 F16; dst size bits 8-9)
         char srcv[512];
-        if (bits(w, 10, 2) == 1 && c->glsl) sprintf(srcv, "unpackHalf2x16(%s)[%d]", B(false), (int)bits(w, 41, 1));
+        if (bits(w, 10, 2) == 1 && c->glsl) sprintf(srcv, "h2f((%s >> %du) & 0xFFFFu)", B(false), 16 * (int)bits(w, 41, 1));
         else if (bits(w, 10, 2) == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
         else strcpy(srcv, F(B(true)));
         const char *x = NA(srcv, bits(w, 45, 1), bits(w, 49, 1));
@@ -1073,7 +1073,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                OPM(0x38a8000000000000ull, 0xfef8000000000000ull)) {  // F2F (formats: 1 F16, 2 F32; bit 41 = high half)
         int dfmt = (int)bits(w, 8, 2), sfmt = (int)bits(w, 10, 2);
         char srcv[512];
-        if (sfmt == 1 && c->glsl) sprintf(srcv, "unpackHalf2x16(%s)[%d]", B(false), (int)bits(w, 41, 1));
+        if (sfmt == 1 && c->glsl) sprintf(srcv, "h2f((%s >> %du) & 0xFFFFu)", B(false), 16 * (int)bits(w, 41, 1));
         else if (sfmt == 1) sprintf(srcv, "float(as_type<half2>(%s)[%d])", B(false), (int)bits(w, 41, 1));
         else strcpy(srcv, F(B(true)));
         const char *x = NA(srcv, bits(w, 45, 1), bits(w, 49, 1));
@@ -1520,14 +1520,22 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         }
     } else if (OPM(0x38e8000000000000ull, 0xfef8000000000000ull) || OPM(0x5ce8000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x4ce8000000000000ull, 0xfff8000000000000ull)) {  // P2R
-        if (bits(w, 40, 1)) { fail(c, "p2r cc"); }
         int shift = (int)bits(w, 41, 2) * 8;
         const char *mask = B(false);
+        if (bits(w, 40, 1)) {  // .CC: the flags Z, S, C, O as bits 0-3 (overflow isn't tracked: 0)
+            c->uses_cc = true;
+            sp(&c->body, "    { uint pr = (ccz ? 1u : 0u) | (ccs ? 2u : 0u) | ((cc & 1u) << 2);\n");
+            sp(&c->body, "      uint m = (%s & 0xFu) << %du;\n", mask, shift);
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
+            sp(&c->body, "    }\n");
+            goto p2r_done;
+        }
         sp(&c->body, "    { uint pr = 0u;\n");
         for (int i = 0; i < 7; i++) { c->pred_used[i] = 1; sp(&c->body, "      pr |= (p%d ? 1u : 0u) << %du;\n", i, i); }
         sp(&c->body, "      uint m = (%s & 0x7Fu) << %du;\n", mask, shift);
         if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = (%s & ~m) | ((pr << %du) & m);\n", d, R(a), shift); }
         sp(&c->body, "    }\n");
+    p2r_done:;
     } else if (OPM(0xe250000000000000ull, 0xfff0000000000020ull)) {  // BRX reg + imm (relative)
         // computed targets can name a scheduling word; execution continues at the next slot (as for BRA)
         sp(&c->body, "    { uint t = %uu + %s + 0x%08xu; if (((t >> 3) & 3u) == 0u) t += 8u; pc = t; continue; }\n", pc + 8, R(a),
@@ -1627,7 +1635,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             if (tn == 5 && !strncmp(p + 1, "float", 5)) sp(o, "as_f");
             else if (tn == 4 && !strncmp(p + 1, "uint", 4)) sp(o, "as_u");
             else if (tn == 3 && !strncmp(p + 1, "int", 3)) sp(o, "as_i");
-            else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpackHalf2x16");
+            else if (tn == 5 && !strncmp(p + 1, "half2", 5)) sp(o, "unpack_h2");
             else { fail(c, "glsl: as_type<%.*s>", tn, p + 1); return; }
             p = gt + 1;
             continue;
@@ -1694,7 +1702,15 @@ static const char glsl_prelude[] =
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
     "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n"
-    "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpackHalf2x16(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
+    // half -> float by bits, not unpackHalf2x16: NVIDIA's driver recognises unpacked halves and runs some of the
+    // fp32 math after them in native fp16, differently per shader, so a depth pre-pass and its colour pass (EQUAL
+    // test) placed wind-animated foliage apart: black slashes / flicker (tools: notes/PLAN.md 2026-10-08)
+    "float h2f(uint h) { uint s = (h & 0x8000u) << 16, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;"
+    " if (e == 0u) { float d = float(m) * 5.9604644775390625e-8; return s != 0u ? -d : d; }"
+    " if (e == 31u) return uintBitsToFloat(s | 0x7F800000u | (m << 13));"
+    " return uintBitsToFloat(s | ((e + 112u) << 23) | (m << 13)); }\n"
+    "vec2 unpack_h2(uint v) { return vec2(h2f(v & 0xFFFFu), h2f(v >> 16)); }\n"
+    "vec2 hx(uint v, uint swz) { if (swz == 1u) return vec2(uintBitsToFloat(v)); vec2 h = unpack_h2(v); return swz == 2u ? h.xx : (swz == 3u ? h.yy : h); }\n"
     "uint hpack(vec2 r, uint merge, uint old) { if (merge == 1u) return floatBitsToUint(r.x); uint lo = packHalf2x16(vec2(r.x, 0.0f)), hi = packHalf2x16(vec2(r.y, 0.0f)); if (merge == 2u) return (old & 0xFFFF0000u) | lo; if (merge == 3u) return (old & 0xFFFFu) | (hi << 16); return lo | (hi << 16); }\n"
     "uint prmt(uint a, uint b, uint sel) { uint r = 0u; for (uint i = 0u; i < 4u; i++) { uint s = (sel >> (i * 4u)) & 7u; uint bt = s < 4u ? (a >> (s * 8u)) & 0xFFu : (b >> ((s - 4u) * 8u)) & 0xFFu; r |= bt << (i * 8u); } return r; }\n";
 

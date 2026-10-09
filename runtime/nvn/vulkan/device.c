@@ -524,7 +524,8 @@ void backend_present(NvnTexture *t) {
         snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
+        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
