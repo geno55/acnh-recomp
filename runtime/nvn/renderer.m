@@ -1942,10 +1942,9 @@ static void draw(CmdRec *r, bool indexed) {
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
         [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
-    if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && !(st.ubuf[0][2].addr & 3)) {  // revealed bush items
-        extern bool pot_item_reveal(float *m);
-        extern bool pot_glow_active(void);
-        if (pot_glow_active()) pot_item_reveal((float *)(uintptr_t)st.ubuf[0][2].addr);
+    if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && !(st.ubuf[0][2].addr & 3)) {  // cut bushes' items
+        extern void pot_item_draw(float *m);                                                 // (runtime/hle/pot_glow.c)
+        pot_item_draw((float *)(uintptr_t)st.ubuf[0][2].addr);
     }
     if (ENV("LARECOMP_POT_PROBE") && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48) {  // (debug: bush / pot draws)
         extern void pot_probe(const float *m, bool tintable, uint64_t mesh, uint32_t inst);

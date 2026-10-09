@@ -10,13 +10,15 @@
 #include <string.h>
 
 #include "../hle.h"
+#include "../platform.h"
 #include "../rando.h"
 
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0
 #define EVENT_FLAGS (MAIN_BASE + 0x1CBB220 + 0x5DC0)  // live save: GlobalFlags bitfield (2048 bits)
 
-// bushes.tsv rows may add: cut flag, hidden item scale, full item scale (see pot_item_reveal)
-typedef struct { char level[40]; float x, y, z; int flag, cut; float small, full; } Pot;
+// bushes.tsv rows may add: cut flag, hidden item scale, full item scale, room file, item record offset in it
+// (see pot_reveal_tick)
+typedef struct { char level[40]; float x, y, z; int flag, cut; float small, full; char room[16]; int rec; } Pot;
 static Pot *g_pots;
 static int g_npots = -1;
 // gold = luminance remapped onto a gold ramp (keeps the pot's shading), plus a slow shimmer
@@ -41,9 +43,9 @@ static void load(void) {
         int n0 = g_npots;
         char line[256];
         while (fgets(line, sizeof line, f)) {
-            Pot p = {.cut = -1};
-            if (sscanf(line, "%39s %f %f %f %d %d %f %f", p.level, &p.x, &p.y, &p.z, &p.flag, &p.cut, &p.small,
-                       &p.full) < 5) continue;
+            Pot p = {.cut = -1, .rec = -1};
+            if (sscanf(line, "%39s %f %f %f %d %d %f %f %15s %d", p.level, &p.x, &p.y, &p.z, &p.flag, &p.cut,
+                       &p.small, &p.full, p.room, &p.rec) < 5) continue;
             if (g_npots == cap) g_pots = realloc(g_pots, sizeof(Pot) * (cap = cap ? cap * 2 : 256));
             g_pots[g_npots++] = p;
         }
@@ -159,28 +161,89 @@ bool pot_tint(const float *m, float tint[8], uint64_t mesh) {
     return false;
 }
 
-// Bushsanity: the item inside a bush is drawn small so the leaves hide it, which left it near invisible once the
-// bush was cut (players walked past it; the bush grew back gold over it). The bush's cut flag (set by the game when
-// it's cut; such a bush stays cut) -> draw the item full size: scale its model matrix (m: vertex UBO 2, 3x4 row-major,
-// guest memory) in place. Only a matrix at the hidden scale is touched, so a second pass over the same UBO (shadows)
-// leaves it alone. (Visual only: the pickup works as before - Link walks over the spot.)
-bool pot_item_reveal(float *m) {
-    if (!pot_glow_active()) return false;
+// Bushsanity: the item inside a bush is small so the leaves hide it, which left it near invisible once the bush was
+// cut (players walked past it, and the bush grew back gold over it). Now a bush with an item stays cut (its switch 0 =
+// the cut flag, tools/rando/bushes.py), and once that flag is set its item is shown full size: the item's actor record
+// in the loaded room file (pos xyz, rotation xyz in degrees, scale xyz) gets the full scale. The actor takes its scale
+// from there (also when it's already out), and so does every later spawn in this level load.
+// Room files (.leb) sit whole at a page-aligned address, so the record is at a page starting with the .leb header +
+// the record's offset in the file (bushes.tsv), checked (position, hidden scale) before it's written: a pass over the
+// page starts of guest data, done only when the set of such items around Link changes (a bush cut, another screen).
+uint64_t doorjump_player(uint64_t frame);                         // runtime/hle/doorjump.c
+int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);  // runtime/kernel.c
+#define LEB_MAGIC 0x0017013du  // first 4 bytes of every .leb (the next 4 change once the game has loaded it)
+static uint64_t g_reveal_sig = ~0ull;
+static int g_reveal_cell = -1;
+static uint64_t *g_rec;  // per item spot: where its record was patched (re-checked before it's trusted)
+RT_ON_RESET(pot_reveal_reset) {
+    free(g_rec);
+    g_rec = NULL;
+    g_reveal_sig = ~0ull;
+    g_reveal_cell = -1;
+}
+
+static bool rec_is(const Pot *p, uint64_t a, float s) {
+    const float *t = (const float *)(uintptr_t)a;
+    return a && t[0] == p->x && t[1] == p->y && t[2] == p->z && t[6] == s && t[7] == s && t[8] == s;
+}
+
+void pot_reveal_tick(uint64_t frame) {
+    if (!pot_glow_active()) return;
+    uint64_t pc = doorjump_player(frame);
+    if (!pc) return;
+    if (!g_rec) g_rec = calloc((size_t)g_npots, sizeof *g_rec);
+    const float *lp = (const float *)(uintptr_t)(pc + 0x80);
+    float lx = lp[0], lz = lp[2];
+    int cell = (int)floorf(lx / 15.0f) * 64 + (int)floorf(lz / 12.0f), want[64], nw = 0;
+    uint64_t sig = 1469598103934665603ull;
+    for (int k = 0; k < g_nlv && nw < 64; k++) {  // cut, unchecked items within a screen of Link
+        const Pot *p = &g_pots[g_lv_idx[k]];
+        if (p->cut < 0 || p->rec < 0 || fabsf(p->x - lx) > 16 || fabsf(p->z - lz) > 13) continue;
+        if (!flags_ext_get(p->cut) || !unchecked(p) || rec_is(p, g_rec[g_lv_idx[k]], p->full)) continue;
+        want[nw++] = g_lv_idx[k];
+        sig = (sig ^ (uint64_t)g_lv_idx[k]) * 1099511628211ull;
+    }
+    if (cell != g_reveal_cell) g_reveal_sig = ~0ull;  // (another screen: maybe newly loaded room files)
+    g_reveal_cell = cell;
+    if (!nw || sig == g_reveal_sig) return;
+    g_reveal_sig = sig;
+    uint64_t ra[64], rs[64], t0 = plat_now_ns();
+    int nr = kernel_data_regions(ra, rs, 64), done = 0;
+    for (int r = 0; r < nr; r++)
+        for (uint64_t a = (ra[r] + 0xFFF) & ~0xFFFull; a + 0x1000 <= ra[r] + rs[r]; a += 0x1000) {
+            if (*(const uint32_t *)(uintptr_t)a != LEB_MAGIC) continue;
+            for (int j = 0; j < nw; j++) {
+                const Pot *p = &g_pots[want[j]];
+                uint64_t rec = a + (uint64_t)p->rec;
+                if (rec + 36 > ra[r] + rs[r] || !rec_is(p, rec, p->small)) continue;
+                float *t = (float *)(uintptr_t)rec;
+                t[6] = t[7] = t[8] = p->full;
+                g_rec[want[j]] = rec;
+                done++;
+            }
+        }
+    LOG("[pots] %d cut bush item(s) around Link: %d shown full size (%.1f ms)\n", nw, done, (plat_now_ns() - t0) / 1e6);
+}
+
+// The item that was out already when its bush was cut keeps the scale it spawned with: until the room is loaded again
+// its draws are scaled up here instead (m: the draw's model matrix, vertex UBO 2, 3x4 row-major, in guest memory -
+// scaled in place, so only a matrix still at the hidden scale is touched: a second pass over the same UBO, e.g. the
+// shadow map's, leaves it alone). Rigid item models only; the rest show full size from the next room load on.
+void pot_item_draw(float *m) {
+    if (!pot_glow_active()) return;
     float s2 = m[0] * m[0] + m[4] * m[4] + m[8] * m[8];
-    if (s2 > 0.9f) return false;  // (hidden items only: < ~0.95 scale)
+    if (s2 > 0.81f || s2 < 1e-4f) return;  // (hidden items are drawn below 0.9)
     float s = sqrtf(s2), x = m[3], y = m[7], z = m[11];
     int lo = 0, hi = g_nlv;
     while (lo < hi) { int mid = (lo + hi) / 2; if (g_pots[g_lv_idx[mid]].x < x - 0.02f) lo = mid + 1; else hi = mid; }
     for (int k = lo; k < g_nlv && g_pots[g_lv_idx[k]].x <= x + 0.02f; k++) {
         const Pot *p = &g_pots[g_lv_idx[k]];
-        if (p->cut < 0 || fabsf(p->z - z) > 0.02f || fabsf(p->y - y) > 0.5f || fabsf(s - p->small) > 0.01f) continue;
-        if (!unchecked(p) || !flags_ext_get(p->cut)) return false;
-        float f = p->full / p->small;
-        for (int i = 0; i < 12; i++)
-            if ((i & 3) != 3) m[i] *= f;
-        return true;
+        if (p->cut < 0 || fabsf(p->z - z) > 0.02f || fabsf(p->y - y) > 1.0f || fabsf(s - p->small) > 0.01f) continue;
+        if (!flags_ext_get(p->cut) || !unchecked(p)) return;
+        for (int i = 0; i < 11; i++)
+            if ((i & 3) != 3) m[i] *= p->full / p->small;
+        return;
     }
-    return false;
 }
 
 // Instanced draws (bushes: one draw per batch, each instance's 4x4 row-major model matrix in vertex storage buffer

@@ -170,9 +170,10 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
           flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE, cut_flag=False):
     """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess).
     Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys.
-    cut_flag (bushes): a second flag per location, <prefix>Cut<n>: the bush's switch 0 (set when it's cut; a bush
-    with it set stays cut, as the Pothole Field's do) and the item's switch 0 (it appears once that's set) - so the
-    item only appears out in the open, at full size, and stays there until picked up; the bush drops nothing else."""
+    cut_flag (bushes): a second flag per location, <prefix>Cut<n>, as the bush's switch 0: the game sets it when the
+    bush is cut, and a bush with it set stays cut (as the Pothole Field's hole bushes do) - its item lies in the open
+    until picked up (shown full size by the runtime: write_tsv) instead of a bush growing back over it on every visit.
+    The bush drops nothing else (a random rupee beside the small item was what players picked up)."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -241,7 +242,6 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
                              b'true' if item_key == 'Seashell' else b'false', b'', b'', b'']
             it.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
             if cut is not None:
-                it.switches[0] = (1, cut)
                 pot.switches[0] = (1, cut)
                 pot.parameters[1] = b'None'  # (ItemDrop key: no random drop beside the check)
             s = data.MODEL_SIZES.get(model_name, 1.0) * hide_scale
@@ -260,22 +260,33 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
 def write_tsv(seed_dir, leb, flag_prefix='LARPot', name='pots.tsv', hide_scale=None):
     """rando/<seed>/pots.tsv for the runtime's golden unchecked pots: one line per item pot
     (level, x, y, z, GlobalFlags index), taken from the item actors this module placed in the seed's rooms.
-    Items with a cut flag (bushes, apply(cut_flag=True)) add: cut flag index, the item's hidden scale and its full
-    size - once the bush is cut the runtime draws the item full size (runtime/hle/pot_glow.c pot_item_reveal)."""
+    Items with a cut flag (bushes, apply(cut_flag=True)) add: cut flag index, the item's hidden scale, its full size,
+    the room file and the item's actor record offset in it - once the bush is cut the runtime shows the item full
+    size (runtime/hle/pot_glow.c pot_reveal_tick)."""
+    import struct
     rows = []
     for f in sorted(glob.glob(os.path.join(seed_dir, 'romfs', 'region_common', 'level', '*', '*.leb'))):
         level = os.path.basename(os.path.dirname(f))
         with open(f, 'rb') as fh:
-            room = leb.Room(fh.read())
+            raw = fh.read()
+            room = leb.Room(raw)
+        by_pos = {(a.posX, a.posY, a.posZ): a for a in room.actors  # (the bush an item is in, with its cut flag)
+                  if a.type != 0x194 and a.switches[0][0] == 1}
         for a in room.actors:
             if a.type != 0x194 or not isinstance(a.parameters[3], bytes):
                 continue
             m = re.match(flag_prefix.encode() + rb'(\d+)$', a.parameters[3])
             if m:
                 cut = ''
-                if hide_scale and a.switches[0][0] == 1:
-                    cut = f'\t{a.switches[0][1]}\t{a.scaleX:g}\t{a.scaleX / hide_scale:g}'
-                rows.append(f'{level}\t{a.posX:g}\t{a.posY:g}\t{a.posZ:g}\t{int(m.group(1))}{cut}\n')
+                bush = by_pos.get((a.posX, a.posY, a.posZ))
+                if hide_scale and bush and bush.switches[0][0] == 1:  # + the item record's offset in the room file
+                    rec = raw.find(struct.pack('<3f', a.posX, a.posY, a.posZ))
+                    while rec >= 0 and struct.unpack_from('<f', raw, rec + 24)[0] != a.scaleX:
+                        rec = raw.find(struct.pack('<3f', a.posX, a.posY, a.posZ), rec + 1)
+                    cut = (f'\t{bush.switches[0][1]}\t{a.scaleX!r}\t{a.scaleX / hide_scale!r}\t'
+                           f'{os.path.basename(f)[:-4]}\t{rec}')
+                xyz = f'{a.posX:g}\t{a.posY:g}\t{a.posZ:g}' if not cut else f'{a.posX!r}\t{a.posY!r}\t{a.posZ!r}'
+                rows.append(f'{level}\t{xyz}\t{int(m.group(1))}{cut}\n')  # (cut rows: exact floats, matched exactly)
     with open(os.path.join(seed_dir, name), 'w') as fh:
         fh.writelines(rows)
     return len(rows)
