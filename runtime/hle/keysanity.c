@@ -34,6 +34,8 @@ static int refill(Cpu *c, int item, int count) {
 // x0 item, x1 count, x2 index: returns 1 when handled (AddItem then returns at once)
 int rt_add_item(Cpu *c) {
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
+    extern int rt_shop_add_item(Cpu *);  // shopsanity.c: a stolen shopsanity good
+    if (rt_shop_add_item(c)) return 1;
     if (index == REFILL_INDEX && (item == IT_BOMB || item == IT_POWDER || item == IT_ARROW)) return refill(c, item, count);
     if (item < IT_COMPASS || item > IT_NIGHTMARE_KEY || index < 0 || index > 9 || index == 8) return 0;
     int rec = index == 9 ? 18 : 2 * index;

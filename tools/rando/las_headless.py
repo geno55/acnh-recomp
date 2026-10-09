@@ -96,6 +96,7 @@ def default_settings(seed):
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
+        'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos (tools/rando/dungeon_gen.py)
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
@@ -223,6 +224,17 @@ def main():
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
 
+    import shopsanity
+    import trendsanity
+    for f in ('shopsanity.tsv', 'check_flags.tsv'):  # (appended to by both modules)
+        if os.path.exists(os.path.join(out_dir, f)):
+            os.remove(os.path.join(out_dir, f))
+    sanity_inside = {}  # their locations inside shuffled interiors: {door: [(location, condition)]}
+    if shopsanity.enabled(settings):
+        sanity_inside.update(shopsanity.add_to_logic(logic_defs, item_defs, settings))
+    if trendsanity.enabled(settings):
+        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs))
+
     # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
     tier = int(settings.get('entrance-tier', 0))
     ent = None
@@ -234,7 +246,7 @@ def main():
         ent_doors = el.pool(el.load())
         ent_entry, ent_exit = el.shuffle(ent_doors, bool(settings.get('entrance-decoupled', False)),
                                          _random.Random(f"{settings['seed']}-entrances"))
-        extra = {}
+        extra = {k: list(v) for k, v in sanity_inside.items()}
         lv_door = {d['dest_level']: d['id'] for d in ent_doors}
         for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
             if p['level'] in lv_door:
@@ -382,6 +394,18 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
+    if shopsanity.enabled(settings) or trendsanity.enabled(settings):  # (before pots: they take the flags after ours)
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        import msbt
+        stage('Stocking the shop', 0.925)
+        if shopsanity.enabled(settings):
+            lines = shopsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, msbt)
+            print('shopsanity:\n' + '\n'.join(lines), flush=True)
+        if trendsanity.enabled(settings):
+            lines = trendsanity.apply(mods, out_dir, romfs, settings, event_tools, oead_tools, item_get, las_data,
+                                      shopsanity.alloc_flags)
+            print('trendsanity:\n' + '\n'.join(lines), flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data

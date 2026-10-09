@@ -48,13 +48,16 @@ class ItemShuffler(QtCore.QThread):
         self.vanilla_locations = {k for k, v in self.logic_defs.items()
                             if v['type'] == 'item'
                             and v['subtype'] not in ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')}
-        self.vanilla_locations.add('trendy-prize-1') # yoshi doll stays until trendy is properly shuffled
-        self.vanilla_locations.add('trendy-prize-2')
-        self.vanilla_locations.add('trendy-prize-3')
-        self.vanilla_locations.add('trendy-prize-4')
-        self.vanilla_locations.add('trendy-prize-5')
-        self.vanilla_locations.add('trendy-prize-6')
-        self.vanilla_locations.add('trendy-prize-final')
+        if not self.settings.get('trendsanity'):  # LAS Recomp: tools/rando/trendsanity.py shuffles them
+            self.vanilla_locations.add('trendy-prize-1') # yoshi doll stays until trendy is properly shuffled
+            self.vanilla_locations.add('trendy-prize-2')
+            self.vanilla_locations.add('trendy-prize-3')
+            self.vanilla_locations.add('trendy-prize-4')
+            self.vanilla_locations.add('trendy-prize-5')
+            self.vanilla_locations.add('trendy-prize-6')
+            self.vanilla_locations.add('trendy-prize-final')
+        if self.settings.get('shopsanity', 'off') != 'off':  # LAS Recomp: tools/rando/shopsanity.py
+            self.vanilla_locations -= {k for k, v in self.logic_defs.items() if v.get('subtype') == 'shop'}
 
         # if blupsanity is not enabled, add the checks to the vanilla locations
         if not self.settings['blupsanity']:
