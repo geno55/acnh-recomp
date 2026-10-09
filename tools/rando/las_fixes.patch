@@ -9,7 +9,7 @@ index e6b9a85..83602a3 100644
 -        # handle branch offsets
 -        if line.startswith('b'):
 +        # handle branch offsets (b/bl/b.cond take the target as their only operand; cbz/cbnz/tbz/tbnz as the last)
-+        # [LARecomp fix: cbz/cbnz/tbz/tbnz targets were left absolute, which keystone truncates]
++        # [LAS Recomp fix: cbz/cbnz/tbz/tbnz targets were left absolute, which keystone truncates]
 +        mnemonic = line.split(' ')[0]
 +        if mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') and line.split(', ')[-1].startswith('0x'):
 +            operands = line[len(mnemonic):].strip().split(', ')

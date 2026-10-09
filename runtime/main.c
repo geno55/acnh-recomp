@@ -1,4 +1,4 @@
-// LARecomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
+// LAS Recomp entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <libgen.h>
 #include <stdbool.h>
 #include <stdlib.h>

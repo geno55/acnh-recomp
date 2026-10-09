@@ -1,6 +1,6 @@
 // Start screen, shown before the game boots (user 2026-10-08, styled after Dusklight's launcher): PLAY (with
 // ‹ Vanilla / seed › picker), SETTINGS, QUIT, game-files status at the lower left. Nothing of the game ships with
-// LARecomp: on first launch the user picks their own Switch dump (XCI / NSP, v1.0.0) and prod.keys, we extract
+// LAS Recomp: on first launch the user picks their own Switch dump (XCI / NSP, v1.0.0) and prod.keys, we extract
 // exefs + romfs with hactool (tools/hactool, ISC) and check the main module's build id; PLAY stays disabled until
 // that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
 //
@@ -448,11 +448,7 @@ extern "C" void launcher_run(const char *root) {
             ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
             float x0 = 90 * s;
-            ImGui::SetCursorPos(ImVec2(x0, 150 * s));
-            ImGui::PushFont(g_font_small);
-            ImGui::TextColored(ImVec4(0.92f, 0.86f, 0.70f, 1), "LARECOMP PRESENTS");
-            ImGui::PopFont();
-            ImGui::SetCursorPosX(x0);
+            ImGui::SetCursorPos(ImVec2(x0, 170 * s));
             ImGui::PushFont(g_font_title);
             ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Link's Awakening");
             ImGui::PopFont();
@@ -595,7 +591,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("Set up the game files to play.");
             }
-            const char *ver = "LARecomp " LARECOMP_VERSION;
+            const char *ver = "LAS Recomp " LARECOMP_VERSION;
             ImGui::SetCursorPos(ImVec2(ds.x - ImGui::CalcTextSize(ver).x - 60 * s, ds.y - 110 * s));
             ImGui::TextDisabled("%s", ver);
             ImGui::PopFont();

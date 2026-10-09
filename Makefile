@@ -1,4 +1,4 @@
-# LARecomp build
+# LAS Recomp build
 CC       := clang
 SDL      := /opt/homebrew/opt/sdl3
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -Iruntime
@@ -36,8 +36,11 @@ build/rt/%.o: runtime/%.m $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -fobjc-arc -c $< -o $@
 
+# linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
+# place gets running copies killed by macOS (code signature of the changed pages)
 build/larecomp: $(GEN_OBJ) $(RT_OBJ) $(OBJC_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
-	clang++ -o $@ $^ $(LDFLAGS)
+	clang++ -o $@.tmp $^ $(LDFLAGS)
+	mv -f $@.tmp $@
 
 build/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
 	@mkdir -p $(dir $@)

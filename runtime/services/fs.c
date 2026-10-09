@@ -20,7 +20,11 @@ const char *g_save_dir = "save";
 static int romfs_fd = -1;
 
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
-typedef struct { uint64_t start, size; char *path; int fd; } Overlay;
+typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
+// in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
+typedef struct { uint64_t off, size; uint8_t *data; } Patch;
+static Patch patches[8];
+static int npatches;
 static Overlay *ov;
 static int ov_n, ov_cap;
 static uint8_t *ov_meta;
@@ -51,6 +55,151 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
     }
     out[0] = 0;
     for (int i = n - 1; i >= 0; i--) { strlcat(out, parts[i], cap); strlcat(out, "/", cap); }
+}
+
+// ---- files a seed ADDS (names the game's RomFS doesn't have: generated dungeon cells...). The game parses the
+// RomFS tables itself, so they're extended: a copy of the file-meta table with the new entries appended (linked
+// into their directory's file list and the name hash buckets) is placed past the end of the image, the header,
+// directory table and hash table are patched to match. New files must go into existing directories.
+static uint32_t romfs_hash(uint32_t parent, const char *name, uint32_t len) {
+    uint32_t hash = parent ^ 123456789;
+    for (uint32_t i = 0; i < len; i++) { hash = (hash >> 5) | (hash << 27); hash ^= (uint8_t)name[i]; }
+    return hash;
+}
+
+static int path_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+typedef struct { char rel[1024]; char host[1200]; uint64_t size; } NewFile;
+
+static void walk_new(const char *root, const char *rel, char **known, int nknown, NewFile **out, int *n, int *cap) {
+    char dirp[1200];
+    snprintf(dirp, sizeof dirp, "%s/%s", root, rel);
+    DIR *d = opendir(dirp);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char r2[1024], h2[1200];
+        snprintf(r2, sizeof r2, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
+        snprintf(h2, sizeof h2, "%s/%s", root, r2);
+        struct stat sb;
+        if (stat(h2, &sb)) continue;
+        if (S_ISDIR(sb.st_mode)) { walk_new(root, r2, known, nknown, out, n, cap); continue; }
+        const char *key = r2;
+        if (bsearch(&key, known, nknown, sizeof *known, path_cmp)) continue;  // replaces an existing file
+        if (*n == *cap) { *cap = *cap ? *cap * 2 : 64; *out = realloc(*out, sizeof **out * *cap); }
+        strlcpy((*out)[*n].rel, r2, sizeof (*out)[*n].rel);
+        strlcpy((*out)[*n].host, h2, sizeof (*out)[*n].host);
+        (*out)[*n].size = (uint64_t)sb.st_size;
+        (*n)++;
+    }
+    closedir(d);
+}
+
+// directory entry offset for "a/b/c" (NULL-terminated walk from the root, offset 0), -1 if missing
+static int64_t dir_lookup(const uint8_t *dm, uint64_t dsz, const char *path) {
+    uint32_t cur = 0;
+    char buf[1024];
+    strlcpy(buf, path, sizeof buf);
+    for (char *tok = strtok(buf, "/"); tok; tok = strtok(NULL, "/")) {
+        uint32_t child;
+        memcpy(&child, dm + cur + 8, 4);
+        while (child != 0xFFFFFFFFu && child + 0x18 <= dsz) {
+            uint32_t nl;
+            memcpy(&nl, dm + child + 0x14, 4);
+            if (nl == strlen(tok) && !memcmp(dm + child + 0x18, tok, nl)) break;
+            memcpy(&child, dm + child + 4, 4);
+        }
+        if (child == 0xFFFFFFFFu || child + 0x18 > dsz) return -1;
+        cur = child;
+    }
+    return cur;
+}
+
+static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint64_t dsz, uint64_t fsz) {
+    const char *seed = rando_seed_dir();
+    if (!seed) return;
+    char root[1100];
+    snprintf(root, sizeof root, "%s/romfs", seed);
+    char **known = malloc(sizeof *known * rom_nfiles);
+    for (int i = 0; i < rom_nfiles; i++) known[i] = rom_files[i].path;
+    qsort(known, rom_nfiles, sizeof *known, path_cmp);
+    NewFile *nf = NULL;
+    int n = 0, cap = 0;
+    walk_new(root, "", known, rom_nfiles, &nf, &n, &cap);
+    free(known);
+    if (!n) return;
+    rom_files = realloc(rom_files, sizeof(RomFile) * (rom_nfiles + n));
+    uint64_t hoff = h[5], hsz = h[6];
+    uint8_t *dcopy = malloc(dsz), *hcopy = malloc(hsz), *head = malloc(0x50);
+    memcpy(dcopy, dmeta, dsz);
+    if (pread(fd, hcopy, hsz, (off_t)hoff) != (ssize_t)hsz || pread(fd, head, 0x50, 0) != 0x50) return;
+    // the file-meta table to extend: the override-patched copy if there is one
+    const uint8_t *base_meta = ov_meta;
+    uint8_t *tmp = NULL;
+    if (!base_meta) { tmp = malloc(fsz); pread(fd, tmp, fsz, (off_t)h[7]); base_meta = tmp; }
+    uint64_t extra = 0;
+    for (int i = 0; i < n; i++) {
+        const char *name = strrchr(nf[i].rel, '/');
+        name = name ? name + 1 : nf[i].rel;
+        extra += 0x20 + ((strlen(name) + 3) & ~3u);
+    }
+    uint64_t nsz = fsz + extra;
+    uint8_t *meta = calloc(1, nsz);
+    memcpy(meta, base_meta, fsz);
+    free(tmp);
+    if (!ov_end) {
+        struct stat rs;
+        fstat(fd, &rs);
+        ov_end = (rs.st_size + 0xF) & ~0xFull;
+    }
+    uint64_t meta_at = ov_end;  // the new table first, then the new files' data
+    uint64_t data_at = (meta_at + nsz + 0xF) & ~0xFull;
+    uint32_t nb = (uint32_t)(hsz / 4);
+    uint64_t o = fsz;
+    int added = 0;
+    for (int i = 0; i < n; i++) {
+        char dirp[1024];
+        strlcpy(dirp, nf[i].rel, sizeof dirp);
+        char *slash = strrchr(dirp, '/');
+        const char *name = slash ? slash + 1 : nf[i].rel;
+        if (slash) *slash = 0; else dirp[0] = 0;
+        int64_t dir = dir_lookup(dcopy, dsz, dirp);
+        if (dir < 0) { LOG("[fs] seed file %s: directory not in the game's RomFS, skipped\n", nf[i].rel); continue; }
+        uint32_t nl = (uint32_t)strlen(name), d32 = (uint32_t)dir, entry = (uint32_t)o, child;
+        memcpy(&child, dcopy + dir + 0xC, 4);  // dir's first file -> becomes our sibling
+        uint64_t rel = data_at - rom_data_off, size = nf[i].size;
+        uint32_t bucket = romfs_hash(d32, name, nl) % nb, prev;
+        memcpy(&prev, hcopy + 4 * bucket, 4);
+        memcpy(meta + o, &d32, 4);
+        memcpy(meta + o + 4, &child, 4);
+        memcpy(meta + o + 8, &rel, 8);
+        memcpy(meta + o + 0x10, &size, 8);
+        memcpy(meta + o + 0x18, &prev, 4);
+        memcpy(meta + o + 0x1C, &nl, 4);
+        memcpy(meta + o + 0x20, name, nl);
+        memcpy(dcopy + dir + 0xC, &entry, 4);
+        memcpy(hcopy + 4 * bucket, &entry, 4);
+        o += 0x20 + ((nl + 3) & ~3u);
+        if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
+        ov[ov_n++] = (Overlay){data_at, size, strdup(nf[i].host), -1, NULL};
+        rom_files[rom_nfiles++] = (RomFile){data_at, size, strdup(nf[i].rel), entry};
+        data_at = (data_at + size + 0xF) & ~0xFull;
+        added++;
+    }
+    // the new table goes before the new data (keep the overlay list sorted by start)
+    if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
+    memmove(ov + (ov_n - added) + 1, ov + (ov_n - added), sizeof *ov * added);
+    ov[ov_n - added] = (Overlay){meta_at, nsz, NULL, -1, meta};
+    ov_n++;
+    ov_end = data_at;
+    uint64_t fmeta_off = meta_at, fmeta_size = o;
+    memcpy(head + 7 * 8, &fmeta_off, 8);
+    memcpy(head + 8 * 8, &fmeta_size, 8);
+    patches[npatches++] = (Patch){0, 0x50, head};
+    patches[npatches++] = (Patch){h[3], dsz, dcopy};
+    patches[npatches++] = (Patch){hoff, hsz, hcopy};
+    LOG("[fs] randomizer: %d new romfs files\n", added);
 }
 
 static void rom_index(int fd) {
@@ -106,10 +255,13 @@ static void rom_index(int fd) {
         ov[ov_n].size = size;
         ov[ov_n].path = strdup(host);
         ov[ov_n].fd = -1;
+        ov[ov_n].mem = NULL;
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
+    if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
+    add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
     free(dmeta);
     free(fmeta);
@@ -128,8 +280,14 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if (i == ov_n) { memset(dst + done, 0, n); done += n; break; }
             uint64_t in = o - ov[i].start, avail = ((ov[i].size + 0xF) & ~0xFull) - in;
             if (n > avail) n = avail;
-            if (ov[i].fd < 0) ov[i].fd = open(ov[i].path, O_RDONLY);
-            ssize_t r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
+            ssize_t r;
+            if (ov[i].mem) {  // in-memory blob (the extended file table)
+                r = in < ov[i].size ? (ssize_t)(n < ov[i].size - in ? n : ov[i].size - in) : 0;
+                memcpy(dst + done, ov[i].mem + in, (size_t)r);
+            } else {
+                if (ov[i].fd < 0) ov[i].fd = open(ov[i].path, O_RDONLY);
+                r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
+            }
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
@@ -137,9 +295,12 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             ssize_t r = pread(fd, dst + done, n, (off_t)o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
-            // overlay the patched file-meta table
-            uint64_t a = o > ov_meta_off ? o : ov_meta_off, b = o + n < ov_meta_off + ov_meta_size ? o + n : ov_meta_off + ov_meta_size;
-            if (a < b) memcpy(dst + done + (a - o), ov_meta + (a - ov_meta_off), b - a);
+            // overlay the patched tables (file meta, and with added files: header, dir meta, file hash)
+            for (int k = 0; k < npatches; k++) {
+                uint64_t a = o > patches[k].off ? o : patches[k].off;
+                uint64_t b = o + n < patches[k].off + patches[k].size ? o + n : patches[k].off + patches[k].size;
+                if (a < b) memcpy(dst + done + (a - o), patches[k].data + (a - patches[k].off), b - a);
+            }
         }
         done += n;
     }

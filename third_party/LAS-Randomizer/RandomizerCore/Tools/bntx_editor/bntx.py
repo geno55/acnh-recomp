@@ -435,7 +435,10 @@ class File:
                 self.relocTbl.entries[-1].structs.append([pos + i * 8])
             self.relocTbl.entries[-1].paddingCount = 1
 
-            pos += min(count, 0xFF) * 8
+            # (LARecomp fix) dictionary entries are 16 bytes apart (pointer + padding): the next chunk of 255 starts
+            # 255 * 16 further on. With * 8, archives of more than 255 textures got wrong name pointers (the game
+            # crashed walking the name dictionary; DgnTex.arc, generated levels over ~250 textures)
+            pos += min(count, 0xFF) * 16
             count -= 0xFF
 
         self.texContainer.dictAddr = self.texNameDict.pos

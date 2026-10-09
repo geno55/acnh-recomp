@@ -5,6 +5,8 @@
 //
 // rando/<seed>/door_jumps.tsv (tools/rando/dungeon_gen.py): level, cell (e.g. 08C), side (N/S/W/E), doorway centre
 // on that side and the partner's centre on the facing side, in half tiles (x 0.75 units) from the cell's corner.
+// Optional (Chaos dungeon room shuffle): target cell and target side - Link comes out of that room's doorway on that
+// side (any room of the level); without them, the neighbour across the edge, facing side.
 //
 // Link's position: the "PlayerCollision" component (vtable main+0x1c501f0, name inline at +0x18), vec3 at +0x80
 // (a second copy at +0xb0); writing it moves Link, every other copy follows (found 2026-10-08 with
@@ -20,7 +22,7 @@
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0
 #define PLAYER_COLLISION_VT (MAIN_BASE + 0x1c501f0)
 
-typedef struct { char level[40]; int col, row; char side; int own, partner, still; } Jump;
+typedef struct { char level[40]; int col, row; char side; int own, partner, still; int tcol, trow; char tside; } Jump;
 static Jump *g_jumps;
 static int g_njumps = -1;
 
@@ -36,11 +38,19 @@ static void load(void) {
     int cap = 0;
     while (fgets(line, sizeof line, f)) {
         Jump j;
-        char cell[8], side[4];
-        if (sscanf(line, "%39s %7s %3s %d %d", j.level, cell, side, &j.own, &j.partner) != 5) continue;
+        char cell[8], side[4], tcell[8], tside[4];
+        int n = sscanf(line, "%39s %7s %3s %d %d %7s %3s", j.level, cell, side, &j.own, &j.partner, tcell, tside);
+        if (n != 5 && n != 7) continue;
         j.row = atoi(cell);  // "08C" -> row 8, column C
         j.col = cell[2] - 'A';
         j.side = side[0];
+        if (n == 7) {
+            j.trow = atoi(tcell), j.tcol = tcell[2] - 'A', j.tside = tside[0];
+        } else {  // the neighbour across the edge, its facing side
+            j.trow = j.row + (j.side == 'N' ? -1 : j.side == 'S' ? 1 : 0);
+            j.tcol = j.col + (j.side == 'W' ? -1 : j.side == 'E' ? 1 : 0);
+            j.tside = j.side == 'N' ? 'S' : j.side == 'S' ? 'N' : j.side == 'W' ? 'E' : 'W';
+        }
         j.still = 0;
         if (g_njumps == cap) g_jumps = realloc(g_jumps, sizeof(Jump) * (cap = cap ? cap * 2 : 64));
         g_jumps[g_njumps++] = j;
@@ -101,6 +111,7 @@ uint64_t g_test_stick_until;
 static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     static long at = -2, placed = -1;
     static char cell[8], side;
+    static int er = -1, ec = -1;  // expected cell (the tested jump's target)
     static uint64_t in_level_since;
     static int was_in;
     if (at == -2) {
@@ -130,6 +141,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             }
             pos[0] = pos2[0] = x;
             pos[2] = pos2[2] = z;
+            er = j->trow, ec = j->tcol;
             g_test_lx = side == 'W' ? -32767 : side == 'E' ? 32767 : 0;  // walk out
             g_test_ly = side == 'N' ? 32767 : side == 'S' ? -32767 : 0;
             g_test_stick_until = frame + 180;  // cut to 40 frames after the jump (doorjump_tick)
@@ -139,7 +151,6 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     } else if (placed >= 0 && (long)frame == placed + 300) {
         float x = pos[0], z = pos[2];
         int c = (int)floorf(x / 15.0f), r = (int)floorf(z / 12.0f) + 1;
-        int er = row + (side == 'N' ? -1 : side == 'S' ? 1 : 0), ec = col + (side == 'W' ? -1 : side == 'E' ? 1 : 0);
         LOG("[doorjump-test] %s %c -> now in %02d%c (%.2f, %.2f), expected %02d%c: %s (%d jumps fired)\n", cell, side, r,
             'A' + c, x, z, er, 'A' + ec, (r == er && c == ec) ? "PASS" : g_jumps_fired ? "FAIL-after-jump" : "FAIL",
             g_jumps_fired);
@@ -152,6 +163,8 @@ uint64_t g_test_buttons, g_test_buttons_until;
 // LARECOMP_PLACE=<frame>:<x>:<z>[:<script>] (test): put Link at x, z (any level) once the level has been loaded 60
 // frames, then run <script> relative to that moment: steps "<delay>:<L|R|U|D|A|B>:<frames>" separated by '/', e.g.
 // "10:L:8/40:A:6/90:A:6/130:L:30" = face west, lift, throw, walk west (pot tests)
+static long trace_until = -1;  // LARECOMP_DOORJUMP_TRACE: Link's position for 90 frames after each jump / placement
+
 static void place_tick(uint64_t frame) {
     static long at = -2, done, placed_at = -1;
     static char script[256];
@@ -197,11 +210,19 @@ static void place_tick(uint64_t frame) {
     LOG("[place] f%llu Link -> (%.2f, %.2f) in %s\n", (unsigned long long)frame, px, pz, lv);
     done = 1;
     placed_at = (long)frame;
+    if (getenv("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 240;
 }
 
 void doorjump_tick(uint64_t frame) {
     place_tick(frame);
     if (g_njumps < 0) load();
+    if ((long)frame <= trace_until && !g_njumps) {  // (trace without a jump table: vanilla tests)
+        uint64_t pc0 = find_player(frame);
+        if (pc0) {
+            float *p0 = (float *)(uintptr_t)(pc0 + 0x80);
+            LOG("[doorjump-trace] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, p0[0], p0[1], p0[2]);
+        }
+    }
     if (!g_njumps) return;
     if (getenv("LARECOMP_DOORJUMP_TEST")) {
         uint64_t ps0 = LD64(PLAYER_STATUS_PTR);
@@ -216,6 +237,7 @@ void doorjump_tick(uint64_t frame) {
     if (!pc) return;
     float *pos = (float *)(uintptr_t)(pc + 0x80), *pos2 = (float *)(uintptr_t)(pc + 0xb0);
     float x = pos[0], z = pos[2];
+    if ((long)frame <= trace_until) LOG("[doorjump-trace] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, x, pos[1], z);
     static float px, pz;  // last frame (only moving INTO a doorway jumps)
     float dx = x - px, dz = z - pz;
     px = x, pz = z;
@@ -244,17 +266,21 @@ void doorjump_tick(uint64_t frame) {
         if (j->still < 4 || (fabsf(out) > 0.02f && j->still < 12)) continue;
         j->still = 0;
         float nx = x, nz = z, across = 0.9f;  // just past the edge, in front of the partner doorway
-        switch (j->side) {
-        case 'W': nx = 15.0f * col - across; nz = 12.0f * (row - 1) + j->partner * 0.75f; break;
-        case 'E': nx = 15.0f * (col + 1) + across; nz = 12.0f * (row - 1) + j->partner * 0.75f; break;
-        case 'N': nz = 12.0f * (row - 1) - across; nx = 15.0f * col + j->partner * 0.75f; break;
-        default: nz = 12.0f * row + across; nx = 15.0f * col + j->partner * 0.75f; break;
+        // just inside the target room's doorway on its side (for a neighbour: just past the shared edge)
+        float tx0 = 15.0f * j->tcol, tz0 = 12.0f * (j->trow - 1);
+        switch (j->tside) {
+        case 'E': nx = tx0 + 15.0f - across; nz = tz0 + j->partner * 0.75f; break;
+        case 'W': nx = tx0 + across; nz = tz0 + j->partner * 0.75f; break;
+        case 'S': nz = tz0 + 12.0f - across; nx = tx0 + j->partner * 0.75f; break;
+        default: nz = tz0 + across; nx = tx0 + j->partner * 0.75f; break;
         }
-        LOG("[doorjump] %s %02d%c %c: (%.2f, %.2f) -> (%.2f, %.2f)\n", lv, row, 'A' + col, j->side, x, z, nx, nz);
+        LOG("[doorjump] %s %02d%c %c: (%.2f, %.2f) -> %02d%c %c (%.2f, %.2f)\n", lv, row, 'A' + col, j->side, x, z,
+            j->trow, 'A' + j->tcol, j->tside, nx, nz);
         pos[0] = pos2[0] = nx;
         pos[2] = pos2[2] = nz;
         px = nx, pz = nz;
         g_jumps_fired++;
+        if (getenv("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;
         if (g_test_stick_until > frame + 40) g_test_stick_until = frame + 40;  // (test: walk on a little, then stop)
         break;
     }

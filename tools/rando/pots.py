@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pots randomizer (LARecomp addition on top of LAS-Randomizer).
+"""Pots randomizer (LAS Recomp addition on top of LAS-Randomizer).
 
 Every liftable pot (ObjDungeonPot 0x1a7, ObjHousePot 0xeb) outside the Chamber Dungeons becomes an item location.
 The item is a SinkingSword (0x194) item actor -- the same actor LAS uses for Heart Pieces -- placed at the pot's

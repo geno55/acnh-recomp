@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entrance randomizer for the Link's Awakening remake (LARecomp addition on top of LAS-Randomizer).
+"""Entrance randomizer for the Link's Awakening remake (LAS Recomp addition on top of LAS-Randomizer).
 
 Doors are overworld loading zones (actor 0x190 in Field_* rooms) leading into another level; each is paired
 with the interior's zone that leads back out to it. A shuffle maps every door to another door's interior:

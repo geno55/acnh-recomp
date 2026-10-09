@@ -112,7 +112,9 @@ def ensure_spheres(seed_dir):
 
 def build(seed_dir):
     seed = os.path.basename(os.path.normpath(seed_dir))
-    sp = os.path.join(seed_dir, f'spoiler_{seed}.txt')
+    sp = os.path.join(seed_dir, 'spoiler.txt')
+    if not os.path.exists(sp):  # (seeds made before seed IDs: named after the folder)
+        sp = os.path.join(seed_dir, f'spoiler_{seed}.txt')
     if not os.path.exists(sp):
         return None
     S = parse_spoiler(sp)

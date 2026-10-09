@@ -1,22 +1,27 @@
-# LARecomp
+# LAS Recomp
 
 > [!IMPORTANT]
 > **This project was made almost exclusively with AI.** Nearly all of the code, tooling, reverse engineering and
-> documentation in this repository was written by an AI coding assistant (Anthropic's Claude, through Claude Code),
-> directed, tested and reviewed by a human. Expect the strengths and the rough edges that come with that.
+> documentation in this repository was written by and will be maintained by an AI (Anthropic's Claude, through Claude Code),
+> directed, tested and reviewed by a human. As a huge fan of this game, I made this for myself. Sharing it is a curtesy,
+> if you don't agree with the usage of AI, do not trust code written by AI, that is your right but I'm not interested
+> in the controversy in relation to this project. You may simply ignore this project and its code.
+> As with anything on the internet, you run the code at your own discretion.
 
-**LARecomp** is a static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch, 2019) into a
+**LAS Recomp** is a static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch, 2019) into a
 native desktop application. The game's original program is translated ahead of time into C and compiled for your
 computer, so it runs natively - no emulator - with its own renderer, audio, input and a built-in randomizer.
 
-Currently it runs on **macOS (Apple Silicon, Metal)**. A **Windows** version (Vulkan) is planned.
+Currently it runs on **macOS (Apple Silicon Only, Metal)** and **Windows x86_64**, Windows on ARM and Linux releases are planned.
 
 ![Mabe Village in a 21:9 window: the unlocked aspect ratio shows more of the island](docs/ultrawide.jpg)
 
 > [!NOTE]
-> **No game files are included.** LARecomp needs your own legally obtained copy of the game: a dump of
-> *Link's Awakening* **v1.0.0** (XCI or NSP) and your console's `prod.keys`. On first launch the start screen
-> extracts what it needs. Nothing owned by Nintendo is part of this repository.
+> **No game files are included.** LAS Recomp needs your own legally obtained copy of the game: a dump of
+> *Link's Awakening* **v1.0.0** (XCI or NSP) from your console and your console's `prod.keys`. 
+> Instructions on how to obtain these files from your Switch and game copy will **NOT** be provided.
+> On first launch the start screen extracts what it needs. Nothing owned by Nintendo is part of this repository.
+> Screenshot shows the start screen after extraction, no Nintendo Artwork is included until provided by the user.
 
 ![The start screen: choose vanilla or a randomizer seed, set up your game files, settings](docs/start_screen.jpg)
 
@@ -29,16 +34,12 @@ Currently it runs on **macOS (Apple Silicon, Metal)**. A **Windows** version (Vu
 - Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts
 - In-game overlay menu (F1, or Minus + Plus on a controller): display, audio, save editor, randomizer, warp, cheats,
   difficulty presets, controls - and back to the title screen
-- Keyboard and controller support, including text entry for naming your file
+- Keyboard and controller support
 
-**Randomizer** (built on [LAS-Randomizer](https://github.com/Owen-Splat/LAS-Randomizer))
+**Randomizer** (built on top of [LAS-Randomizer](https://github.com/Owen-Splat/LAS-Randomizer))
 - Generate and play seeds without leaving the game; spoiler log and readable walkthrough viewer, check tracker on
   the map, inventory overlay with every dungeon's keys
-- Extra options on top of LAS-Randomizer: **potsanity** (every pot is a check, with hearts, arrows, refills and
-  traps as filler), **entrance randomizer**, **keysanity**, extra checks (fishing, rapids, Dampé, trade gifts),
-  "bombs / powder must be found first", skip story scenes, tunic colours, environment shuffle, companions
-- Experimental: **generated dungeons** built from real rooms of every dungeon, with seamless room transitions even
-  where the doorways don't line up
+- Randomizer Options go here.
 
 ## Status
 
@@ -54,8 +55,8 @@ Requirements (macOS on Apple Silicon): Xcode command line tools (clang), [Homebr
    v1.0.0 dump yourself into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`) with [hactool](https://github.com/SciresM/hactool).
 2. Recompile the game code: `make gen` (writes `generated/`, from your own `extracted/exefs`).
 3. Build: `make -j10` -> `build/larecomp`.
-4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`
-   (`python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`).
+4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`:
+   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`.
 5. Run: `./build/larecomp extracted` (start screen) or `./build/larecomp extracted --play` (straight into the game).
 
 ## Credits
@@ -82,8 +83,8 @@ changes) in `third_party/LAS-Randomizer` under the MIT license. Huge thanks to i
 
 ## Legal
 
-LARecomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
+LAS Recomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
 and *Link's Awakening* are trademarks of Nintendo. No Nintendo code or assets are distributed in this repository;
-you must provide your own copy of the game.
+you must provide your own legally obtained copy of the game to play. 
 
-A license for LARecomp's own code has not been chosen yet. Third-party components keep their own licenses.
+A license for LAS Recomp's own code has not been chosen yet. Third-party components keep their own licenses.

@@ -10,6 +10,7 @@
 #include "../hle.h"
 #include "../nvn/nvn.h"
 #include "../nvn/renderer.h"
+#include "../settings.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -71,6 +72,30 @@ void input_reset(void) {
 }
 
 volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+
+// Scripted test runs ignore the user's own input (a key or stick touched while a test drives Link spoils it):
+// LARECOMP_NO_USER_INPUT=1, on by default whenever LARECOMP_INPUT / LARECOMP_DOORJUMP_TEST / LARECOMP_PLACE is set
+// (LARECOMP_NO_USER_INPUT=0 lets it through again).
+bool input_user_blocked(const SDL_Event *e) {
+    static int on = -1;
+    if (on < 0) {
+        const char *v = getenv("LARECOMP_NO_USER_INPUT");
+        on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE"));
+        if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
+    }
+    if (!on) return false;
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_TEXT_EDITING:
+    case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_GAMEPAD_ADDED: case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP: case SDL_EVENT_JOYSTICK_ADDED: case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+    case SDL_EVENT_JOYSTICK_BUTTON_DOWN: case SDL_EVENT_JOYSTICK_BUTTON_UP:
+        return true;
+    default:
+        return false;
+    }
+}
 
 void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
@@ -194,6 +219,13 @@ static void fill_state(Cpu *c) {
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
+    if (!menu && g_settings.dpad_move && lx == 0 && ly == 0) {  // d-pad / arrow keys walk (setting), stick left alone
+        uint64_t d = key_buttons | pad_buttons | script_buttons;
+        int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
+        int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
+        int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
+        lx = dx * m, ly = dy * m;
+    }
     {   // door jumps stop Link for a moment before moving him (runtime/hle/doorjump.c): stick + d-pad released
         extern uint64_t g_stick_freeze_until;
         extern uint64_t renderer_present_count(void);

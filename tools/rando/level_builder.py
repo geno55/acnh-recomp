@@ -17,7 +17,8 @@ Everything not listed is copied from the level the layout is built in (base .lvb
                  level>, 'fixed': side-view rooms keep the record as is, 'zone_data': their zone record}, ...]
                  (cells of one unit share a camera zone; area records are moved to the cell and renamed),
                  'path': the room file to load (default level/<Lv>/<name>.leb; a cell the game's RomFS has no file
-                 for must point at an existing file name - the seed overrides that file's content)
+                 for must point at an existing file name - the seed overrides that file's content),
+                 'keep_zone': the zone id to keep (unchanged rooms: their actors carry it)
 """
 import copy
 import os
@@ -138,7 +139,13 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
     for r in rooms:
         units.setdefault(r.get('unit', r['name']), []).append(r['name'])
     new_zones = []
-    unit_items = sorted(units.items(), key=lambda kv: (0, kv[0]) if isinstance(kv[0], int) else (1, 0))
+    # zones are written sorted by id (the game looks them up by id): kept ids (unchanged rooms) and new ids mixed
+    def unit_zid(kv):
+        r0 = by_name[kv[1][0]]
+        if r0.get('keep_zone') is not None:
+            return r0['keep_zone']
+        return kv[0] if isinstance(kv[0], int) else 1 << 30
+    unit_items = sorted(units.items(), key=lambda kv: (unit_zid(kv), str(kv[0])))
     for zi, (u, names) in enumerate(unit_items):
         boxes = [box(by_name[n]) for n in names]
         x0 = min(b[0] for b in boxes); z0 = min(b[1] for b in boxes)
@@ -146,7 +153,9 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
         r0 = by_name[names[0]]
         zd = r0.get('zone_data')  # the room's own zone record (camera settings, environment, music)
         d = bytearray(zd if zd else tmpl_zone.data)
-        zid = u if isinstance(u, int) and u >= 300 else 300 + zi
+        # 'keep_zone': rooms whose files are unchanged (anchors, side-view rooms) keep their zone id - their actors
+        # record it (actor roomID)
+        zid = r0['keep_zone'] if r0.get('keep_zone') is not None else (u if isinstance(u, int) and u >= 300 else 300 + zi)
         struct.pack_into('<I', d, 0, zid)
         if not r0.get('fixed'):  # side-view zones keep their own camera box
             cy, hy = struct.unpack_from('<f', d, 8)[0], struct.unpack_from('<f', d, 20)[0]

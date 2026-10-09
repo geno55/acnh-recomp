@@ -4,26 +4,7 @@ import yaml
 import os
 
 VERSION = 0.41
-
-DOWNLOAD_PAGE = 'https://github.com/Owen-Splat/LAS-Randomizer/releases/latest'
-
-with open(os.path.join(RESOURCE_PATH, 'light_theme.txt'), 'r') as f:
-    LIGHT_STYLESHEET = f.read()
-
-with open(os.path.join(RESOURCE_PATH, 'dark_theme.txt'), 'r') as f:
-    DARK_STYLESHEET = f.read()
-
-with open(os.path.join(RESOURCE_PATH, 'changes.txt'), 'r') as f:
-    CHANGE_LOG = f.read()
-
-with open(os.path.join(RESOURCE_PATH, 'issues.txt'), 'r') as f:
-    KNOWN_ISSUES = f.read()
-
-with open(os.path.join(RESOURCE_PATH, 'tips.txt'), 'r') as f:
-    HELPFUL_TIPS = f.read()
-
-with open(os.path.join(RESOURCE_PATH, 'about.txt'), 'r') as f:
-    ABOUT_INFO = f.read()
+# [LAS Recomp: the desktop UI's text resources (themes, changelog, tips, name words) are not loaded - UI removed]
 
 with open(os.path.join(DATA_PATH, 'items.yml'), 'r') as f:
     items = yaml.safe_load(f)
@@ -41,12 +22,6 @@ with open(os.path.join(DATA_PATH, 'enemies.yml'), 'r') as f:
 
 with open(os.path.join(DATA_PATH, 'locations.yml'), 'r') as f:
     LOCATIONS = yaml.safe_load(f)
-
-with open(os.path.join(RESOURCE_PATH, 'adjectives.txt'), 'r') as f:
-    ADJECTIVES = f.read().splitlines()
-
-with open(os.path.join(RESOURCE_PATH, 'characters.txt'), 'r') as f:
-    CHARACTERS = f.read().splitlines()
 
 try:
     with open(SETTINGS_PATH, 'r') as settingsFile:

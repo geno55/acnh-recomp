@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Logic for the LARecomp entrance randomizer (single-entrance interiors), on top of LAS-Randomizer's logic.yml.
+"""Logic for the LAS Recomp entrance randomizer (single-entrance interiors), on top of LAS-Randomizer's logic.yml.
 
 LAS reachability is a fixpoint over named nodes, so the shuffle is expressed as new nodes:
   door-<id>    you can stand outside door <id> and get through it: outer_region & outer_extra & door_req

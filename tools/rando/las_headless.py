@@ -94,7 +94,7 @@ def default_settings(seed):
         'boss-cutscenes': True, 'randomize-enemies': False, 'randomize-enemy-sizes': False, 'shuffle-dungeons': False,
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
-        'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False,
+        'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -160,7 +160,7 @@ def main():
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
 
-    # ---- LARecomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
+    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
     tier = int(settings.get('entrance-tier', 0))
     ent = None
     if tier >= 1:
@@ -351,6 +351,10 @@ def main():
         print('tunic:', cosmetics.apply(out_dir, romfs, settings['seed'], settings['tunic-color']), flush=True)
     print('tracker:', tracker.build(out_dir, romfs), flush=True)
     import spoiler_view  # readable spoiler + walkthrough for the in-game Spoiler page
+    # the spoiler is named after the seed string (the seed ID): a fixed name survives renaming the seed's folder
+    sp = os.path.join(out_dir, f"spoiler_{settings['seed']}.txt")
+    if os.path.exists(sp):
+        os.replace(sp, os.path.join(out_dir, 'spoiler.txt'))
     print('spoiler view:', spoiler_view.build(out_dir), 'lines', flush=True)
     stage('Done', 1.0)
     print('done', flush=True)

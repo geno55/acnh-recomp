@@ -1,7 +1,7 @@
 # System fonts
 
 The game draws its text with the Switch's built-in system font, which isn't part of the game files.
-Without it, LARecomp uses Hiragino Sans (built into macOS, the same style of Japanese gothic as the Switch's
+Without it, LAS Recomp uses Hiragino Sans (built into macOS, the same style of Japanese gothic as the Switch's
 Morisawa UD Shin Go), then Arial.
 
 For the exact look, put a dump from your own console here (Switch system archive *FontStandard*, title

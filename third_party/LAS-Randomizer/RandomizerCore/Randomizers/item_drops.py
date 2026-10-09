@@ -18,6 +18,9 @@ def makeDatasheetChanges(sheet, settings):
             sheet['values'][i]['mLotTable'][0]['mType'] = ''
         if sheet['values'][i]['mKey'] == 'HookShot':
             sheet['values'][i]['mLotTable'][0]['mType'] = ''
+        # [LAS Recomp: no-buff-drops - the kill-streak buffs (Guardian Acorn, Piece of Power) drop nothing]
+        if settings.get('no-buff-drops') and sheet['values'][i]['mKey'] in ('GuardianAcorn', 'PowerPiece'):
+            sheet['values'][i]['mLotTable'][0]['mType'] = ''
         
         # Values will be different depending on extended consumable drop and reduce farming settings
         if sheet['values'][i]['mKey'] == 'Grass':

@@ -24,7 +24,7 @@ else:
     ROOT_PATH = os.path.dirname(sys.argv[0])
     ASM_PATH = os.path.join(ROOT_PATH, 'RandomizerCore/ASM/Patches')
     DATA_PATH = os.path.join(ROOT_PATH, 'RandomizerCore/Data')
-    RESOURCE_PATH = os.path.join(ROOT_PATH, 'RandomizerUI/Resources')
+    RESOURCE_PATH = os.path.join(ROOT_PATH, 'Resources')  # [LAS Recomp: was RandomizerUI/Resources (UI removed)]
     SETTINGS_PATH = os.path.join(ROOT_PATH, 'settings.txt')
     LOGS_PATH = os.path.join(ROOT_PATH, 'log.txt')
 

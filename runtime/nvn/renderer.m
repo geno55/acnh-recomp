@@ -22,6 +22,12 @@ static id<MTLRenderPipelineState> clear_pipes[64];
 static NSMutableDictionary<NSString *, id> *cache;
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static double stat_gpu_s;
+// (forward: texture-lifetime cleanup and stats, defined further down)
+static int g_views_live;
+static void views_forget(void *base);
+static NSMutableDictionary *g_snap_copies;
+static NvnTexture *snap_tex[8];
+static bool snap_ok[8];
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
@@ -82,8 +88,14 @@ const char *renderer_stats(void) {
         for (int i = 0; i < CMD_COUNT; i++) if (op_counts[i]) LOG(" %d:%llu", i, op_counts[i]);
         LOG("\n");
     }
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu", stat_draws, stat_skipped,
-             stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies);
+    extern int g_tex_live;
+    extern uint64_t g_tex_live_bytes;
+    struct task_vm_info vmi;
+    mach_msg_type_number_t vn = TASK_VM_INFO_COUNT;
+    uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vn) == KERN_SUCCESS ? vmi.phys_footprint : 0;
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB", stat_draws, stat_skipped,
+             stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies,
+             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0);
     stat_compiles = 0;
     stat_feedback_copies = 0;
     stat_compile_ms = 0;
@@ -164,9 +176,35 @@ static void wait_cb(id<MTLCommandBuffer> c) {
     stat_wait_ns += (mach_absolute_time() - t0);
 }
 
+// Textures the game destroyed (any thread): their cached views and snapshot copies are dropped on the render thread.
+static pthread_mutex_t gone_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { void *nvn, *mtl; } gone[4096];
+static int ngone;
+void renderer_texture_gone(void *nvn_tex, void *mtl_tex) {
+    pthread_mutex_lock(&gone_lock);
+    if (ngone < 4096) { gone[ngone].nvn = nvn_tex; gone[ngone].mtl = mtl_tex; ngone++; }
+    pthread_mutex_unlock(&gone_lock);
+}
+static void drain_gone(void) {
+    pthread_mutex_lock(&gone_lock);
+    int n = ngone;
+    static struct { void *nvn, *mtl; } local[4096];
+    memcpy(local, gone, sizeof local[0] * n);
+    ngone = 0;
+    pthread_mutex_unlock(&gone_lock);
+    for (int i = 0; i < n; i++) {
+        if (local[i].mtl) views_forget(local[i].mtl);
+        if (local[i].nvn) {
+            if (g_snap_copies) [g_snap_copies removeObjectForKey:[NSValue valueWithPointer:local[i].nvn]];
+            for (int k = 0; k < 8; k++) if (snap_tex[k] == local[i].nvn) { snap_tex[k] = NULL; snap_ok[k] = false; }
+        }
+    }
+}
+
 // Commit recorded work without waiting.
 void renderer_submit(void) {
     end_pass();
+    drain_gone();
     if (cmdbuf) {
         id<MTLCommandBuffer> c = cmdbuf;
         cmdbuf = nil;
@@ -227,6 +265,21 @@ void renderer_wait_seq(uint64_t seq) {
 // the view parameters; a cached view retains its base, so a key's base pointer can't be reused while cached.
 #define VIEW_TAB 16384
 static struct { uint64_t key; void *base; void *view; } view_tab[VIEW_TAB];
+
+// Views keep their base texture alive: when the game frees a texture its views must go too (they piled up -
+// render targets of a 32:9 window held long after the game dropped them - and a new texture at the same address
+// could get a stale view). Entries are tombstoned (key ~0) so probe chains stay intact.
+static void views_forget(void *base) {
+    for (int i = 0; i < VIEW_TAB; i++)
+        if (view_tab[i].base == base && view_tab[i].view) {
+            CFRelease(view_tab[i].view);
+            view_tab[i].view = NULL;
+            view_tab[i].base = NULL;
+            view_tab[i].key = ~0ull;
+            g_views_live--;
+        }
+}
+
 static id<MTLTexture> view_cached(id<MTLTexture> base, uint64_t params, id<MTLTexture> (^make)(void)) {
     uint64_t k = ((uint64_t)(uintptr_t)(__bridge void *)base * 0x9E3779B97F4A7C15ull) ^ (params * 0xC2B2AE3D27D4EB4Full);
     if (!k) k = 1;
@@ -237,7 +290,8 @@ static id<MTLTexture> view_cached(id<MTLTexture> base, uint64_t params, id<MTLTe
     }
     id<MTLTexture> v = make();
     if (!v) return base;
-    if (view_tab[slot].view) CFRelease(view_tab[slot].view);  // evict (8 probes all taken)
+    if (view_tab[slot].view) { CFRelease(view_tab[slot].view); g_views_live--; }  // evict (8 probes all taken)
+    g_views_live++;
     view_tab[slot].key = k;
     view_tab[slot].base = (__bridge void *)base;
     view_tab[slot].view = (void *)CFBridgingRetain(v);
@@ -965,8 +1019,6 @@ static int nfeedback;
 // compute). Soft particles (grass-cut leaves, smoke) sample the depth buffer they're tested against but don't
 // write it, so a burst of them shares one snapshot instead of a pass break + full-screen copy per draw.
 static uint64_t g_cur_fs_hash;
-static NvnTexture *snap_tex[8];
-static bool snap_ok[8];
 static const char *snap_why[8];
 static const char *snap_reason = "?";
 static void snapshots_invalidate(NvnTexture *t) {  // NULL = all
@@ -1001,8 +1053,8 @@ static void resolve_feedback(Prog *pr) {
             bool have = false;
             for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
             if (have || nfeedback == 4) continue;
-            static NSMutableDictionary *copies;
-            if (!copies) copies = [NSMutableDictionary new];
+            if (!g_snap_copies) g_snap_copies = [NSMutableDictionary new];
+            NSMutableDictionary *copies = g_snap_copies;
             NSValue *key = [NSValue valueWithPointer:t];
             static int nosnap = -1;
             if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;

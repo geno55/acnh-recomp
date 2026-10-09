@@ -404,6 +404,10 @@ static void tab_audio(void) {
 }
 
 static void tab_about(void) {
+    header("Movement");
+    toggle("D-pad moves Link", &g_settings.dpad_move);
+    hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
+    ImGui::Spacing();
     header("Controls");
     ImGui::TextUnformatted("Open / close this menu:  F1, Esc, or Minus + Plus (Back + Start)");
     ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
@@ -592,7 +596,7 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
         ImGui::PopFont();
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("  LARecomp");
+        ImGui::TextDisabled("  LAS Recomp");
         ImGui::SameLine(ImGui::GetWindowWidth() - 520 * scale);
         if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) ImGui::OpenPopup("##totitle");
         ImGui::SameLine(ImGui::GetWindowWidth() - 260 * scale);

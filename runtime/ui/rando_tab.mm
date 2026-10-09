@@ -1,5 +1,6 @@
 // Randomizer tab: choose / generate LAS-Randomizer seeds (rando/<seed>/). Switching seeds restarts the game
 // (game data is read at boot); each seed keeps its own save slots.
+#include <ctype.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <errno.h>
@@ -26,7 +27,7 @@ extern const char *g_romfs_dir;
 extern char **environ;
 }
 
-struct Seed { std::string name, logic, spoiler; long mtime; };
+struct Seed { std::string name, logic, spoiler, id; long mtime; };
 static std::vector<Seed> g_seeds;
 static bool g_scanned;
 static int g_selected = -1;
@@ -75,7 +76,10 @@ static void scan(void) {
         s.mtime = sb.st_mtime;
         std::string js = read_file(dir + "/settings.json");
         s.logic = json_str(js, "logic");
-        s.spoiler = dir + "/spoiler_" + s.name + ".txt";
+        s.spoiler = dir + "/spoiler.txt";
+        if (stat(s.spoiler.c_str(), &sb)) s.spoiler = dir + "/spoiler_" + s.name + ".txt";  // (older seeds)
+        s.id = read_file(dir + "/seed_id.txt");
+        while (!s.id.empty() && (s.id.back() == '\n' || s.id.back() == ' ')) s.id.pop_back();
         g_seeds.push_back(s);
     }
     closedir(d);
@@ -94,7 +98,8 @@ static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "
                                       "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
 
 struct GenOpts {
-    char seed[64] = "";
+    char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
+    uint64_t rng = 0;         // 40-bit random part of the seed ID
     int logic = 0;            // basic advanced glitched hell none
     int dungeon_items = 3;    // none stone-beak mc mcb
     int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
@@ -109,11 +114,94 @@ struct GenOpts {
     bool shuffle_instruments = false, shuffle_dungeons = false, randomize_enemies = false, randomize_music = false;
     bool open_mabe = false, fast_songs = false, ohko = false, boss_cutscenes = true, spoiler = true;
     int start_rupees = 0;
-    // planned (LARecomp additions, not implemented yet)
+    // planned (LAS Recomp additions, not implemented yet)
     int entrances = 0;        // off / dungeons / ...
     bool decoupled = false, pots = false, grass = false;
+    bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
 };
 static GenOpts g_opts;
+
+// ---- Seed IDs: a 20-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and every
+// generation option, with a checksum. Same ID + same LAS Recomp version = the same seed, so IDs can be shared. The
+// generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout changes.
+enum { SEED_ID_VERSION = 1, SEED_ID_BITS = 100 };
+static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+struct Bits {
+    uint8_t b[SEED_ID_BITS] = {};
+    int n = 0;
+    void put(uint64_t v, int w) { for (int i = 0; i < w; i++) b[n++] = (v >> i) & 1; }
+    uint64_t get(int w) { uint64_t v = 0; for (int i = 0; i < w; i++) v |= (uint64_t)b[n++] << i; return v; }
+};
+
+static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order (append only)
+    bool *f[] = {&o.bomb_bag, &o.powder_bag, &o.environments, &o.pets_in_dungeons, &o.skip_story, &o.enemy_minibosses,
+                 &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
+                 &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
+                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs};
+    return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
+}
+
+static uint32_t id_check(const Bits &x, int upto) {
+    uint32_t h = 0x811c9dc5u;
+    for (int i = 0; i < upto; i++) { h ^= x.b[i]; h *= 0x01000193u; }
+    return (h ^ (h >> 5) ^ (h >> 10) ^ (h >> 15)) & 31;
+}
+
+static void seed_id_encode(GenOpts &o, char *out, size_t cap) {
+    Bits x;
+    x.put(SEED_ID_VERSION, 4);
+    x.put(o.rng, 40);
+    x.put(o.logic, 3); x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
+    x.put(o.tunic, 4); x.put(o.entrances, 2); x.put(o.start_rupees, 10);
+    for (int i = 0; bool *f = opt_flags(o, i); i++) x.put(*f, 1);
+    int data = x.n;
+    x.put(0, SEED_ID_BITS - 5 - data);
+    x.put(id_check(x, SEED_ID_BITS - 5), 5);
+    std::string s;
+    for (int c = 0; c < SEED_ID_BITS / 5; c++) {
+        if (c && c % 5 == 0) s += '-';
+        int v = 0;
+        for (int k = 0; k < 5; k++) v |= x.b[c * 5 + k] << k;
+        s += kB32[v];
+    }
+    snprintf(out, cap, "%s", s.c_str());
+}
+
+// "" = ok (options + rng set), else what's wrong with the text
+static std::string seed_id_decode(const char *text, GenOpts &o) {
+    Bits x;
+    int chars = 0;
+    for (const char *p = text; *p; p++) {
+        char ch = (char)toupper((unsigned char)*p);
+        if (ch == '-' || ch == ' ') continue;
+        if (ch == 'O') ch = '0';
+        if (ch == 'I' || ch == 'L') ch = '1';
+        const char *q = strchr(kB32, ch);
+        if (!q || !ch) return "not a seed ID (unexpected character)";
+        if (chars == SEED_ID_BITS / 5) return "too long for a seed ID";
+        x.put((uint64_t)(q - kB32), 5);
+        chars++;
+    }
+    if (chars != SEED_ID_BITS / 5) return "a seed ID has 20 characters";
+    if ((uint32_t)(x.b[95] | x.b[96] << 1 | x.b[97] << 2 | x.b[98] << 3 | x.b[99] << 4) != id_check(x, SEED_ID_BITS - 5))
+        return "typo? (checksum doesn't match)";
+    x.n = 0;
+    int ver = (int)x.get(4);
+    if (ver != SEED_ID_VERSION) return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
+    GenOpts t = o;
+    t.rng = x.get(40);
+    t.logic = (int)x.get(3); t.dungeon_items = (int)x.get(2); t.keysanity = (int)x.get(2); t.traps = (int)x.get(3);
+    t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
+    for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.get(1);
+    if (t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
+        return "not a valid seed ID";
+    t.ohko = false;
+    o = t;
+    return "";
+}
+
+static uint64_t new_rng(void) { return ((uint64_t)arc4random() << 8 ^ arc4random()) & 0xFFFFFFFFFFull; }
 
 static const char *ADJ[] = {"Sleepy", "Brave", "Lucky", "Rapid", "Quiet", "Golden", "Wild", "Secret", "Dreamy", "Mighty"};
 static const char *NOUN[] = {"Marin", "Tarin", "Owl", "Cucco", "BowWow", "Moblin", "Zora", "Shell", "WindFish", "Toadstool"};
@@ -122,13 +210,34 @@ static void random_seed_name(char *out, size_t n) {
     snprintf(out, n, "%s%s%d", ADJ[arc4random_uniform(10)], NOUN[arc4random_uniform(10)], (int)arc4random_uniform(1000));
 }
 
+static std::string clean_name(const char *in) {  // a seed name as a folder name: letters, digits, space - _ ( ) '
+    std::string n;
+    for (const char *p = in; *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+        n += (isalnum(ch) || strchr(" -_()'", ch)) && ch ? (char)ch : '_';
+    }
+    while (!n.empty() && n.back() == ' ') n.pop_back();
+    while (!n.empty() && (n[0] == ' ' || n[0] == '.')) n.erase(0, 1);
+    return n;
+}
+
 static void start_generation(void) {
     if (!g_opts.seed[0]) random_seed_name(g_opts.seed, sizeof g_opts.seed);
-    for (char *p = g_opts.seed; *p; p++)
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '-' || *p == '_')) *p = '_';
+    std::string name = clean_name(g_opts.seed);
+    if (name.empty()) name = "Seed";
+    struct stat sb;
+    for (int k = 2; !stat(("rando/" + name).c_str(), &sb); k++) {  // never overwrite a seed: "Name (2)"
+        std::string base = clean_name(g_opts.seed);
+        name = (base.empty() ? "Seed" : base) + " (" + std::to_string(k) + ")";
+    }
+    strlcpy(g_opts.seed, name.c_str(), sizeof g_opts.seed);
+    if (!g_opts.rng) g_opts.rng = new_rng();
+    char id[32];
+    seed_id_encode(g_opts, id, sizeof id);
     std::string dir = std::string("rando/") + g_opts.seed;
     mkdir("rando", 0755);
     mkdir(dir.c_str(), 0755);
+    if (FILE *idf = fopen((dir + "/seed_id.txt").c_str(), "w")) { fprintf(idf, "%s\n", id); fclose(idf); }
     static const char *logic[] = {"basic", "advanced", "glitched", "hell", "none"};
     static const char *ditems[] = {"none", "stone-beak", "mc", "mcb"};
     static const char *traps[] = {"none", "few", "several", "many", "trapsanity"};
@@ -140,7 +249,7 @@ static void start_generation(void) {
     std::string req = dir + "/request.json";
     FILE *f = fopen(req.c_str(), "w");
     if (!f) { g_gen_status = "Cannot write " + req; g_gen_failed = true; return; }
-    fprintf(f, "{\"seed\": \"%s\", \"logic\": \"%s\", \"dungeon-items\": \"%s\", \"traps\": \"%s\",\n", g_opts.seed,
+    fprintf(f, "{\"seed\": \"%s\", \"logic\": \"%s\", \"dungeon-items\": \"%s\", \"traps\": \"%s\",\n", id,
             logic[g_opts.logic], ditems[g_opts.dungeon_items], traps[g_opts.traps]);
     fprintf(f, " \"shuffle-instruments\": %s, \"shuffle-dungeons\": %s, \"randomize-enemies\": %s, \"randomize-music\": %s,\n",
             g_opts.shuffle_instruments ? "true" : "false", g_opts.shuffle_dungeons ? "true" : "false",
@@ -149,7 +258,7 @@ static void start_generation(void) {
             g_opts.open_mabe ? "true" : "false", g_opts.fast_songs ? "true" : "false", g_opts.ohko ? "true" : "false",
             g_opts.boss_cutscenes ? "true" : "false", g_opts.spoiler ? "true" : "false");
     fprintf(f, " \"starting-rupees\": %d, \"blur-removal\": false,\n", g_opts.start_rupees);
-    fprintf(f, " \"pots\": %s,\n", g_opts.pots ? "true" : "false");
+    fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s,\n", g_opts.pots ? "true" : "false", g_opts.no_buffs ? "true" : "false");
     fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
                " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
             g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
@@ -174,6 +283,7 @@ static void start_generation(void) {
     std::string py = "third_party/LAS-Randomizer/venv/bin/python";
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
     const char *argv[] = {py.c_str(), "tools/rando/las_headless.py", romfs.c_str(), dir.c_str(), req.c_str(), NULL};
+    setenv("PYTHONHASHSEED", "0", 1);  // (set iteration order must not differ between runs: same ID, same seed)
     int rc = posix_spawn(&g_gen_pid, py.c_str(), &fa, NULL, (char *const *)argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     g_gen_seed = g_opts.seed;
@@ -202,6 +312,7 @@ static void poll_generation(void) {
         g_gen_status = g_gen_failed ? "Generation failed: see rando/" + g_gen_seed + "/generate.log" : "Seed \"" + g_gen_seed + "\" ready.";
         g_scanned = false;
         g_opts.seed[0] = 0;
+        g_opts.rng = new_rng();  // next seed: a fresh ID
     }
 }
 
@@ -265,7 +376,7 @@ extern "C" void rando_tab_draw(float scale) {
         }
     }
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Each seed has its own save files. Randomizer by Owen-Splat and contributors (LAS-Randomizer).");
+    ImGui::TextDisabled("Each seed has its own save files.");
     ImGui::PopTextWrapPos();
 
     ImGui::Checkbox("Show dungeon keys on the Items screen", &g_settings.inv_keys);
@@ -281,6 +392,9 @@ extern "C" void rando_tab_draw(float scale) {
         ImGui::TableSetupColumn("Logic", ImGuiTableColumnFlags_WidthFixed, 180 * scale);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 560 * scale);
         static std::string confirm_delete;  // seed whose Delete was pressed once (asks again before deleting)
+        static std::string renaming;         // seed being renamed (inline text field)
+        static char rename_buf[64];
+        std::string rename_from, rename_to;
         std::string to_delete;
         for (size_t i = 0; i < g_seeds.size(); i++) {
             const Seed &s = g_seeds[i];
@@ -289,8 +403,20 @@ extern "C" void rando_tab_draw(float scale) {
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
             bool is_active = active && s.name == active;
-            if (is_active) ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s  (playing)", s.name.c_str());
+            if (renaming == s.name) {
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
+                if (ImGui::InputText("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    rename_from = s.name, rename_to = clean_name(rename_buf);
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renaming.clear();
+            } else if (is_active) ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s  (playing)", s.name.c_str());
             else ImGui::TextUnformatted(s.name.c_str());
+            if (!s.id.empty()) {
+                ImGui::TextDisabled("%s", s.id.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Copy ID")) ImGui::SetClipboardText(s.id.c_str());
+            }
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(s.logic.empty() ? "-" : s.logic.c_str());
@@ -302,6 +428,10 @@ extern "C" void rando_tab_draw(float scale) {
             }
             ImGui::SameLine();
             if (ImGui::Button("Spoiler")) g_spoiler_seed = s.name;
+            ImGui::SameLine();
+            ImGui::BeginDisabled(is_active);  // (the game is reading its files)
+            if (ImGui::Button("Rename")) { renaming = s.name; strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf); }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (is_active) {
                 ImGui::BeginDisabled();
@@ -322,6 +452,19 @@ extern "C" void rando_tab_draw(float scale) {
             ImGui::PopID();
         }
         ImGui::EndTable();
+        if (!rename_from.empty()) {
+            struct stat sb;
+            std::string to = "rando/" + rename_to;
+            if (rename_to.empty() || rename_to == rename_from) renaming.clear();
+            else if (!stat(to.c_str(), &sb)) g_gen_status = "A seed named \"" + rename_to + "\" already exists.";
+            else if (rename(("rando/" + rename_from).c_str(), to.c_str()) == 0) {
+                // (seeds made before seed IDs name their spoiler after the folder)
+                rename((to + "/spoiler_" + rename_from + ".txt").c_str(), (to + "/spoiler_" + rename_to + ".txt").c_str());
+                LOG("[rando] renamed seed %s -> %s\n", rename_from.c_str(), rename_to.c_str());
+                renaming.clear();
+                scan();
+            }
+        }
         if (!to_delete.empty()) {
             delete_seed(to_delete);
             confirm_delete.clear();
@@ -335,7 +478,41 @@ extern "C" void rando_tab_draw(float scale) {
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
     label("Seed name");
-    ImGui::InputTextWithHint("##seed", "random", g_opts.seed, sizeof g_opts.seed);
+    ImGui::InputTextWithHint("##seed", "random name (yours to choose)", g_opts.seed, sizeof g_opts.seed);
+    // Seed ID: shows the ID of the options below (+ this seed's random part); paste one to load a shared seed
+    static char idbuf[48];
+    static std::string id_msg;
+    if (!g_opts.rng) g_opts.rng = new_rng();
+    label("Seed ID");
+    float bw = 150 * scale;
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2 * bw - 2 * ImGui::GetStyle().ItemSpacing.x);
+    bool editing = ImGui::InputTextWithHint("##seedid", "paste a shared seed ID", idbuf, sizeof idbuf,
+                                            ImGuiInputTextFlags_CharsUppercase);
+    bool active_id = ImGui::IsItemActive();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Share this ID: with the same LAS Recomp version it makes exactly the same seed (items, options).\n"
+                          "Paste someone's ID here to load their options, then Generate. The name is only your label.");
+    if (editing) {
+        GenOpts t = g_opts;
+        id_msg = seed_id_decode(idbuf, t);
+        if (id_msg.empty()) { g_opts.rng = t.rng; char keep[64]; strlcpy(keep, g_opts.seed, sizeof keep); g_opts = t;
+                              strlcpy(g_opts.seed, keep, sizeof g_opts.seed); id_msg = "Loaded: options set from this ID."; }
+    }
+    if (!active_id) {  // follow the options
+        char cur[48];
+        seed_id_encode(g_opts, cur, sizeof cur);
+        if (strcmp(cur, idbuf)) { strlcpy(idbuf, cur, sizeof idbuf); if (id_msg.rfind("Loaded", 0)) id_msg.clear(); }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copy##id", ImVec2(bw, 0))) ImGui::SetClipboardText(idbuf);
+    ImGui::SameLine();
+    if (ImGui::Button("New ID", ImVec2(bw, 0))) { g_opts.rng = new_rng(); id_msg.clear(); }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Same options, a different random seed.");
+    if (!id_msg.empty()) {
+        ImGui::SetCursorPosX(g_col);
+        if (id_msg.rfind("Loaded", 0)) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", id_msg.c_str());
+        else ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s", id_msg.c_str());
+    }
     combo("Logic", &g_opts.logic, logic, 5);
     combo("Dungeon items", &g_opts.dungeon_items, ditems, 4);
     static const char *ksn[] = {"Off (in their own dungeon)", "Small keys anywhere", "Small + Nightmare keys anywhere",
@@ -351,7 +528,7 @@ extern "C" void rando_tab_draw(float scale) {
             {"Shuffle instruments", &g_opts.shuffle_instruments}, {"Shuffle dungeons", &g_opts.shuffle_dungeons},
             {"Randomize enemies", &g_opts.randomize_enemies}, {"Randomize music", &g_opts.randomize_music},
             {"Open Mabe Village", &g_opts.open_mabe}, {"Fast songs", &g_opts.fast_songs},
-            {"One-hit KO", &g_opts.ohko}, {"Boss cutscenes", &g_opts.boss_cutscenes}, {"Spoiler log", &g_opts.spoiler},
+            {"Boss cutscenes", &g_opts.boss_cutscenes}, {"Spoiler log", &g_opts.spoiler},
         };
         for (auto &x : o) { ImGui::TableNextColumn(); ImGui::Checkbox(x.n, x.v); }
         ImGui::EndTable();
@@ -370,6 +547,9 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("BowWow, the Rooster etc. follow Link into dungeons; the logic then counts what they can do there\n"
                           "(e.g. the Rooster carrying Link over gaps).");
+    ImGui::Checkbox("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
     ImGui::Checkbox("Skip story scenes", &g_opts.skip_story);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("No Owl talks and no kids running up about BowWow; their flags are set as if you'd seen them.");
@@ -397,7 +577,6 @@ extern "C" void rando_tab_draw(float scale) {
     label("Starting rupees");
     ImGui::SliderInt("##rup", &g_opts.start_rupees, 0, 999, "%d", ImGuiSliderFlags_AlwaysClamp);
 
-    section("LARecomp additions");
     ImGui::Checkbox("Pots hold items", &g_opts.pots);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every liftable pot in houses, caves and dungeons hides an item from the pool (about 400 more checks).\n"

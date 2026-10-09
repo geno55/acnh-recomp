@@ -44,10 +44,11 @@ void fnprof_frame(uint64_t frame) {
     for (int i = 0; i < NSLOT; i++)
         if (slots[i].addr) { rows[n][0] = slots[i].addr; rows[n][1] = slots[i].count; n++; }
     qsort(rows, n, sizeof rows[0], cmp);
-    FILE *f = fopen("build/fnprof.txt", "w");
+    const char *out = getenv("LARECOMP_FNPROF_OUT") ? getenv("LARECOMP_FNPROF_OUT") : "build/fnprof.txt";  // (parallel runs)
+    FILE *f = fopen(out, "w");
     for (int i = 0; f && i < n; i++) fprintf(f, "%llx %llu\n", (unsigned long long)rows[i][0], (unsigned long long)rows[i][1]);
     if (f) fclose(f);
     free(rows);
-    LOG("[fnprof] %d functions, written build/fnprof.txt (frames %ld-%ld)\n", n, from, to);
+    LOG("[fnprof] %d functions, written %s (frames %ld-%ld)\n", n, out, from, to);
     from = -1;
 }

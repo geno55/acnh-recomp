@@ -262,12 +262,16 @@ static MTLTextureType mtl_tex_type(uint32_t target, uint32_t samples) {
 }
 
 static void create_backend_texture(NvnTexture *t, TexBackend *b);
+static void release_backend_texture(NvnTexture *t, TexBackend *b);
+int g_tex_live;              // (stats: Metal textures alive and their size)
+uint64_t g_tex_live_bytes;
+void renderer_texture_gone(void *nvn_tex, void *mtl_tex);  // renderer.m
 
 static TexBackend *tex_backend(NvnTexture *t) {
     if (t->backend) {
         TexBackend *b = (TexBackend *)t->backend;
         if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
-            CFBridgingRelease((__bridge CFTypeRef)b->tex);
+            release_backend_texture(t, b);
             create_backend_texture(t, b);
         }
         return b;
@@ -327,11 +331,22 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     tex.label = [NSString stringWithFormat:@"%s fmt%#x", t->label[0] ? t->label : "tex", t->format];
     b->tex = tex;
     CFBridgingRetain(tex);
+    g_tex_live++;
+    g_tex_live_bytes += tex.allocatedSize;
+}
+
+static void release_backend_texture(NvnTexture *t, TexBackend *b) {  // (also drops the renderer's views of it)
+    renderer_texture_gone(NULL, (__bridge void *)b->tex);
+    g_tex_live--;
+    g_tex_live_bytes -= b->tex.allocatedSize;
+    CFBridgingRelease((__bridge CFTypeRef)b->tex);
+    (void)t;
 }
 
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
-    if (b) { CFBridgingRelease((__bridge CFTypeRef)b->tex); free(b); }
+    renderer_texture_gone(t, NULL);  // its snapshot copy
+    if (b) { release_backend_texture(t, b); free(b); }
     t->backend = NULL;
 }
 
@@ -733,7 +748,8 @@ void backend_present(NvnTexture *t) {
         [cb commit];
         if (shot_tex) {
             [cb waitUntilCompleted];
-            renderer_save_texture(shot_tex, "build/window.png");
+            // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
+            renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
             if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
         }
     }
@@ -798,7 +814,7 @@ void ui_window_init(void) {
     // LARECOMP_HIDDEN=1: never shown (automated test runs render off screen without taking the user's focus)
     SDL_WindowFlags wflags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
-    window = SDL_CreateWindow("Link's Awakening (LARecomp)", win_w, win_h, wflags);
+    window = SDL_CreateWindow("Link's Awakening (LAS Recomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
@@ -825,6 +841,7 @@ void ui_run(void) {
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+            if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
