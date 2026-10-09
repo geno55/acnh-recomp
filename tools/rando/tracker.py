@@ -202,7 +202,7 @@ def build(seed_dir, romfs):
             if a:
                 names[(round(a.posX, 2), round(a.posZ, 2))] = bushes_mod.location_name(b)
         for line in open(tsv):
-            lv, x, y, z, fl = line.split()
+            lv, x, y, z, fl = line.split()[:5]  # (bushes.tsv rows may carry more: pots.write_tsv)
             n = names.get((round(float(x), 2), round(float(z), 2)))
             cell = n and cell_of_field('Field_' + n.split('-')[1])
             if n in logic and cell:

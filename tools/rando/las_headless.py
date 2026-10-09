@@ -240,7 +240,7 @@ def main():
     if settings.get('bushes'):  # bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
         import bushes as bushes_mod
         import random as _rnd
-        bush_locs = bushes_mod.add_to_logic(bushes_mod.scan(romfs, leb), logic_defs, item_defs,
+        bush_locs = bushes_mod.add_to_logic(bushes_mod.scan(romfs, leb, open_mabe=settings.get('open-mabe')), logic_defs, item_defs,
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
 

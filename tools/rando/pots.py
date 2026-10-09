@@ -202,8 +202,8 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
         by_key = {a.key: a for a in room.actors}
         for name, p in entries:
             pot = by_key.get(p['key'])
-            if pot is None:
-                continue
+            if pot is None:  # (its item would be lost: LAS's open-mabe once took two bushes away - bushes.scan)
+                raise RuntimeError(f'{name}: no {flag_prefix} actor {p["key"]:#x} in {room_name}')
             if next_flag >= flag_limit:
                 raise RuntimeError(f'out of GlobalFlags indices for {flag_prefix}')
             flag = f'{flag_prefix}{next_flag}'
