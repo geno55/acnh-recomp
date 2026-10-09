@@ -58,7 +58,7 @@ uint32_t rt_hookshot_attr(Cpu *c, uint32_t attr) {
 // ---- test hook: LARECOMP_HOOKSHOT_TOUR=<step>;<step>...  step = <Level>:<Locator>:<x>:<z>:<script>
 // Warps to Level/Locator, waits for the level, puts Link at x, z, then runs <script> (relative frames):
 // "<t>:<L|R|U|D|A|B|X|Y>:<frames>" input, "<t>:S:0" window shot (build/tour_<SHOT_ID>_<step>_<t>.png),
-// "<t>:E:0" end of the step. Link's position is logged every 10 frames ([tour]).
+// "<t>:E:0" end of the step. Link's position is logged every 10 frames ([tour]). (The shots come out upside down.)
 char g_window_shot_request[256];
 
 void hookshot_tour_tick(uint64_t frame) {

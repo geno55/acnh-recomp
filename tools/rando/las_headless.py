@@ -96,6 +96,7 @@ def default_settings(seed):
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
+        'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
@@ -198,6 +199,9 @@ def main():
         shutil.rmtree(os.path.join(out_dir, 'romfs'))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from RandomizerCore.Tools import leb
+    if settings.get('hookshot-anything'):  # new routes before anything reads the logic (room shuffle, entrances)
+        import hookshot_logic
+        print('hookshot anything:', hookshot_logic.apply(logic_defs), 'routes', flush=True)
 
     # keysanity: the freed dungeon items must be placed with logic (LAS only logic-checks 'important' items)
     ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
