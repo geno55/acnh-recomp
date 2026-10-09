@@ -319,6 +319,37 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# Digsanity (runtime/hle/digs.c): the shovel's dig commit (f_7000ddc530) spawns the hole actor (ObjHolesDug 0x1cd)
+# through f_7000d228d0(&out, transform x21, zone, &room, ...); right after it the hole (out at [sp+0x10]) and its
+# snapped tile-centre position (x21) tell the runtime which tile was dug - the first dig of a tile gives its item.
+DIG_HOLE_SITE = 0x7000ddc5cc
+
+
+def _dig_hole(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94007f6, hex(w)  # ldr x22, [sp, #8]
+    return ('{ extern void rt_dig_hole(Cpu *); rt_dig_hole(c); c->x[22] = LD64(c->sp + 8); }'
+            f'  /* {a:#x}: ldr x22, [sp, #8] (a hole was dug: runtime/hle/digs.c) */')
+
+
+PATCHES[DIG_HOLE_SITE] = _dig_hole
+
+# The game keeps its dug holes in a list (main+0x1cbae80, count at +0x10) and fills in the oldest ones once there are
+# more than 80 (f_7000d22d10: while count > 0x50). Digsanity keeps holes open: the limit comes from the runtime.
+HOLE_CAP_SITES = {0x7000d22d30: (0xf101451f, 0, 'cmp x8, #0x51'), 0x7000d22dc0: (0xf101411f, 1, 'cmp x8, #0x50')}
+
+
+def _hole_cap(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    want, minus, text = HOLE_CAP_SITES[a]
+    assert w == want, hex(w)
+    return ('{ extern uint64_t rt_hole_cap(void); '
+            f'(void)(subs64(c, c->x[8], rt_hole_cap() - {minus}ull)); }}'
+            f'  /* {a:#x}: {text} (dug-hole limit: runtime/hle/digs.c) */')
+
+
+for _a in HOLE_CAP_SITES:
+    PATCHES[_a] = _hole_cap
 # Escape Bottle (runtime/hle/escape.c): the player's per-item "use it now?" predicates (one per item slot, main+0xd50e60
 # .. 0xd52f00; each: X / Y newly pressed with that slot equipped on it) only run while Link may use items (no cutscene,
 # dialog, menu or transition). main+0xd50e60 is the third bottle's (slot 0xf): owned (PlayerStatus+0xa9 bit 7) and

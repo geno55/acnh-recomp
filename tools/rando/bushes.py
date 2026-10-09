@@ -2,7 +2,8 @@
 """Bushsanity (LAS Recomp addition, user 2026-10-08): every bush on Koholint's overworld (ObjGrass 0xb6 - the leafy
 shrubs, model parts GrassBase / GrassTop; 381 on the Field) hides an item, like the pots (pots.py does the writing: a
 scaled-down SinkingSword item actor inside the bush, cutting it reveals the item). Tall grass (ObjLawn 0xb5, 916 on
-the Field - the names are misleading; checked by tinting each kind gold in game 2026-10-09) is NOT randomized.
+the Field - the names are misleading; checked by tinting each kind gold in game 2026-10-09) is NOT randomized, nor
+are the 73 bushes over a hole / staircase (scan(): the item fell in) - 308 checks.
 Unchecked bushes are drawn gold (runtime/hle/pot_glow.c reads bushes.tsv; bushes are drawn instanced, the renderer
 splits those draws).
 
@@ -18,6 +19,7 @@ import glob
 import json
 import os
 import re
+import struct
 
 import pots
 
@@ -33,20 +35,48 @@ BUSH_TRAPS = pots.POT_TRAPS
 HIDE_SCALE = float(os.environ.get('LARECOMP_BUSH_HIDE', 0.4))  # smaller than in pots: leaves don't cover a 0.7 item
 
 
-def scan(romfs, leb):
-    """Every bush on the Field: list of dicts with level, room, key, n (index among the room's bushes)."""
+def _pit_tiles(room):
+    """{(col, row)} of the room's tiles Link (and a dropped item) falls into.
+    Room grid (fixed-hash entry 'grid': 'info' = u16 rows, u16 cols, then f32 x, z of the tile grid's corner at +8;
+    'data' = 0x10 bytes per tile, row-major, 1.5 units square): +0 flags (bit 0 fall / sink - a pit, or deep water /
+    lava when +2 bit 2 is set too; bit 1 collision; bits 3 / 5 / 7 north / east / south walls), +1 (bit 1 west wall),
+    +2 (bit 0 dig spot, bit 2 water / lava, bit 3 respawn point / doorway floor, bit 5 refreshes on reload), +3 (0x80),
+    +4..+7 a copy of +0..+3, +8 u32 chain index, +0xC f32 floor height. LAS's leb.Grid names most of these bits."""
+    g = next((e for e in room.fixed_hash.entries if e.name == b'grid'), None)
+    g = g and {x.name: x for x in g.data.entries}
+    if not g or b'info' not in g or b'data' not in g:
+        return set(), (0.0, 0.0)
+    rows, cols = struct.unpack_from('<HH', g[b'info'].data, 0)
+    origin = struct.unpack_from('<2f', g[b'info'].data, 8)
+    raw = g[b'data'].data
+    return {(i % cols, i // cols) for i in range(rows * cols) if raw[0x10 * i] & 1}, origin
+
+
+def scan(romfs, leb, pits=False):
+    """Every bush on the Field: list of dicts with level, room, key, n (index among the room's bushes).
+    Bushes over a hole are left out (`pits`: kept) and stay vanilla bushes - a revealed item fell in: the 70 over a pit
+    tile (Pothole Field Field_12H-14H, Toronbo 14E; each also has an ObjFieldTip<area> hole model at the bush) and the
+    3 hiding a staircase (02H, 05K, 11K: the hole model with param 2 + an AreaLevelOpen; the tile isn't a pit - the
+    item vanished into the stairs and the bush wasn't drawn gold). n counts every bush, so a bush's name doesn't
+    depend on which others are left out."""
     limit = int(os.environ.get('LARECOMP_BUSH_MAX', 100000))  # (experiments)
     out = []
     for f in sorted(glob.glob(os.path.join(romfs, 'region_common', 'level', 'Field', 'Field_*.leb'))):
         room_name = os.path.basename(f)[:-4]
         with open(f, 'rb') as fh:
             room = leb.Room(fh.read())
+        holes, (ox, oz) = _pit_tiles(room)
+        tips = [(t.posX, t.posZ) for t in room.actors if t.name.startswith(b'ObjFieldTip')]
         n = 0
         for a in room.actors:
             only = os.environ.get('LARECOMP_BUSH_ROOMS')  # (experiments: comma-separated rooms)
-            if a.type == BUSH_TYPE and len(out) < limit and (not only or room_name in only.split(',')):
+            if a.type != BUSH_TYPE:
+                continue
+            pit = (int((a.posX - ox) // 1.5), int((a.posZ - oz) // 1.5)) in holes or \
+                any(abs(x - a.posX) < 0.1 and abs(z - a.posZ) < 0.1 for x, z in tips)
+            if len(out) < limit and (not only or room_name in only.split(',')) and (pits or not pit):
                 out.append({'level': 'Field', 'room': room_name, 'key': a.key, 'n': n})
-                n += 1
+            n += 1
     return out
 
 
