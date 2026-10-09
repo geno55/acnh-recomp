@@ -22,6 +22,7 @@ extern "C" {
 #include "../settings.h"
 uint64_t renderer_present_count(void);
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+int souls_owned(int dungeon);  // runtime/hle/souls.c
 }
 
 #define SAVE (MAIN_BASE + 0x1CBB220)
@@ -244,6 +245,9 @@ static void inventory(void) {
         auto f = g_flag_idx.find(t.flag);
         give(t.tok, f != g_flag_idx.end() && flag_set(f->second));
     }
+    static const char *souls[] = {"soul-evil-orb", "soul-moldorm", "soul-genie", "soul-slime-eye", "soul-angler-fish",
+                                  "soul-slime-eel", "soul-facade", "soul-evil-eagle", "soul-hot-head"};  // tools/rando/souls.py
+    for (int d = 0; d < 9; d++) give(souls[d], souls_owned(d) > 0);  // (boss souls: runtime/hle/souls.c, by dungeon)
     static const char *dn[] = {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"};
     for (int d = 0; d < 9; d++) {  // dungeon records: dungeon n = record 2(n-1), Color Dungeon = 18
         int rec = d < 8 ? 2 * d : 18;
