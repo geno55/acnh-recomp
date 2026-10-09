@@ -302,3 +302,19 @@ def _frame_steps(gen, a):
 
 
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
+
+
+# 360-degree movement (runtime/hle/qol.c, setting move_360): main+0xded9f0 snaps Link's stick vector (s1 = x, s2 = y)
+# to one of 8 directions and returns it as a 32-bit angle (full turn = 2^32, 0 = down). With the setting on, the
+# runtime returns the stick's own angle instead (as the community "360 Controls" mod does).
+SNAP_DIR_SITE = 0x7000ded9f0
+
+
+def _snap_dir(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
+    return ('{ extern int rt_snap_dir(Cpu *); if (rt_snap_dir(c)) return; c->sp -= 0x40; }'
+            f'  /* {a:#x}: sub sp, sp, #0x40 (8-way stick snap: 360-degree movement) */')
+
+
+PATCHES[SNAP_DIR_SITE] = _snap_dir

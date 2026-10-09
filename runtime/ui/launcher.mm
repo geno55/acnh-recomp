@@ -602,6 +602,16 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetNextItemWidth(420 * s);
                 ImGui::SliderFloat("Volume", &g_settings.volume, 0, 1, "%.2f");
                 ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("360-degree movement", &g_settings.move_360);
+                ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("Remove blur", &g_settings.blur_removal);
+                ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("Hide Hero Mode icon", &g_settings.hide_hero_icon);
+                ImGui::SetCursorPosX(x0);
+                ImGui::SetNextItemWidth(420 * s);
+                static const char *const prompts[] = {"Auto (follow the controller)", "Nintendo", "Xbox", "PlayStation"};
+                ImGui::Combo("Button icons", &g_settings.prompts, prompts, 4);
+                ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("More options are in the in-game menu (Esc).");
                 ImGui::Dummy(ImVec2(0, 12 * s));
                 import_fonts();
