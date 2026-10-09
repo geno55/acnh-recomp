@@ -412,7 +412,7 @@ static void begin_pass(void) {
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
-    uint32_t w = 0, h = 0, minw = UINT32_MAX, minh = UINT32_MAX;
+    uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -437,7 +437,7 @@ static void begin_pass(void) {
                       ? vk_format(st.rt.cview[i].format) : b->format;
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
         uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
-        if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; h = eh; }
+        if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
         if (ew < minw) minw = ew;
         if (eh < minh) minh = eh;
         pass_samples = b->samples;
@@ -456,7 +456,7 @@ static void begin_pass(void) {
             if (b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) { sa = a; has_s = true; pass_stencil = b->format; }
             uint32_t lv = st.rt.has_dview && (st.rt.dview.setmask & 1) ? st.rt.dview.base_level : 0;
             uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
-            if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = ew; h = eh; }
+            if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = ew; }
             if (ew < minw) minw = ew;
             if (eh < minh) minh = eh;
             if (!pass_ncolor) pass_samples = b->samples;

@@ -246,7 +246,9 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             }
         } else if (addr >= 0x80 && addr < 0x280) {
             int a = (addr - 0x80) >> 4, comp = (addr >> 2) & 3;
-            if (c->key && c->key->vs_out_mask && !(c->key->vs_out_mask & (1u << a))) {
+            // (MSL: a mask of 0 means unknown. GLSL: the renderer always passes the vertex shader's outputs, and
+            // Vulkan requires every fragment input to be a vertex output, so 0 means none.)
+            if (c->key && (c->key->vs_out_mask || c->key->glsl) && !(c->key->vs_out_mask & (1u << a))) {
                 strcpy(e, comp == 3 ? "0x3f800000u" : "0u");  // not provided by the vertex shader
             } else {
                 c->in_attr_mask |= 1u << a;

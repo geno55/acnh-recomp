@@ -22,6 +22,7 @@ static inline int unsetenv(const char *k) { return _putenv_s(k, ""); }
 
 static inline int fsync(int fd) { return _commit(fd); }
 
+int __cdecl rand_s(unsigned int *v);  // (declared by stdlib.h only with _CRT_RAND_S)
 static inline uint32_t arc4random(void) {
     unsigned v = 0;
     rand_s(&v);
