@@ -172,6 +172,8 @@ void rt_fatal_trace(void) {
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
     }
+    // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)
+    signal(SIGABRT, SIG_DFL);
     abort();
 }
 
@@ -211,6 +213,8 @@ void watch_arm(void) {
 
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
+    static volatile int depth;
+    if (sig == SIGABRT && depth++ > 0) { signal(SIGABRT, SIG_DFL); abort(); }  // (nested: just die)
     uint64_t fa = (uint64_t)si->si_addr;
     if (watch_page && fa >= watch_page && fa < watch_page + 0x4000) {
         if (fa >= g_watch_lo && fa < g_watch_hi) {

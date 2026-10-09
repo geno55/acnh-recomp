@@ -45,6 +45,7 @@ int game_in_play(void) {
 }
 
 int warp_available(void) { return game_in_play(); }
+int warp_busy(void) { return g_pending; }  // a queued warp not applied yet (shader tour)
 
 // LARECOMP_WARP_AT=<frame>:<level>:<locator>[,<frame>:<level>:<locator>...]  (test hook)
 // LARECOMP_WARP_ON_LOAD=<level>:<locator>: warp once, ~1 s after a save is loaded (hand-off to the user)
@@ -102,6 +103,7 @@ static void mem_dump_test(uint64_t frame) {
 }
 
 void warp_frame(uint64_t frame) {
+    { extern void shader_tour_tick(uint64_t); shader_tour_tick(frame); }
     warp_test(frame);
     warp_on_load(frame);
     mem_dump_test(frame);

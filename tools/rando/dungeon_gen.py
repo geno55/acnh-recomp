@@ -528,7 +528,7 @@ class FlagMap:
         if i not in self.g:
             self.g[i] = self.next_g
             self.next_g += 1
-            if self.next_g >= 2048:
+            if self.next_g >= 3800:  # (2048+ via runtime/hle/flags_ext.c; 3800+ = Chaos map letters)
                 raise RuntimeError('out of free event flags')
         return self.g[i]
 
@@ -688,7 +688,8 @@ _grid_cache = {}
 
 
 def landing_depth(romfs, room, side, slot, min_tile):
-    """How far past the edge Link lands at a doorway (Chaos jumps): the centre of the first tile inward from the edge,
+    """(depth, floor height): how far past the edge Link lands at a doorway (Chaos jumps) and the floor there - the
+    centre of the first tile inward from the edge,
     along the doorway's line, that is floor - no collision, no deep water / lava / pit (Turtle Rock 07D: lava right
     inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
     import struct
@@ -709,8 +710,8 @@ def landing_depth(romfs, room, side, slot, min_tile):
         solid = bool(t[0] & 2) and not t[2] & 8
         hazard = (t[2] & 4 and h < -0.3) or h < -1.0
         if not solid and not hazard:
-            return round(i * 1.5 + 0.75, 2)
-    return 2.2 if min_tile else 0.9
+            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
+    return (2.2 if min_tile else 0.9), 0.0
 
 
 def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
@@ -790,8 +791,8 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
     out = []
     for a, b in pairs:
         for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
-            depth = landing_depth(romfs_for_tiles, layout[y[1]], y[2], y[3], 1 if own_door(y[1], y[2], y[3]) else 0)
-            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth))
+            depth, height = landing_depth(romfs_for_tiles, layout[y[1]], y[2], y[3], 1 if own_door(y[1], y[2], y[3]) else 0)
+            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height))
     return out
 
 
@@ -892,10 +893,21 @@ def write_all(romfs, out, layouts, jumps=None):
     if jumps is not None:  # Chaos: discovered doorway pairs are event flags 3800+ (runtime/hle/flags_ext.c)
         with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'flags_ext'), 'w') as f:
             f.write('chaos dungeon map letters: event flags 3800+\n')
-    shared = FlagMap()
+    # global flags after every one the seed already uses (potsanity's pot flags run 1240..~1655, past
+    # GLOBAL_FLAG_BASE; bushsanity's 2048..~2964): the highest index in the seed's GlobalFlags sheet
+    start = GLOBAL_FLAG_BASE
+    sheet_path = os.path.join(out, 'region_common', 'datasheets', 'GlobalFlags.gsheet')
+    if os.path.exists(sheet_path):
+        from RandomizerCore.Tools import oead_tools
+        used = [int(v['index']) for v in oead_tools.readSheet(sheet_path)['values']]
+        start = max([start] + [u + 1 for u in used if u < 3800])  # (bushsanity's flags are 2048+ too)
+    shared = FlagMap(next_global=start)
     for lv, L in layouts.items():
         write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,
               jumps=None if jumps is None else [j for j in jumps if j[0] == lv])
+    if shared.next_g > 2048:  # flags past the game's 2048: the runtime extends the bitfield for this seed
+        with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'flags_ext'), 'a') as f:
+            f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
 
 
 def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None):

@@ -23,7 +23,7 @@
 #define PLAYER_COLLISION_VT (MAIN_BASE + 0x1c501f0)
 
 typedef struct { char level[40]; int col, row; char side; int own, partner, still; int tcol, trow; char tside; float depth;
-                 int pair; } Jump;  // pair: Chaos doorway pair (both directions share it), -1 = a neighbour jump
+                 int pair; float height; } Jump;  // height: floor where Link lands (Chaos; <-90 = keep his)  // pair: Chaos doorway pair (both directions share it), -1 = a neighbour jump
 // Chaos dungeon map letters (runtime/ui/chaos_overlay.mm): a pair's letter shows once Link has walked through either
 // end - remembered in event flag CHAOS_FLAG_BASE + pair (extended flags, runtime/hle/flags_ext.c: saved per slot)
 #define CHAOS_FLAG_BASE 3800
@@ -47,8 +47,10 @@ static void load(void) {
         Jump j;
         char cell[8], side[4], tcell[8], tside[4];
         j.depth = 0.9f;  // how far past the target edge Link lands (Chaos: further when the target has its own door)
-        int n = sscanf(line, "%39s %7s %3s %d %d %7s %3s %f", j.level, cell, side, &j.own, &j.partner, tcell, tside, &j.depth);
-        if (n != 5 && n != 7 && n != 8) continue;
+        j.height = -100.0f;
+        int n = sscanf(line, "%39s %7s %3s %d %d %7s %3s %f %f", j.level, cell, side, &j.own, &j.partner, tcell, tside,
+                       &j.depth, &j.height);
+        if (n != 5 && n != 7 && n != 8 && n != 9) continue;
         j.row = atoi(cell);  // "08C" -> row 8, column C
         j.col = cell[2] - 'A';
         j.side = side[0];
@@ -344,9 +346,10 @@ void doorjump_tick(uint64_t frame) {
             j->trow, 'A' + j->tcol, j->tside, nx, nz);
         pos[0] = pos2[0] = nx;
         pos[2] = pos2[2] = nz;
-        if (falling) pos[1] = pos2[1] = 0.0f;  // back on the floor (doorways are at floor height 0)
+        if (j->height > -90.0f) pos[1] = pos2[1] = j->height + 0.05f;  // onto the landing floor (raised rooms: 1.5)
+        else if (falling) pos[1] = pos2[1] = 0.0f;  // back on the floor (doorways are at floor height 0)
         px = nx, pz = nz;
-        if (abs(j->tcol - col) + abs(j->trow - row) != 1) { hold_x = nx, hold_y = pos[1], hold_z = nz; hold_until = frame + 30; }
+        if (abs(j->tcol - col) + abs(j->trow - row) != 1) { hold_x = nx, hold_y = pos[1], hold_z = nz; hold_until = frame + 30; }  // (y set above)
         g_jumps_fired++;
         if (j->pair >= 0) { extern void flags_ext_set(int idx); flags_ext_set(CHAOS_FLAG_BASE + j->pair); }
         if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;
