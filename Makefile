@@ -109,7 +109,13 @@ gen-objs: $(GEN_OBJ)
 # Runtime objects only (no generated code, no link): quick compile check
 runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
 
-.PHONY: all gen gen-objs runtime-objs
+# Windows: build/dist = the exe + the MSYS2 DLLs it loads (runs without MSYS2 on PATH). Game files are not included.
+dist: $(EXE)
+	@mkdir -p build/dist
+	cp $(EXE) build/dist/
+	ldd $(EXE) | awk '/ucrt64/ {print $$3}' | sort -u | xargs -I{} cp -u {} build/dist/
+
+.PHONY: all gen gen-objs runtime-objs dist
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
