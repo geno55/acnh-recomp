@@ -3,6 +3,7 @@
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
+#include <stdarg.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -21,7 +22,9 @@ static uint64_t stat_upload_bytes;
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
 static VkQueryPool prof_qp;
+static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
+uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
@@ -60,6 +63,7 @@ void vk_wait_seq(uint64_t seq) {
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
+    cum_wait += SDL_GetTicksNS() - t0;
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) FATAL("vkWaitSemaphores: %d (device lost)\n", r);
 }
@@ -96,10 +100,12 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
     *begun = true;
 }
 
+static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
     Sub *s = sub();
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
+        gp_mark(s->main, "(submission start; includes GPU idle before it)");
         if (prof && prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
@@ -124,6 +130,45 @@ void vk_full_barrier(VkCommandBuffer cb) {
 }
 
 static void ring_retire(void);
+
+// ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
+// A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
+bool g_gpuprof_frame;
+static VkQueryPool gp_qp;
+static int gp_n;
+static char gp_label[512][112];
+static uint32_t gp_draws[512];
+static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
+    if (!g_gpuprof_frame || gp_n >= 511) return;
+    if (!gp_qp) {
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 512};
+        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &gp_qp) != VK_SUCCESS) { g_gpuprof_frame = false; return; }
+    }
+    if (!gp_n) vkCmdResetQueryPool(cb, gp_qp, 0, 512);
+    vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, gp_qp, (uint32_t)gp_n);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(gp_label[gp_n], sizeof gp_label[0], fmt, ap);
+    va_end(ap);
+    gp_draws[gp_n] = 0;
+    gp_n++;
+}
+void renderer_flush(void);
+void vk_gpuprof_report(void) {
+    if (!gp_n) return;
+    renderer_flush();
+    uint64_t t[512];
+    if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+        double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
+        LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
+        for (int i = 0; i + 1 < gp_n; i++) {
+            double ms = (t[i + 1] - t[i]) * per;
+            LOG("[gpuprof] %6.3f ms %5.1f%%  %s%s", ms, 100 * ms / (total > 0 ? total : 1), gp_label[i], gp_draws[i] ? "" : "\n");
+            if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
+        }
+    }
+    gp_n = 0;
+}
 
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
@@ -161,6 +206,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     pthread_mutex_unlock(&seq_lock);
     cur_sub = (cur_sub + 1) % SUBS;
     stat_flushes++;
+    cum_submits++;
     ring_retire();
     vk_collect_dead();
 }
@@ -350,6 +396,40 @@ static bool sync_shaders(void) {
     return v;
 }
 
+// Shader translation: one dedicated thread (the translator isn't re-entrant - translate.c's RSC2 string ring - and
+// translating on the game thread cost up to ~90 ms per frame on entering an area). Compiles go on to the workers.
+static pthread_mutex_t translate_lock = PTHREAD_MUTEX_INITIALIZER;  // (compute shaders translate on the game thread)
+static Job *tjobs_head, *tjobs_tail;
+static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
+static void *translator(void *a) {
+    (void)a;
+    for (;;) {
+        pthread_mutex_lock(&tjobs_lock);
+        while (!tjobs_head) pthread_cond_wait(&tjobs_cond, &tjobs_lock);
+        Job *j = tjobs_head;
+        tjobs_head = j->next;
+        if (!tjobs_head) tjobs_tail = NULL;
+        pthread_mutex_unlock(&tjobs_lock);
+        j->fn(j->arg);
+        free(j);
+    }
+    return NULL;
+}
+static bool sync_shaders(void);
+static void run_translate(void (*fn)(void *), void *arg) {
+    if (sync_shaders()) { fn(arg); return; }
+    static bool started;
+    if (!started) { started = true; pthread_t t; pthread_create(&t, NULL, translator, NULL); }
+    Job *j = malloc(sizeof *j);
+    j->fn = fn; j->arg = arg; j->next = NULL;
+    pthread_mutex_lock(&tjobs_lock);
+    if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
+    tjobs_tail = j;
+    pthread_cond_signal(&tjobs_cond);
+    pthread_mutex_unlock(&tjobs_lock);
+}
+
 static void run_job(void (*fn)(void *), void *arg) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
@@ -412,6 +492,22 @@ uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
+// (LARECOMP_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
+// present_ns: time in backend_present's acquire/blit/present.
+void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
+    if (!prof) return;
+    static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
+    uint64_t now = SDL_GetTicksNS();
+    if (last_t && now - last_t > 50000000) {
+        uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
+        LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
+            "%llu submits, compiles %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
+            ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
+            atomic_load(&stat_compiles));
+    }
+    last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
+}
+
 const char *renderer_stats(void) {
     static int dumps;
     if (dumps++ < 3) {
@@ -442,6 +538,9 @@ const char *renderer_stats(void) {
         for (int l = 0; l < 4096; l++)
             if (prof_end_line[l] > 20) { n = strlen(stats_text); snprintf(stats_text + n, sizeof stats_text - n, " %d:%u", l, prof_end_line[l]); }
         memset(prof_end_line, 0, sizeof prof_end_line);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " | views created %llu", (unsigned long long)prof_views_created);
+        prof_views_created = 0;
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
@@ -510,6 +609,11 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    if (g_gpuprof_frame) {
+        NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+        gp_mark(cb, "pass: %d color %ux%u fmt %#x, depth %s", st.rt.ncolor, t0 ? t0->width : 0, t0 ? t0->height : 0,
+                t0 ? t0->format : 0, st.rt.depth ? "yes" : "no");
+    }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
     pass_ncolor = (uint32_t)st.rt.ncolor;
@@ -765,6 +869,8 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
 #define MAX_BIND 96
 typedef struct {
     ShaderInfo *vi, *fi;
+    uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
+    ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
     VkBindingInfo binds[MAX_BIND];
     int nbinds;
@@ -810,6 +916,33 @@ static void compile_program(void *arg) {
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
+static void translate_program(void *arg) {
+    Prog *p = arg;
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    pthread_mutex_lock(&translate_lock);
+    p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
+    if (p->vi->msl) {
+        p->fkey.vs_out_mask = p->vi->out_mask;
+        p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
+    }
+    pthread_mutex_unlock(&translate_lock);
+    if (!p->vi->msl) {
+        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
+        atomic_store(&p->state, 2);
+        return;
+    }
+    if (!p->fi->msl) {
+        LOG("[shader] FS translate failed: %s\n", p->fi->error);
+        atomic_store(&p->state, 2);
+        return;
+    }
+    p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    save_glsl(p->vi->msl, p->code[0], "vs");
+    save_glsl(p->fi->msl, p->code[1], "fs");
+    run_job(compile_program, p);
+}
+
 #define PROG_TAB 4096
 static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 
@@ -827,27 +960,13 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
-    size_t vmax = np->stages[0].const_offset ? np->stages[0].const_offset : 0x10000;
-    size_t fmax = np->stages[1].const_offset ? np->stages[1].const_offset : 0x10000;
-    p->vi = maxwell_translate((const uint8_t *)(uintptr_t)np->stages[0].code_addr, vmax, STAGE_VERTEX, vkey);
-    if (!p->vi->msl) {
-        LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)np->stages[0].code_addr);
-        atomic_store(&p->state, 2);
-        return p;
+    for (int i = 0; i < 2; i++) {
+        p->code[i] = np->stages[i].code_addr;
+        p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
     }
-    fkey->vs_out_mask = p->vi->out_mask;
-    p->fi = maxwell_translate((const uint8_t *)(uintptr_t)np->stages[1].code_addr, fmax, STAGE_FRAGMENT, fkey);
-    if (!p->fi->msl) {
-        LOG("[shader] FS translate failed: %s\n", p->fi->error);
-        atomic_store(&p->state, 2);
-        return p;
-    }
-    p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
-    save_glsl(p->vi->msl, np->stages[0].code_addr, "vs");
-    save_glsl(p->fi->msl, np->stages[1].code_addr, "fs");
-    run_job(compile_program, p);
+    p->vkey = *vkey;
+    p->fkey = *fkey;
+    run_translate(translate_program, p);
     return p;
 }
 
@@ -1216,6 +1335,7 @@ static void resolve_feedback(Prog *pr) {
             TexBackend *dst = snapshot_image(t, src);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
+            gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
             VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
                               .extent = {src->width, src->height, 1}};
             vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
@@ -1362,7 +1482,24 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
         if (e->tex) {
-            view = vk_view(e->tex, &e->view, e->has_view, false, st_->type);
+            // Per-frame memo: ~2400 lookups per overworld frame recomputed the view (format / range math, cache
+            // probe). The first lookup of a frame still runs vk_view (upload check); a view that may have been
+            // destroyed (eviction, image re-created) bumps vk_view_gen. LARECOMP_VK_NO_TEX_MEMO=1 disables.
+            extern uint32_t vk_view_gen;
+            extern uint64_t vk_frame_counter(void);
+            static int nomemo = -1;
+            if (nomemo < 0) nomemo = getenv("LARECOMP_VK_NO_TEX_MEMO") != NULL;
+            static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
+            uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
+            uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
+            if (!nomemo && memo[ms].tex == e->tex && memo[ms].vh == vh && memo[ms].frame == frame && memo[ms].gen == vk_view_gen &&
+                memo[ms].type == st_->type && memo[ms].has_view == e->has_view) {
+                view = memo[ms].view;
+            } else {
+                view = vk_view(e->tex, &e->view, e->has_view, false, st_->type);
+                memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
+                memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].view = view;
+            }
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
             for (int k = 0; k < nfeedback; k++)
@@ -1474,7 +1611,9 @@ static CsProg *compute_program(NvnProgram *np) {
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
+    pthread_mutex_lock(&translate_lock);
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    pthread_mutex_unlock(&translate_lock);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
@@ -1498,6 +1637,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
+    gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u)", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
     nfeedback = 0;
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
@@ -1874,6 +2014,14 @@ static void draw_(CmdRec *r, bool indexed) {
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     stat_draws++;
+    cum_draws++;
+    if (g_gpuprof_frame && gp_n) {
+        if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
+            size_t l = strlen(gp_label[gp_n - 1]);
+            snprintf(gp_label[gp_n - 1] + l, sizeof gp_label[0] - l, ", first fs %016llx", (unsigned long long)g_cur_fs_hash);
+        }
+        gp_draws[gp_n - 1]++;
+    }
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
@@ -1997,6 +2145,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
     vk_end_pass();
+    gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
     TexBackend *s = vk_tex(st_, false), *d = vk_tex(dt, true);
     renderer_mark_gpu_owned(dt);
     if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height) renderer_texture_mark_presented(st_);
@@ -2320,8 +2469,19 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER: {
+            // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow;
+            // the value is our translation time, not GPU time. LARECOMP_VK_COUNTER=frozen: the same timestamp for
+            // every counter within a presented frame (experiment).
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
-            if (out) { out[0] = 0; out[1] = SDL_GetTicksNS(); }
+            uint32_t type = (uint32_t)r->x[0];
+            static uint32_t seen;
+            if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
+            static int frozen = -1;
+            if (frozen < 0) { const char *e = getenv("LARECOMP_VK_COUNTER"); frozen = e && !strcmp(e, "frozen"); }
+            static uint64_t frame_seen = ~0ull, frame_ts;
+            extern uint64_t vk_frame_counter(void);
+            if (frozen && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = SDL_GetTicksNS(); }
+            if (out) { out[0] = 0; out[1] = frozen ? frame_ts : SDL_GetTicksNS(); }
             break;
         }
         case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
@@ -2342,6 +2502,7 @@ void backend_execute(uint64_t handle) {
     PROF_T0();
     exec_list(handle, 0);
     PROF_ADD(prof_exec);
+    if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();

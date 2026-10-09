@@ -534,7 +534,9 @@ static ViewEnt view_tab[VIEW_TAB];
 
 // Views may still be referenced by submitted or pending work: destroyed once that has completed.
 void vk_views_forget(TexBackend *b) { views_forget(b); }
+uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's per-frame texture memo)
 static void views_forget(TexBackend *b) {
+    vk_view_gen++;
     for (int i = 0; i < VIEW_TAB; i++)
         if (view_tab[i].b == b) { defer((Dead){.view = view_tab[i].view}); view_tab[i].b = NULL; view_tab[i].view = VK_NULL_HANDLE; }
 }
@@ -550,6 +552,8 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
         if (e->b == b && e->k1 == k1 && e->k2 == k2) return e->view;
         if (!e->b) break;
     }
+    extern uint64_t prof_views_created;
+    prof_views_created++;
     VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = b->image, .viewType = type,
                                 .format = fmt, .components = sw, .subresourceRange = {aspect, lv0, nlv, ly0, nly}};
     VkImageView v;
@@ -559,7 +563,7 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
         return VK_NULL_HANDLE;
     }
     ViewEnt *e = &view_tab[slot];
-    if (e->b) defer((Dead){.view = e->view});  // evict (16 probes taken)
+    if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; }  // evict (16 probes taken)
     *e = (ViewEnt){b, k1, k2, v};
     return v;
 }

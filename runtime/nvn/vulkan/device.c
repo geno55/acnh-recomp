@@ -494,6 +494,8 @@ void backend_present(NvnTexture *t) {
     } else {
         renderer_submit();
     }
+    extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
+    vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
     frames++;
     total_frames++;
     g_frame_counter++;
@@ -518,7 +520,33 @@ void backend_present(NvnTexture *t) {
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
     g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
+    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
+        extern bool g_gpuprof_frame;
+        extern void vk_gpuprof_report(void);
+        if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        const char *e = getenv("LARECOMP_GPUPROF_AT");
+        for (const char *p = e; p && *p;) {
+            long at = strtol(p, (char **)&p, 10);
+            if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
+            if (*p == ',') p++; else break;
+        }
+    }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
+    {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
+        static const char *next;
+        static int init;
+        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        while (next && *next) {
+            long at = strtol(next, (char **)&next, 10);
+            if ((long)total_frames < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
+            if ((long)total_frames == at) {
+                char path[256];
+                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
+                renderer_save_texture_tex(b, path);
+            }
+            if (*next == ',') next++;
+        }
+    }
     static long shot_from = -1;
     if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
