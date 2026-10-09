@@ -213,10 +213,8 @@ static void spawn_hole(Cpu *c, int g) {
         c->x[1] = scratch + 0x40;
         c->x[2] = g_zone;
         c->x[3] = scratch + 0x10;
-        c->x[4] = 0;
-        float one = 1.0f;
-        c->v[0] = 0;
-        memcpy(&c->v[0], &one, 4);
+        c->x[4] = 0;  // (1: the hole shows filled in)
+        c->v[0] = 0;  // s0: the shovel passes 1.0 (normal y); the hole then may drop a rupee - 0 drops nothing (checked)
         guest_call(c, SPAWN_HOLE);
         uint64_t hctrl = LD64(scratch + 8);
         if (LD64(scratch) && hctrl) {

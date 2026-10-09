@@ -91,7 +91,7 @@ def scan(romfs, leb):
     for name, screen, room in _rooms(romfs, leb):
         blocked = _blockers(room, screen)
         for i, t in enumerate(room.grid.tilesdata):
-            if t.flags3['isdigspot'] and not t.flags1['containscollision']:
+            if t.flags3['isdigspot'] and not t.flags1['containscollision'] and not t.flags1['deepwaterlava']:  # (pits)
                 out.append({'room': name, 'tile': i, 'y': t.elevation, 'blocker': blocked.get(i)})
     return out
 
@@ -208,8 +208,10 @@ def test_list(romfs, leb, out_path):
     for name, screen, room in _rooms(romfs, leb):
         grids[screen] = room.grid.tilesdata
         blocked[screen] = _blockers(room, screen)
+        # (plain Field_ locators: warping to the Manbo warp points or the swim-in at 15K crashed the test now and then)
         starts += [(a.posX, a.posZ, a.parameters[0].decode()) for a in room.actors
-                   if a.name.startswith(b'TagPlayerStart') and isinstance(a.parameters[0], bytes)]
+                   if a.name.startswith(b'TagPlayerStart') and isinstance(a.parameters[0], bytes)
+                   and a.parameters[0].startswith(b'Field_') and a.parameters[0] != b'Field_15K']
 
     def free(gx, gz, y):  # global tile coordinates (0..159, 0..127)
         screen = (gz // 8 + 1, gx // 10)
