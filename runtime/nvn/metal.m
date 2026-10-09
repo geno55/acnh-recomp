@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #include "output_scale.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
@@ -596,6 +597,54 @@ static id<MTLTexture> raw_view(id<MTLTexture> t) {
 
 static void save_png(id<MTLTexture> tex, const char *path) { renderer_save_texture(tex, path); }
 
+// MetalFX spatial upscaling (Video tab "Upscaler" = MetalFX). metalfx_upscale() decides (and sets up the scaler for
+// this input / output size); metalfx_encode() runs it and returns the upscaled image.
+static id<MTLFXSpatialScaler> g_fx;
+static id<MTLTexture> g_fx_out;
+static NSUInteger g_fx_iw, g_fx_ih, g_fx_ow, g_fx_oh;
+static MTLPixelFormat g_fx_fmt;
+static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in, double ow_d, double oh_d) {
+    (void)cb;
+    if (g_settings.upscaler != UPSCALE_METALFX) return nil;
+    static int supported = -1;
+    if (supported < 0) {
+        supported = [MTLFXSpatialScalerDescriptor supportsDevice:dev] ? 1 : 0;
+        LOG("[metalfx] spatial scaler %s\n", supported ? "available" : "not supported on this GPU");
+    }
+    if (!supported) return nil;
+    NSUInteger ow = (NSUInteger)lround(ow_d), oh = (NSUInteger)lround(oh_d);
+    if (ow <= in.width + 1 && oh <= in.height + 1) return nil;  // not an upscale: plain sampling is right
+    if (ow > 16384) ow = 16384;
+    if (oh > 16384) oh = 16384;
+    if (!g_fx || g_fx_iw != in.width || g_fx_ih != in.height || g_fx_ow != ow || g_fx_oh != oh || g_fx_fmt != in.pixelFormat) {
+        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+        d.inputWidth = in.width; d.inputHeight = in.height;
+        d.outputWidth = ow; d.outputHeight = oh;
+        d.colorTextureFormat = in.pixelFormat;
+        d.outputTextureFormat = in.pixelFormat;
+        d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;  // (gamma-encoded 8-bit image)
+        g_fx = [d newSpatialScalerWithDevice:dev];
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:in.pixelFormat width:ow height:oh mipmapped:NO];
+        td.usage = g_fx ? g_fx.outputTextureUsage | MTLTextureUsageShaderRead : MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        g_fx_out = [dev newTextureWithDescriptor:td];
+        g_fx_iw = in.width; g_fx_ih = in.height; g_fx_ow = ow; g_fx_oh = oh; g_fx_fmt = in.pixelFormat;
+        LOG("[metalfx] %lux%lu -> %lux%lu (%s)\n", (unsigned long)in.width, (unsigned long)in.height, (unsigned long)ow,
+            (unsigned long)oh, g_fx ? "ok" : "FAILED");
+    }
+    return g_fx && g_fx_out ? g_fx_out : nil;
+}
+static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
+    g_fx.colorTexture = in;
+    g_fx.inputContentWidth = in.width;
+    g_fx.inputContentHeight = in.height;
+    g_fx.outputTexture = g_fx_out;
+    [g_fx encodeToCommandBuffer:cb];
+    return g_fx_out;
+}
+
+
+
 // Debug: dump an 8-bit-per-channel 2D texture's raw bytes (alpha kept, written as a separate grey PNG).
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     if (tex.pixelFormat != MTLPixelFormatRGBA8Unorm && tex.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
@@ -752,13 +801,29 @@ void backend_present(NvnTexture *t) {
         }
         renderer_set_scale((float)sx, (float)sy);
         if (b && b->tex) {
+            id<MTLTexture> src = raw_view(b->tex);
+            // MetalFX (Video tab "Upscaler"): when the game image is smaller than its place in the window, Apple's
+            // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below
+            // still applies); the present pass then samples it about 1:1. Its own pass: the drawable's pass is
+            // ended and resumed (load) around it.
+            id<MTLTexture> up = metalfx_upscale(cb, src, vw / crop[2], vh / crop[3]);
+            if (up) {
+                [enc endEncoding];
+                up = metalfx_encode(cb, src);
+                MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp2.colorAttachments[0].texture = drawable.texture;
+                rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
+                enc = [cb renderCommandEncoderWithDescriptor:rp2];
+                src = up;
+            }
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
             [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
             [enc setRenderPipelineState:present_pipe];
             float pv[8] = {flip, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
             memcpy(g_shot_crop, crop, sizeof crop);
             [enc setVertexBytes:pv length:sizeof pv atIndex:0];
-            [enc setFragmentTexture:raw_view(b->tex) atIndex:0];
+            [enc setFragmentTexture:src atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }

@@ -405,8 +405,9 @@ static void tab_display(void) {
     if (toggle("Fullscreen", &fs)) { g_settings.fullscreen = fs; g_want_fullscreen_apply.store(true); }
     hint("Also: F11, Alt+Enter or Cmd+Ctrl+F.");
     ImGui::Spacing();
-    static const char *res[] = {"Match display", "1x (1080p)", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Dynamic"};
-    choice("Internal resolution", &g_settings.res_mode, res, 10);
+    static const char *res[] = {"Match display", "1x (1080p)", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Dynamic",
+                                "75% of display", "67% of display", "50% of display"};
+    choice("Internal resolution", &g_settings.res_mode, res, 13);
     {
         float sx, sy;
         renderer_get_scale(&sx, &sy);
@@ -416,7 +417,14 @@ static void tab_display(void) {
             snprintf(line + n, sizeof line - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
         hint(line);
     }
-    hint("Match display renders at the window's own size. 1x-8x render at that many times the Switch's 1080p "
+#ifdef __APPLE__
+    static const char *ups[] = {"Bilinear", "MetalFX"};
+    choice("Upscaler", &g_settings.upscaler, ups, 2);
+    hint("How a lower internal resolution (75% / 67% / 50%, 1x, Dynamic) is scaled up to the window. MetalFX is "
+         "Apple's spatial upscaler: sharper edges and detail than plain bilinear filtering.");
+#endif
+    hint("Match display renders at the window's own size. 75% / 67% / 50% render at that share of it (faster) "
+         "and scale up. 1x-8x render at that many times the Switch's 1080p "
          "(wide windows keep their shape; very high settings are capped at the GPU's 16384-pixel limit) and are "
          "scaled to the window - above the display size this is supersampling. Dynamic matches the display and "
          "lowers the resolution while the GPU can't hold 60 fps (the game slows down when a frame is missed), "
