@@ -239,6 +239,27 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
 }
 
+// GPU -> CPU copies: the ring is write-combined (often device-local over the BAR), where CPU reads crawl (a
+// 1280x720 screenshot took 7 s). Readbacks use one host-cached buffer instead. Every user waits for the GPU and
+// reads the data before the next readback (render thread), so a single grow-only buffer suffices.
+VkSpan vk_readback(uint64_t size) {
+    static VkBuffer buf;
+    static VmaAllocation mem;
+    static uint8_t *ptr;
+    static uint64_t cap;
+    if (size > cap) {
+        if (buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, buf, mem); }
+        cap = (size + (16 << 20) - 1) & ~((16ull << 20) - 1);
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, &info));
+        ptr = info.pMappedData;
+    }
+    return (VkSpan){buf, 0, ptr};
+}
+
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
     VkSpan s = vk_transient(size ? size : 16, align);
     if (size) memcpy(s.ptr, data, size);
@@ -1789,7 +1810,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     bool array = b->layers > 1 && b->depth == 1;
     uint32_t nz = (uint32_t)rg[5];
     uint64_t total = img * nz;
-    VkSpan out = vk_transient(total, 16);
+    VkSpan out = vk_readback(total);
     VkBufferImageCopy c = {.bufferOffset = out.off, .bufferRowLength = (uint32_t)(row / fi->bpb) * fi->bw,
                            .bufferImageHeight = (uint32_t)(img / row) * fi->bh,
                            .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect,
@@ -1971,7 +1992,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     vk_full_barrier(cb);
-    VkSpan out = vk_transient((uint64_t)w * h * 4, 16);
+    VkSpan out = vk_readback((uint64_t)w * h * 4);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     renderer_flush();
