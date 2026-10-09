@@ -96,6 +96,7 @@ int main(int argc, char **argv) {
     g_romfs_dir = strdup(romfs);
 
     loader_load(exefs);
+    { extern void qol_tick(void), settings_load(void); settings_load(); qol_tick(); }  // (blur removal: before the post-process reads it)
     kernel_init();
     dispatch_init();
 

@@ -392,6 +392,7 @@ static bool toggle(const char *label, bool *v) {
 }
 
 extern "C" void renderer_get_scale(float *sx, float *sy);
+extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
 
 static void tab_display(void) {
@@ -431,6 +432,12 @@ static void tab_display(void) {
          "raising it again when it can. Changing it briefly pauses while the render targets are rebuilt.");
     ImGui::Spacing();
     toggle("Show FPS", &g_settings.show_fps);
+    ImGui::Spacing();
+    header("Game");
+    toggle("Remove blur", &g_settings.blur_removal);
+    hint("Turns off the tilt-shift blur at the top and bottom of the screen. Takes effect the next time the game starts.");
+    toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
+    hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
 }
 
 static void tab_audio(void) {
@@ -450,6 +457,20 @@ static void tab_about(void) {
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
     hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
+    toggle("360-degree movement", &g_settings.move_360);
+    hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
+    ImGui::Spacing();
+    header("Button prompts");
+    {
+        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
+        char autol[64];
+        snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
+        choice("Button icons", &g_settings.prompts, names, 4);
+        hint("The game's button icons drawn for your controller. Auto follows the controller that's connected "
+             "(Nintendo icons with a keyboard or other pads). Buttons are matched by position: Switch A is "
+             "Xbox B / PlayStation circle.");
+    }
     ImGui::Spacing();
     header("Controls");
     ImGui::TextUnformatted("Open / close this menu:  F1, Esc, or Minus + Plus (Back + Start)");

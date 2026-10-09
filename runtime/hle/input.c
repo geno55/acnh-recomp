@@ -3,6 +3,7 @@
 // Keyboard: WASD left stick, arrows D-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR,
 //           Enter = Plus, Backspace = Minus, IJKL-style right stick on numpad 8/4/5/6.
 #include <SDL3/SDL.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,13 +98,35 @@ bool input_user_blocked(const SDL_Event *e) {
     }
 }
 
+// Controller family for the button prompts (runtime/nvn/texpatch.c): 0 Nintendo / other / none, 1 Xbox, 2 PlayStation.
+// LARECOMP_PAD_TYPE=xbox|playstation|nintendo pretends one is attached (tests).
+static _Atomic int pad_family;
+static void note_family(void) {
+    int f = 0;
+    if (pad) switch (SDL_GetGamepadType(pad)) {
+        case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: f = 1; break;
+        case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: f = 2; break;
+        default: break;
+    }
+    if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox" : f == 2 ? "PlayStation" : "Nintendo / other");
+    pad_family = f;
+}
+int input_pad_family(void) {
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("LARECOMP_PAD_TYPE");
+        env = !e ? -1 : !strcmp(e, "xbox") ? 1 : !strcmp(e, "playstation") || !strcmp(e, "ps") ? 2 : 0;
+    }
+    return env >= 0 ? env : pad_family;
+}
+
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); }
+        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         SDL_free(ids);
     }
     switch (e->type) {
@@ -113,10 +136,10 @@ void input_handle_event(const SDL_Event *e) {
         recompute_keyboard();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
-        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); }
+        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
-        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; }
+        if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; note_family(); }
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -126,7 +149,8 @@ void input_handle_event(const SDL_Event *e) {
 }
 
 // Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
-// MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT).
+// MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
+// that angle, 0 = right, 90 = up).
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
@@ -158,7 +182,7 @@ void input_frame(uint64_t frame) {
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
         unsigned long start = 0, len = 10;
         char name[32] = "";
-        if (sscanf(tok, "%lu:%31[A-Z_]:%lu", &start, name, &len) < 2) continue;
+        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
         if (frame < start || frame >= start + len) continue;
         if (!strcmp(name, "STICK_UP")) ly = 32767;
         else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
@@ -168,6 +192,10 @@ void input_frame(uint64_t frame) {
         else if (!strcmp(name, "RSTICK_DOWN")) ry = -32767;
         else if (!strcmp(name, "RSTICK_LEFT")) rx = -32767;
         else if (!strcmp(name, "RSTICK_RIGHT")) rx = 32767;
+        else if (!strncmp(name, "STICK_", 6) && name[6] >= '0' && name[6] <= '9') {
+            double r = atoi(name + 6) * 3.14159265358979 / 180;
+            lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
+        }
         for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
     }
     {  // test hooks steering the stick (runtime/hle/doorjump.c LARECOMP_DOORJUMP_TEST)
@@ -206,7 +234,9 @@ static void fill_state(Cpu *c) {
     { extern void give_item_tick(Cpu *c, uint64_t frame); extern uint64_t renderer_present_count(void);
       give_item_tick(c, renderer_present_count());
       extern void chamber_game_tick(Cpu *c, uint64_t frame);
-      chamber_game_tick(c, renderer_present_count()); }
+      chamber_game_tick(c, renderer_present_count());
+      extern void qol_tick(void);
+      qol_tick(); }
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
