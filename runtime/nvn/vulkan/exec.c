@@ -65,7 +65,12 @@ void vk_wait_seq(uint64_t seq) {
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
-    else if (r != VK_SUCCESS) FATAL("vkWaitSemaphores: %d (device lost)\n", r);
+    else if (r != VK_SUCCESS) {
+        extern void vk_devlost_dump(void);
+        vk_devlost_dump();
+        vk_device_fault_report();
+        FATAL("vkWaitSemaphores: %d (device lost)\n", r);
+    }
 }
 
 uint64_t vk_pending_seq(void) { return submit_seq + 1; }
@@ -138,6 +143,24 @@ static VkQueryPool gp_qp;
 static int gp_n;
 static char gp_label[512][112];
 static uint32_t gp_draws[512];
+// LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
+// dump ends with the command list that faulted).
+static char dl_ring[64][128];
+static unsigned dl_n;
+static int dl_on = -1;
+static void dl_note(const char *fmt, ...) {
+    if (dl_on < 0) dl_on = getenv("LARECOMP_VK_DEVLOST_TRACE") != NULL;
+    if (!dl_on) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(dl_ring[dl_n++ & 63], sizeof dl_ring[0], fmt, ap);
+    va_end(ap);
+}
+void vk_devlost_dump(void) {
+    if (dl_on != 1) return;
+    LOG("[vk] last GPU operations before the device loss (oldest first):\n");
+    for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
+}
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     if (!g_gpuprof_frame || gp_n >= 511) return;
     if (!gp_qp) {
@@ -198,7 +221,10 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
                         .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
     {
         PROF_T0();
-        VK_CHECK(vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE));
+        dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+        if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
+        VK_CHECK(sr);
         PROF_ADD(prof_submit);
     }
     pthread_mutex_lock(&seq_lock);
@@ -609,6 +635,11 @@ static void begin_pass(void) {
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    {
+        NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
+        dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
+                (void *)st.rt.depth);
+    }
     if (g_gpuprof_frame) {
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
         gp_mark(cb, "pass: %d color %ux%u fmt %#x, depth %s", st.rt.ncolor, t0 ? t0->width : 0, t0 ? t0->height : 0,
@@ -1638,6 +1669,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u)", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
+    dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     nfeedback = 0;
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
@@ -2146,6 +2178,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     if (!st_ || !dt) return;
     vk_end_pass();
     gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
+    dl_note("copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
     TexBackend *s = vk_tex(st_, false), *d = vk_tex(dt, true);
     renderer_mark_gpu_owned(dt);
     if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height) renderer_texture_mark_presented(st_);
