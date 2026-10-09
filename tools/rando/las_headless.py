@@ -190,6 +190,11 @@ def main():
     logic_defs = yaml.safe_load(rd.LOGIC_RAW)
     import copy
     item_defs = copy.deepcopy(rd.ITEM_DEFS)
+    # Escape Bottle (runtime/hle/escape.c): every seed starts with the game's third bottle as a warp item, so the pool
+    # has one Bottle less (the logic only ever needs one), a 50 Rupees in its place. Not a logic item: nothing may
+    # require it (the seed is marked only in the settings.json written at the end, never in LAS's access).
+    item_defs['bottle']['quantity'] -= 1
+    item_defs['rupee-50']['quantity'] += 1
     os.makedirs(out_dir, exist_ok=True)
     import shutil
     if os.path.isdir(os.path.join(out_dir, 'romfs')):  # regenerating into the same folder: start from vanilla files
@@ -367,6 +372,11 @@ def main():
 
     if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
+    pl = result['placements']
+    bottles = {loc: i for loc, i in pl['indexes'].items() if pl.get(loc) == 'bottle'}
+    for loc, i in bottles.items():  # the third bottle slot (index 2) is the Escape Bottle's
+        if i == 2:
+            pl['indexes'][loc] = bottles[loc] = min({0, 1} - set(bottles.values()))
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
@@ -441,6 +451,7 @@ def main():
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
+        s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker

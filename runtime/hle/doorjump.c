@@ -384,3 +384,11 @@ void doorjump_chaos_pair(int id, int *col, int *row, char *side, int *slot) {
     for (int e = 0; e < 2; e++) { col[e] = g_pairs[id].col[e]; row[e] = g_pairs[id].row[e]; side[e] = g_pairs[id].side[e]; slot[e] = g_pairs[id].slot[e]; }
 }
 bool doorjump_chaos_seen(int id) { extern bool flags_ext_get(int idx); return flags_ext_get(CHAOS_FLAG_BASE + id); }
+
+// Link's position (x, z) in the current level, for other features (runtime/hle/escape.c); false until found
+bool doorjump_player_xz(uint64_t frame, float *x, float *z) {
+    uint64_t pc = find_player(frame);
+    if (!pc) return false;
+    *x = *(float *)(uintptr_t)(pc + 0x80), *z = *(float *)(uintptr_t)(pc + 0x88);
+    return true;
+}
