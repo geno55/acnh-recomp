@@ -63,7 +63,8 @@ def pretty_item(it):
     if m:
         return pretty_item(f'{m.group(2)}-{m.group(1)}')
     if base.startswith('soul-'):  # boss souls (tools/rando/souls.py)
-        return base[5:].replace('-', ' ').title() + "'s Soul"
+        name = base[5:].replace('-', ' ').title()
+        return name + ("' Soul" if name.endswith('s') else "'s Soul")
     return ITEMS.get(base) or base.replace('-', ' ').title()
 
 

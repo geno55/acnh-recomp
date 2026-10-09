@@ -112,6 +112,7 @@ struct GenOpts {
     bool decoupled = false, pots = false, grass = false;
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
+    bool digs = false;        // digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
     int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
     bool pet_rooster = false, pet_ghost = false;  // pets in the pool (tools/rando/pets.py)
     bool pet_marin = false;   // Marin in the pool, the desert closed until she wakes the Walrus (open-desert off)
@@ -119,6 +120,7 @@ struct GenOpts {
     bool trendsanity = false; // every Trendy Game prize is a check (tools/rando/trendsanity.py)
     bool boss_souls = false;  // boss-souls: a boss only appears once its soul is found (tools/rando/souls.py)
     bool hookshot_any = false;  // hookshot-anything: latches onto any surface (runtime/hle/hookshot.c, hookshot_logic.py)
+    bool miniboss_souls = false;  // miniboss-souls: a dungeon mini-boss only appears once its soul is found (souls.py)
 };
 static GenOpts g_opts;
 
@@ -142,7 +144,8 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
-                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any};
+                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
+                 &o.digs, &o.miniboss_souls};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -270,8 +273,8 @@ static void start_generation(void) {
             g_opts.open_mabe ? "true" : "false", g_opts.fast_songs ? "true" : "false", g_opts.ohko ? "true" : "false",
             g_opts.boss_cutscenes ? "true" : "false", g_opts.spoiler ? "true" : "false");
     fprintf(f, " \"starting-rupees\": %d, \"blur-removal\": false,\n", g_opts.start_rupees);
-    fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s,\n", g_opts.pots ? "true" : "false",
-            g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false");
+    fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s, \"digs\": %s,\n", g_opts.pots ? "true" : "false",
+            g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false", g_opts.digs ? "true" : "false");
     fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
                " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
             g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
@@ -288,7 +291,8 @@ static void start_generation(void) {
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     static const char *shop[] = {"off", "vanilla", "random"};
     fprintf(f, " \"shopsanity\": \"%s\", \"trendsanity\": %s,\n", shop[g_opts.shopsanity], g_opts.trendsanity ? "true" : "false");
-    fprintf(f, " \"boss-souls\": %s,\n", g_opts.boss_souls ? "true" : "false");
+    fprintf(f, " \"boss-souls\": %s, \"miniboss-souls\": %s,\n", g_opts.boss_souls ? "true" : "false",
+            g_opts.miniboss_souls ? "true" : "false");
     fprintf(f, " \"hookshot-anything\": %s,\n", g_opts.hookshot_any ? "true" : "false");
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
@@ -613,13 +617,27 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Bushes hold items", &g_opts.bushes);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
+        ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 310 more checks; bushes over a hole and tall\n"
+                          "grass stay as they are).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Digsanity", &g_opts.digs);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("INSANE: every diggable tile on the overworld is a check - about 5,000 more checks, and most of\n"
+                          "the important items end up buried somewhere. The first dig of a tile gives its item; grass and\n"
+                          "bushes have to be cut first. Holes stay dug, so you can see where you have already dug.");
     ImGui::Checkbox("Boss souls", &g_opts.boss_souls);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the\n"
-                          "boss isn't in its lair: its room is empty and open, and its Heart Container and instrument (the\n"
-                          "Color Dungeon: the fairy's reward) can't be had. Found souls show on the Items screen.");
+                          "boss isn't in its lair: the room is empty, the way on to the instrument stays shut until the boss\n"
+                          "is beaten, and you leave the way you came. Found souls show on the Items screen.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Mini-boss souls", &g_opts.miniboss_souls);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Each kind of dungeon mini-boss (Rolling Bones, Hinox, Master Stalfos, ...) has a soul hidden among the\n"
+                          "items; one soul counts for every fight with that kind. Until you find it the mini-boss doesn't show\n"
+                          "up: its room's way on stays shut and you leave the way you came. Mini-bosses among overworld\n"
+                          "enemies aren't affected. Found souls show on the Items screen.");
     static const char *shopn[] = {"Off", "Vanilla prices", "Random prices"};
     combo("Shopsanity", &g_opts.shopsanity, shopn, 3);
     if (ImGui::IsItemHovered())

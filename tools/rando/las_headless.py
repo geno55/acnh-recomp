@@ -95,7 +95,8 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
-        'bushes': False, 'boss-souls': False,
+        'bushes': False, 'boss-souls': False, 'miniboss-souls': False,
+        'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
@@ -215,11 +216,14 @@ def main():
         if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
             d['type'] = 'important'
 
-    if settings.get('boss-souls'):  # boss souls: a boss only appears once its soul is found (tools/rando/souls.py)
-        import souls as souls_mod
+    import souls as souls_mod  # boss / mini-boss souls: it only appears once its soul is found (tools/rando/souls.py)
+    soul_kinds = souls_mod.enabled(settings)
+    soul_cat = None
+    if soul_kinds:
         from RandomizerCore.Randomizers import chests as las_chests
-        print('boss souls:', souls_mod.add_to_logic(logic_defs, item_defs), 'in the pool', flush=True)
-        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(b[1]) for b in souls_mod.BOSSES]
+        soul_cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
+        print('souls:', souls_mod.add_to_logic(logic_defs, item_defs, soul_kinds, soul_cat), 'in the pool', flush=True)
+        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(s[1], s[0]) for s in souls_mod.souls(soul_kinds)]
 
     pot_locs = {}
     if settings.get('pots'):
@@ -239,6 +243,13 @@ def main():
         bush_locs = bushes_mod.add_to_logic(bushes_mod.scan(romfs, leb), logic_defs, item_defs,
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
+
+    dig_locs, dig_tiles = {}, []
+    if settings.get('digs'):  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
+        import digs as digs_mod
+        dig_tiles = digs_mod.scan(romfs, leb)
+        dig_locs = digs_mod.add_to_logic(dig_tiles, logic_defs, item_defs)
+        print('digs:', len(dig_locs), 'locations of', len(dig_tiles), 'dig tiles', flush=True)
 
     import shopsanity
     import trendsanity
@@ -343,6 +354,12 @@ def main():
                 if k in logic_defs:
                     print(k, '=', logic_defs[k].get('condition-basic'), flush=True)
             sys.exit(0)
+    if 'mini' in soul_kinds:  # mini-boss rooms of vanilla-layout dungeons: what lies behind needs the soul
+        import dungeon_gen
+        vanilla = [lv for lv in dungeon_gen.ENTRANCES if not room_plan or lv not in room_plan[0]]
+        print('mini-boss souls on vanilla dungeons:', souls_mod.vanilla_gate(
+            soul_cat, romfs, logic_defs, vanilla, {n: p['room'] for n, p in pot_locs.items() if p.get('room')}),
+            'conditions', flush=True)
 
     result = {}
     errors = []
@@ -446,8 +463,9 @@ def main():
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
 
-    if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
-        print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
+    if pot_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
+        import pots as _pots
+        print('pot refills marked:', _pots.mark_refills(result['placements']), flush=True)
     pl = result['placements']
     bottles = {loc: i for loc, i in pl['indexes'].items() if pl.get(loc) == 'bottle'}
     for loc, i in bottles.items():  # the third bottle slot (index 2) is the Escape Bottle's
@@ -487,10 +505,11 @@ def main():
     if pets:
         from RandomizerCore.Tools import event_tools, oead_tools
         print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
-    if settings.get('boss-souls'):
+    if soul_kinds:
         import msbt
         from RandomizerCore.Tools import event_tools, oead_tools
-        print('boss souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt), flush=True)
+        print('souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt, soul_kinds, soul_cat),
+              flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data
@@ -551,6 +570,14 @@ def main():
 
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
+    if dig_locs:
+        from RandomizerCore.Tools import oead_tools
+        from RandomizerCore.Randomizers import item_get
+        stage('Burying items', 0.95)
+        lines = digs_mod.apply(dig_locs, dig_tiles, mods, out_dir, romfs, oead_tools, item_get)
+        with open(os.path.join(out_dir, f'digs_{settings["seed"]}.txt'), 'w') as f:
+            f.write('Digs:\n' + '\n'.join(lines) + '\n')
+        print('digs placed:', len(lines), flush=True)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)

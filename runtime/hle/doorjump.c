@@ -90,6 +90,7 @@ static void load(void) {
 static uint64_t g_player;          // find_player: the PlayerCollision component found last
 static uint64_t g_player_scan;     // frame of the last heap scan
 static char g_player_level[64];    // level it was found in
+static int g_player_rescan;        // (a warp within the same level: the old player can't be told apart either)
 extern uint64_t g_stick_freeze_until;  // (below)
 static uint64_t g_hold_until;      // place_tick: Link held at a far jump's landing spot until this frame
 
@@ -101,6 +102,7 @@ RT_ON_RESET(doorjump_reset) {
     g_npairs = 0;
     g_player = g_player_scan = 0;
     g_player_level[0] = 0;
+    g_player_rescan = 0;
     g_hold_until = 0;
     g_stick_freeze_until = 0;
 }
@@ -116,7 +118,8 @@ static int is_player_collision(uint64_t p) {
 static uint64_t find_player(uint64_t frame) {
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
-    if (strncmp(g_player_level, lv, sizeof g_player_level - 1)) {  // new level: rescan once it has settled
+    if (strncmp(g_player_level, lv, sizeof g_player_level - 1) || g_player_rescan) {  // new level: rescan once settled
+        g_player_rescan = 0;
         strlcpy(g_player_level, lv, sizeof g_player_level);
         g_player = 0;
         g_player_scan = frame;
@@ -144,7 +147,7 @@ static uint64_t find_player(uint64_t frame) {
     return g_player;
 }
 
-uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (test hooks elsewhere: hookshot.c)
+uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (test hooks elsewhere: hookshot.c; digsanity: digs.c)
 
 // LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side> (test): from <frame> on, once the level with jumps has been loaded
 // for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway; the test holds the
@@ -405,6 +408,7 @@ void doorjump_chaos_pair(int id, int *col, int *row, char *side, int *slot) {
 bool doorjump_chaos_twoway(int id) { return g_pairs[id].two; }  // false: Madness, end 0 leads to end 1 only
 bool doorjump_chaos_seen(int id) { extern bool flags_ext_get(int idx); return flags_ext_get(CHAOS_FLAG_BASE + id); }
 
+void doorjump_player_rescan(void) { g_player_rescan = 1; }
 // Link's position (x, z) in the current level, for other features (runtime/hle/escape.c); false until found
 bool doorjump_player_xz(uint64_t frame, float *x, float *z) {
     uint64_t pc = find_player(frame);

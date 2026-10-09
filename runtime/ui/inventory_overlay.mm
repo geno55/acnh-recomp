@@ -1,7 +1,8 @@
 // Inventory overlay for randomizer seeds: while the pause menu's Items page is shown, a panel along its bottom
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
 // game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
-// dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found.
+// dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found;
+// with mini-boss souls on, a strip above the panel lists the mini-boss kinds' souls.
 // The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
 #include <math.h>
 #include <stdint.h>
@@ -17,6 +18,7 @@ extern "C" {
 #include "../settings.h"
 uint64_t renderer_present_count(void);
 int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in this seed
+const char *souls_at(int i, int *kind, bool *owned);
 }
 
 #define DUNGEON_RECORDS (MAIN_BASE + 0x1CBB220 + 0xE0)  // live save: 0x10-byte records (+0 keys, +1 item bits)
@@ -177,6 +179,23 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
             ImVec2 k(b.x - 9 * u, a.y + 3 * u);
             ImVec2 pts[3] = {ImVec2(k.x, k.y + 4 * u), ImVec2(k.x + 2.5f * u, k.y + 6.5f * u), ImVec2(k.x + 7 * u, k.y)};
             dl->AddPolyline(pts, 3, IM_COL32(140, 210, 110, 255), 0, 1.8f * u);
+        }
+    }
+    // mini-boss souls (one per kind): a strip above the panel, found ones lit with a wisp
+    const char *mn[16];
+    bool mo[16];
+    int nm = 0, kind;
+    bool owned;
+    for (int i = 0; const char *nmi = souls_at(i, &kind, &owned); i++)
+        if (kind == 1 && nm < 16) mn[nm] = nmi, mo[nm++] = owned;
+    if (nm) {
+        float sy0 = p0.y - 40 * u, sy1 = p0.y - 6 * u, sw = (p1.x - p0.x) / nm, sfs = 15 * u;
+        dl->AddRectFilled(ImVec2(p0.x, sy0), ImVec2(p1.x, sy1), IM_COL32(52, 38, 20, 205), 10 * u);
+        for (int i = 0; i < nm; i++) {
+            float x0 = p0.x + sw * i;
+            soul_icon(dl, ImVec2(x0 + 12 * u, (sy0 + sy1) * 0.5f + 4 * u), 20 * u, mo[i]);
+            dl->AddText(font, sfs, ImVec2(x0 + 22 * u, (sy0 + sy1 - sfs) * 0.5f),
+                        mo[i] ? IM_COL32(255, 240, 200, 255) : IM_COL32(150, 130, 100, 200), mn[i]);
         }
     }
 }
