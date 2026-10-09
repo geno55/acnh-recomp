@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "rt.h"
+#include "hle.h"
 
 extern const uint64_t main_fn_addrs[], sdk_fn_addrs[];
 extern const GuestFn main_fn_ptrs[], sdk_fn_ptrs[];
@@ -90,13 +90,15 @@ uint64_t guest_sym(const char *name) {
     return a;
 }
 
+static uint64_t hle_next = HLE_HEAP;
+RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
+
 void *hle_alloc(uint64_t size) {
-    static uint64_t next = HLE_HEAP;
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
-    uint64_t a = next;
-    next += (size + 63) & ~63ull;
-    if (next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
+    uint64_t a = hle_next;
+    hle_next += (size + 63) & ~63ull;
+    if (hle_next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
     pthread_mutex_unlock(&m);
     plat_commit(a, size);
     memset((void *)a, 0, size);
@@ -130,6 +132,7 @@ static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
+        rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
             if (hle_slots[i].fn) return hle_slots[i].fn;

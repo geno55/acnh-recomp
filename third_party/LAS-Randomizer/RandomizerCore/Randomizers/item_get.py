@@ -1,6 +1,9 @@
 import RandomizerCore.Tools.event_tools as event_tools
 from RandomizerCore.Randomizers import data
 
+# LARecomp pets (tools/rando/pets.py, set by las_headless): the Ghost is an item, so the Surf Harp leaves his quest
+# at "take me to my grave" (Ghost4_Clear unset) - the grave and its Owl reward then need the Ghost found
+GHOST_PET = False
 
 
 # Inserts an AddItemByKey and a GenericItemGetSequenceByKey, or a progressive item switch (depending on the item).
@@ -197,11 +200,11 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False}),
             ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': ''})
         ], after)
-    
+
 
     ### tunics
     if item == 'ClothesRed':
@@ -408,7 +411,7 @@ def insertItemWithoutAnimation(item, index):
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False})
         ]
     
@@ -659,7 +662,7 @@ def insertDampeItemGet(flowchart, item, index, after=None):
             ('EventFlags', 'SetFlag', {'symbol': 'GhostClear1', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost2_Clear', 'value': True}),
             ('EventFlags', 'SetFlag', {'symbol': 'Ghost3_Clear', 'value': True}),
-            ('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True}),
+        ] + ([] if GHOST_PET else [('EventFlags', 'SetFlag', {'symbol': 'Ghost4_Clear', 'value': True})]) + [
             ('Inventory', 'AddItemByKey', {'itemKey': item, 'count': 1, 'index': index, 'autoEquip': False}),
         ], after)
     

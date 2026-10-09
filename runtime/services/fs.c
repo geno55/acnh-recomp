@@ -35,6 +35,24 @@ static RomFile *rom_files;
 static int rom_nfiles;
 static uint64_t rom_data_off;
 
+// Reboot: the next seed builds its own index / overlay when the game opens the RomFS again.
+RT_ON_RESET(fs_reset) {
+    for (int i = 0; i < ov_n; i++) {
+        if (ov[i].fd >= 0) close(ov[i].fd);
+        free(ov[i].path);
+    }
+    for (int i = 0; i < npatches; i++) free(patches[i].data);  // (ov_meta and the extended table are among these)
+    for (int i = 0; i < rom_nfiles; i++) free(rom_files[i].path);
+    free(ov), free(rom_files);
+    ov = NULL, ov_n = ov_cap = 0;
+    ov_meta = NULL, ov_meta_off = ov_meta_size = ov_end = 0;
+    npatches = 0;
+    rom_files = NULL, rom_nfiles = 0, rom_data_off = 0;
+    if (romfs_fd >= 0) close(romfs_fd);
+    romfs_fd = -1;
+    g_save_dir = "save";
+}
+
 static int rom_cmp(const void *a, const void *b) {
     const RomFile *x = a, *y = b;
     return x->off < y->off ? -1 : x->off > y->off;

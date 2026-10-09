@@ -48,13 +48,16 @@ class ItemShuffler(QtCore.QThread):
         self.vanilla_locations = {k for k, v in self.logic_defs.items()
                             if v['type'] == 'item'
                             and v['subtype'] not in ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')}
-        self.vanilla_locations.add('trendy-prize-1') # yoshi doll stays until trendy is properly shuffled
-        self.vanilla_locations.add('trendy-prize-2')
-        self.vanilla_locations.add('trendy-prize-3')
-        self.vanilla_locations.add('trendy-prize-4')
-        self.vanilla_locations.add('trendy-prize-5')
-        self.vanilla_locations.add('trendy-prize-6')
-        self.vanilla_locations.add('trendy-prize-final')
+        if not self.settings.get('trendsanity'):  # LAS Recomp: tools/rando/trendsanity.py shuffles them
+            self.vanilla_locations.add('trendy-prize-1') # yoshi doll stays until trendy is properly shuffled
+            self.vanilla_locations.add('trendy-prize-2')
+            self.vanilla_locations.add('trendy-prize-3')
+            self.vanilla_locations.add('trendy-prize-4')
+            self.vanilla_locations.add('trendy-prize-5')
+            self.vanilla_locations.add('trendy-prize-6')
+            self.vanilla_locations.add('trendy-prize-final')
+        if self.settings.get('shopsanity', 'off') != 'off':  # LAS Recomp: tools/rando/shopsanity.py
+            self.vanilla_locations -= {k for k, v in self.logic_defs.items() if v.get('subtype') == 'shop'}
 
         # if blupsanity is not enabled, add the checks to the vanilla locations
         if not self.settings['blupsanity']:
@@ -549,7 +552,9 @@ class ItemShuffler(QtCore.QThread):
             
             # Place the defined vanilla content
             placements[loc] = self.logic_defs[loc]['content']
-            
+
+            if placements[loc] not in items:  # (LAS Recomp: say which, instead of a bare ValueError)
+                raise ValueError(f"vanilla content {placements[loc]!r} of {loc} is not in the item pool")
             items.remove(placements[loc])
             access = self.removeAccess(access, placements[loc])
             locations.remove(loc)
@@ -623,6 +628,11 @@ class ItemShuffler(QtCore.QThread):
                         location_pool.append(location_pool.pop(0))
                         if location_pool[0] == first_location_tried: 
                             # If we tried every location and none work, undo the previous placement and try putting it somewhere else. Also rerandomize the location list to ensure things aren't placed back in the same spots
+                            if not placement_tracker:  # (LAS Recomp: say what, instead of an IndexError)
+                                raise RuntimeError(f"can't place {item} in D{i}: none of {sorted(location_pool)} is "
+                                                   "reachable without it" + ''.join(
+                                    f"\n  {l}: {self.logic_defs[l].get('condition-basic')}" for l in sorted(location_pool)
+                                    if verbose))
                             undo_location = placement_tracker.pop(0)
                             location_pool.append(undo_location)
                             locations.append(undo_location)
@@ -697,6 +707,16 @@ class ItemShuffler(QtCore.QThread):
             access = self.removeAccess(access, items.pop(0))
             locations.remove('tarin')
         
+        # LAS Recomp: one item per location - room shuffle key counts can leave the pool a few items over; drop junk
+        extra = len(items) - len(locations)
+        for k in range(len(items) - 1, -1, -1):
+            if extra <= 0:
+                break
+            if self.item_defs[items[k]]['type'] == 'junk':
+                if verbose: print(f'(pool over by {extra}: {items[k]} dropped)')
+                items.pop(k)
+                extra -= 1
+
         # Do a very similar process for all other items
         while items and self.thread_active:
             item = items[0]
@@ -778,7 +798,8 @@ class ItemShuffler(QtCore.QThread):
                     and placements[k].startswith(('compass', 'map', 'stone-beak', 'key-', 'nightmare-key'))
                     and placements[k][-2:-1] == 'D' and placements[k][-1].isdigit()]:
             n = int(placements[key][-1])
-            if key.startswith(f'D{n}-'):
+            # (dungeon room shuffle: the dungeon the check's room is in now, not the one its name says)
+            if self.settings.get('dungeon-of', {}).get(key, key[:2]) == f'D{n}':
                 continue
             placements['indexes'][key] = 9 if n == 0 else n - 1
         # dungeon_indexes = [k for k in placement_tracker if placements[k].startswith(('compass', 'map', 'stone', 'key', 'nightmare'))]

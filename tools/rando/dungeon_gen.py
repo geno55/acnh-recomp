@@ -750,7 +750,7 @@ def dead_ends(cat, level, layout):
     return out
 
 
-def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
+def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness=False):
     """Chaos: pairs every free doorway that isn't physically joined with another one (any room of the level, any
     side) -> door_jumps rows (level, cell, side, own centre, partner centre, partner cell, partner side), both ways.
     Pieces joined physically (incl. the stairs network) are linked first (a random spanning tree), the rest pair at
@@ -805,6 +805,8 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
     pairs = []
     if any(k not in by_comp for k in order) and len(order) > 1:
         return None  # a piece without a free doorway can't be reached
+    if madness:
+        return _madness_rows(level, layout, order, by_comp, rng, romfs_for_tiles, cat)
     # spanning tree: each next piece links to the linked piece with the most free doorways left
     linked = [order[0]] if order else []
     for k in order[1:]:
@@ -833,18 +835,58 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None):
                 break
     if rest:
         pairs.append((rest[0], rest[0]))  # odd one out: leads back into its own doorway (a wall; no map letter)
-    def own_door(cell, side, slot):  # the room's own door in that doorway: arrive past it (it may still be shut)
-        return any(not d[2].endswith('(mirror)') and d[0] == side and abs(d[3] - slot) <= 1
-                   for d in cat[layout[cell]]['doors'] if len(d) > 3)
     out = []
     for a, b in pairs:
         for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
-            depth, height = landing_depth(romfs_for_tiles, layout[y[1]], y[2], y[3], 1 if own_door(y[1], y[2], y[3]) else 0)
-            out.append((level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height))
+            out.append(_jump_row(cat, level, layout, romfs_for_tiles, x, y))
     return out
 
 
-def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
+def _jump_row(cat, level, layout, romfs, x, y):
+    """door_jumps row: out of doorway x (stub: (pos, cell, side, slot)), in at doorway y."""
+    # the room's own door in that doorway: arrive past it (it may still be shut)
+    own = any(not d[2].endswith('(mirror)') and d[0] == y[2] and abs(d[3] - y[3]) <= 1
+              for d in cat[layout[y[1]]]['doors'] if len(d) > 3)
+    depth, height = landing_depth(romfs, layout[y[1]], y[2], y[3], 1 if own else 0)
+    return (level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height)
+
+
+def _madness_rows(level, layout, order, by_comp, rng, romfs, cat):
+    """Madness (Chaos with decoupled doorways): every free doorway leads out to some doorway and is where some other
+    doorway leads in - a permutation of the doorways. A ring through every piece first (piece i's exit -> piece i+1's
+    arrival) keeps the whole dungeon reachable and escapable (strongly connected); the rest at random, never into the
+    room it leaves."""
+    stubs = [x for k in order for x in by_comp.get(k, ())]
+    if not stubs:
+        return []
+    ring = [k for k in order if by_comp.get(k)]
+    exits, arrivals = {}, {}
+    for k in ring:
+        v = by_comp[k][:]
+        rng.shuffle(v)
+        exits[k], arrivals[k] = v[0], v[-1]  # (one doorway only: it's both)
+    link = {}
+    if len(ring) > 1:
+        for i, k in enumerate(ring):
+            link[exits[k]] = arrivals[ring[(i + 1) % len(ring)]]
+    free_out = [x for x in stubs if x not in link]
+    free_in = [x for x in stubs if x not in set(link.values())]
+    for _ in range(50):
+        rng.shuffle(free_in)
+        if all(a[1] != b[1] for a, b in zip(free_out, free_in)):
+            break
+    else:  # swap away what still leads into its own room
+        for i, a in enumerate(free_out):
+            if free_in[i][1] == a[1]:
+                for j in range(len(free_in)):
+                    if free_in[j][1] != a[1] and free_in[i][1] != free_out[j][1]:
+                        free_in[i], free_in[j] = free_in[j], free_in[i]
+                        break
+    link.update(zip(free_out, free_in))
+    return [_jump_row(cat, level, layout, romfs, x, y) for x, y in sorted(link.items())]
+
+
+def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, settings=None):
     """Chaos dungeon room shuffle for every dungeon of a seed: each room used once (no duplicates); physical
     placement keeps doorways that can't jump matched; free doorways are paired by chaos_pairs.
     Returns ({level: layout}, [door_jumps rows])."""
@@ -924,9 +966,12 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None):
         for lv in levels:
             # (pairs that put the dungeon behind its boss door - only the boss and instrument may need the Nightmare
             # Key - are drawn again)
-            for _ in range(20):
-                j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs)
-                if j is None or room_logic.boss_door_ok(cat, romfs, lv, out[lv], j):
+            # (and pairs whose keys can't all be placed in the dungeon: see room_logic.fill_ok)
+            for _ in range(60):
+                j = chaos_pairs(cat, lv, out[lv], ENTRANCES[lv], rng, romfs, madness=madness)
+                if j is None or (room_logic.boss_door_ok(cat, romfs, lv, out[lv], j) and
+                                 (settings is None or settings.get('keysanity', 'off') != 'off' or
+                                  room_logic.fill_ok(cat, romfs, lv, out[lv], j, settings))):
                     break
             else:
                 j = None

@@ -28,7 +28,7 @@ BOSSES = [
     (8, 'Hot Head', 0x6a, 'kill-hothead', 'Lv08TurtleRock'),
     (0, 'Evil Orb', 0x62, 'kill-evil-orb', 'Lv10ClothesDungeon'),
 ]
-ITEM_ID_BASE = 71  # Items.gsheet itemIDs 71.. are unused (LAS's extra rows take 63-70, 127+, 200+; <128 can be added)
+ITEM_ID_BASE = 80  # Items.gsheet itemIDs 80-88: unused (LAS's extra rows: 63-70, 127+, 200+; pets carry 79; shop 230+)
 FAIRY_QUEEN = 0x6D0024005CF48AC2  # the Color Dungeon's Great Fairy (Lv10ClothesDungeon_04C): its tunics are the reward
 JUNK = ('rupee-50', 'rupee-20', 'rupee-100', 'rupee-300')  # pool junk the souls replace
 MODEL = {'model-path': 'ItemSecretMedicine.bfres', 'model-name': 'SecretMedicine', 'npc-key': 'ItemSecretMedicine'}
