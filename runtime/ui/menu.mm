@@ -308,6 +308,8 @@ static void init(void) {
     const char *paths[] = {"/System/Library/Fonts/Avenir Next.ttc", "/System/Library/Fonts/Helvetica.ttc",
                            "C:/Windows/Fonts/segoeui.ttf"};
     for (const char *p : paths) {
+        if (FILE *f = fopen(p, "rb")) fclose(f);  // a missing file is an assertion in ImGui, not a NULL return
+        else continue;
         if (!g_font) g_font = io.Fonts->AddFontFromFileTTF(p, 34, &cfg);
         if (g_font && !g_font_big) { ImFontConfig b = cfg; b.FontNo = 0; g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &b); }
     }
