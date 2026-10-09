@@ -1,15 +1,19 @@
 // Escape Bottle: every randomizer seed made with it (settings.json "escape-bottle": tools/rando/las_headless.py drops
 // one Bottle from the item pool) starts with the game's THIRD bottle (inventory bit 15, item slot 0xf) as the Escape
-// Bottle. Equipped on X / Y and used: inside a dungeon Link warps to that dungeon's entrance (the entrance room stays at
-// its own cell in shuffled layouts: tools/rando/dungeon_gen.py ENTRANCES), anywhere else to Marin & Tarin's house
-// (MarinTarinHouse_01A: just inside the front door, where the game puts Link coming in from the village).
+// Bottle: Tarin hands it over with the starting items, in the game's own get-item message
+// (tools/rando/escape_bottle.py). Equipped on X / Y and used: inside a dungeon Link warps to that dungeon's entrance
+// (the entrance room stays at its own cell in shuffled layouts: tools/rando/dungeon_gen.py ENTRANCES), anywhere else
+// to Marin & Tarin's house (MarinTarinHouse_01A: just inside the front door, where the game puts Link coming in from
+// the village).
 //
 // Why the third bottle: it is a real inventory item, so it gets an item-page slot, X / Y assignment and the game's own
 // "may Link use an item now?" rules for free: the use is caught in the game's predicate for that slot
 // (tools/patches.py BOTTLE3_USE_SITE), which only runs while Link is free to act - no cutscene, dialog, menu, level
 // or room transition. A bottle that never swings never catches anything, so it stays empty. Not usable in boss arenas
-// (rect per arena below: the fight would be left half done) or Dampe's chambers (chamber.c keeps run state).
-// Nothing in the item logic knows about it (convenience only).
+// (rect per arena below: the fight would be left half done) or Dampe's chambers (chamber.c keeps run state): there it
+// does nothing (no swing either: a fairy caught in it would turn it into a fairy bottle).
+// Nothing in the item logic knows about it (convenience only). Items page: a name tag under its slot (item names are
+// hidden in randomizer seeds; runtime/ui/inventory_overlay.mm).
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +23,6 @@
 #include "../rando.h"
 
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: level name at +0, inventory bits at +0xa8
-extern void ui_toast(const char *text);
 extern uint64_t renderer_present_count(void);
 extern int game_in_play(void);
 extern int warp_busy(void);
@@ -90,7 +93,6 @@ int rt_bottle3_use(void) {
     last = frame;
     const char *lv = cur_level();
     if (!strncmp(lv, "Panel", 5) || in_boss_arena(lv, frame)) {
-        ui_toast("The Escape Bottle doesn't work here");
         LOG("[escape] refused in %s\n", lv);
         return 1;
     }
@@ -98,14 +100,15 @@ int rt_bottle3_use(void) {
     for (size_t i = 0; i < sizeof kEntrance / sizeof kEntrance[0]; i++)
         if (!strcmp(lv, kEntrance[i][0])) to = kEntrance[i];
     LOG("[escape] used in %s -> %s / %s\n", lv, to[0], to[1]);
-    ui_toast(to == kHome ? "Escape Bottle  -  home to Mabe Village" : "Escape Bottle  -  back to the dungeon entrance");
     warp_request(to[0], to[1]);
     return 1;
 }
 
 void escape_tick(Cpu *c, uint64_t frame) {
     (void)c;
-    static long at = -2;  // LARECOMP_SET8=<frame>:<hex addr>:<hex byte>[,...] (test hook: set save bytes, e.g. X / Y slots)
+    // LARECOMP_SET8=<frame>:<hex addr>:<hex byte>[,...] (test: set save bytes, e.g. live save +0x5562 = the item slot on
+    // Y, +0x5563 on X - the game's equip predicates read +0xa2 with Y, +0xa3 with X)
+    static long at = -2;
     static char spec[256];
     if (at == -2) {
         at = -1;
@@ -125,14 +128,6 @@ void escape_tick(Cpu *c, uint64_t frame) {
         at = -1;
     }
     if (!active() || !game_in_play()) return;
-    uint64_t ps = LD64(PLAYER_STATUS_PTR);
-    if (!ps) return;
-    volatile uint8_t *inv = (volatile uint8_t *)(uintptr_t)(ps + 0xa9);  // inventory bits 8-15; bit 15 = third bottle
-    if (!(*inv & 0x80)) {  // given at the start (and back on older saves of the seed)
-        *inv |= 0x80;
-        ui_toast("You have the Escape Bottle!  Use it to return to a dungeon's entrance, or home");
-        LOG("[escape] given\n");
-    }
     // keep Link's position cached in boss levels (doorjump.c finds it by a heap scan after each level load)
     const char *lv = cur_level();
     for (size_t i = 0; i < sizeof kBossArena / sizeof kBossArena[0]; i++)
@@ -141,4 +136,10 @@ void escape_tick(Cpu *c, uint64_t frame) {
             doorjump_player_xz(frame, &x, &z);
             break;
         }
+}
+
+// Items page name tag (runtime/ui/inventory_overlay.mm)
+bool escape_bottle_owned(void) {
+    uint64_t ps = LD64(PLAYER_STATUS_PTR);
+    return active() && ps && (LD8(ps + 0xa9) & 0x80);
 }

@@ -527,6 +527,8 @@ def main():
         if bush_locs:
             print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
 
+    import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
+    print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
     import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
     keysanity_text.apply(out_dir, romfs, result['placements'])
 
