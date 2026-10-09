@@ -140,6 +140,22 @@ def strip(node, drop):
     return (parts[0] if len(parts) == 1 else (kind, parts)), any_s
 
 
+def falsify(node, bad):
+    """The condition with the atoms for which bad(atom) is true taken as never satisfied (None = never)."""
+    if node is None:
+        return None
+    kind = node[0]
+    if kind == 'atom':
+        return None if bad(node[1]) else node
+    if kind == '!':
+        return node
+    parts = [falsify(c, bad) for c in node[1]]
+    if kind == '&':
+        return None if any(p is None for p in parts) else ('&', parts)
+    parts = [p for p in parts if p is not None]
+    return None if not parts else parts[0] if len(parts) == 1 else ('|', parts)
+
+
 def show(node):
     if node is None:
         return ''
@@ -527,10 +543,55 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
     if left < 0 and 'rupee-20' in item_defs:
         item_defs['rupee-20']['quantity'] -= left
     shuffled = {LEVELS[lv][0] for lv in layouts}
+    # events and interactions that name vanilla cells of a shuffled dungeon: D<n>-clear = reach the boss arena of the
+    # new layout + what the event needs there; others (ammo from a dungeon room's pots) lose those alternatives - the
+    # room at that cell is another one now. Then vanilla key counts (D0-clear: key-D0:3; the new layout can have fewer
+    # keys - seed DevWarp2: the Color Dungeon clear unreachable): every key of the new layout, the safe bound
+    cell_tok = re.compile(r'D(\d)-\d\d?[A-P]$')
+    for k, v in logic_defs.items():
+        if v.get('type') in ('item', 'room') or k == 'face-shrine':
+            continue
+        m = re.match(r'D(\d)-clear$', k)
+        if m and int(m.group(1)) in shuffled:
+            lv = next(l for l, (i, _) in LEVELS.items() if i == int(m.group(1)))
+            arena = cell_expr.get((lv, boss_cell.get(lv)))
+            if arena:
+                rest, _ = strip(parse(v.get('condition-basic', '')), lambda a: cell_tok.match(a) or
+                                re.match(r'key-D\d(:\d+)?$', a))
+                v['condition-basic'] = f'({arena}) & ({show(rest)})' if rest else arena
+            continue
+        for key in ('condition-basic', 'condition-advanced', 'condition-glitched', 'condition-hell'):
+            c = v.get(key)
+            if c and any(int(x) in shuffled for x in re.findall(r'\bD(\d)-\d\d?[A-P]\b', c)):
+                n2 = falsify(parse(c), lambda a: bool(cell_tok.match(a)) and int(cell_tok.match(a).group(1)) in shuffled)
+                v[key] = show(n2) if n2 else 'nightmare-key-D0 & !nightmare-key-D0'  # (never)
+    for k, v in logic_defs.items():
+        if v.get('type') in ('item', 'room'):
+            continue
+        for key in ('condition-basic', 'condition-advanced', 'condition-glitched', 'condition-hell'):
+            c = v.get(key)
+            if c and re.search(r'key-D\d:\d+', c):
+                v[key] = re.sub(r'key-D(\d):\d+', lambda m: f'key-D{m.group(1)}:{lock_count[int(m.group(1))]}'
+                                if int(m.group(1)) in shuffled and lock_count.get(int(m.group(1))) else m.group(0), c)
     region_tok = {k for k, v in logic_defs.items() if v.get('type') in ('room', 'region')}
 
     def drop(atom):
         return atom in region_tok or re.match(r'key-D\d(:\d+)?$', atom) is not None
+
+    def remap_cells(cond):
+        """Cell names of shuffled dungeons (D8-4C) in a vanilla condition -> reaching the room vanilla has there,
+        wherever it is now. (condition, room gone from every layout?)"""
+        gone = [False]
+
+        def vanilla_room(m):
+            x = int(m.group(1))
+            if x not in shuffled:
+                return m.group(0)
+            xl = next(l for l, (i, _) in LEVELS.items() if i == x)
+            ps = [cell_expr[p] for p in rooms_at.get(f'{xl}_{m.group(2).rjust(3, "0")}', []) if cell_expr.get(p)]
+            gone[0] |= not ps
+            return '(' + ' | '.join(f'({e})' for e in ps) + ')' if ps else m.group(0)
+        return re.sub(r'\bD(\d)-(\d\d?[A-P])\b', vanilla_room, cond), gone[0]
 
     dungeon_of = settings.setdefault('dungeon-of', {})
     excluded = settings.setdefault('excluded-locations', set())
@@ -551,11 +612,19 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             if lv in boss_cell:
                 room = layouts[lv].get(boss_cell[lv])
         cond = v.get('condition-basic', '')
-        if room is None:  # no room known (owl statues, Color Dungeon rupees...): vanilla condition on the new cells
-            fallback += 1
-            n = home
-            v['condition-basic'] = re.sub(rf'key-D{n}:\d+', f'key-D{n}:{lock_count.get(n, 0)}' if lock_count.get(n) else '', cond)
-            v['condition-basic'] = re.sub(r'&\s*&', '&', v['condition-basic']).strip(' &') or LEVELS[lv][1]
+        if room is None:  # no room known (owl statues, Color Dungeon rupees...): vanilla condition, where its cell
+            fallback += 1  # names (D8-4C) mean the room vanilla has there, wherever it is now (seed DevRL_chaos_off:
+            n = home       # above-turtle-rock read "whatever room sits at 4C")
+            hl = next(l for l, (i, _) in LEVELS.items() if i == n)
+            c2, gone = remap_cells(cond)
+            if gone:  # (its room isn't in any layout: never reachable)
+                excluded.add(loc)
+                unused += 1
+                continue
+            c2 = re.sub(rf'key-D{n}:\d+', f'key-D{n}:{lock_count.get(n, 0)}' if lock_count.get(n) else '', c2)
+            v['condition-basic'] = re.sub(r'&\s*&', '&', c2).strip(' &') or LEVELS[hl][1]
+            for key in ('condition-advanced', 'condition-glitched', 'condition-hell'):
+                v.pop(key, None)
             continue
         places = rooms_at.get(room, [])
         def with_blocks(p):  # a check in a room with keyhole blocks: they may guard it
@@ -590,6 +659,23 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             v.pop(key, None)  # (the vanilla tricks describe the vanilla layout)
         lvl0 = next((p for p in places if LEVELS[p[0]][0] == home), places[0])[0]
         dungeon_of[loc] = f'D{LEVELS[lvl0][0]}'
+        rewritten += 1
+    # item locations the loop doesn't own (no room listed, not a dungeon name) that sit in a dungeon cell
+    # (above-turtle-rock: "D8-4C")
+    for loc, v in logic_defs.items():
+        if v.get('type') != 'item' or loc in dungeon_of or loc in excluded:
+            continue
+        cond = v.get('condition-basic', '')
+        if not any(int(x) in shuffled for x in re.findall(r'\bD(\d)-\d\d?[A-P]\b', cond)):
+            continue
+        c2, gone = remap_cells(cond)
+        if gone:
+            excluded.add(loc)
+            unused += 1
+            continue
+        v['condition-basic'] = c2
+        for key in ('condition-advanced', 'condition-glitched', 'condition-hell'):
+            v.pop(key, None)
         rewritten += 1
     # can each dungeon be filled? (keysanity off: its keys go into its own checks.) Key j has to sit in a check that
     # needs at most j-1 keys - else the caller plans another layout

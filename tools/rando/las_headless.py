@@ -334,7 +334,10 @@ def main():
                 break
             print('room layout can\'t be filled -', why, '- planning another', flush=True)
         room_plan = (layouts, jumps)
-        if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only)
+        if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only; =<names>: print those conditions)
+            for k in os.environ['LARECOMP_PLAN_ONLY'].split(','):
+                if k in logic_defs:
+                    print(k, '=', logic_defs[k].get('condition-basic'), flush=True)
             sys.exit(0)
 
     result = {}
