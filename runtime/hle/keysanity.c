@@ -36,6 +36,8 @@ static int refill(Cpu *c, int item, int count) {
 int rt_add_item(Cpu *c) {
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
     if (index == REFILL_INDEX && (item == IT_BOMB || item == IT_POWDER || item == IT_ARROW)) return refill(c, item, count);
+    extern int rt_pet_item(int n);  // pets.c: companions found as items (tools/rando/pets.py PET_INDEX 90)
+    if (index >= 90 && index < 93) return rt_pet_item(index - 90);
     if (index < 0 || index > 9 || index == 8) return 0;
     int rec = index == 9 ? 18 : 2 * index;
     uint8_t *r = (uint8_t *)(uintptr_t)(LIVE_SAVE + 0xE0 + 0x10 * rec);

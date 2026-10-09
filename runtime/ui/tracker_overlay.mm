@@ -238,6 +238,12 @@ static void inventory(void) {
         auto f = g_flag_idx.find(t.flag);
         give(t.tok, held == t.slot || (f != g_flag_idx.end() && flag_set(f->second)));
     }
+    static const struct { const char *tok, *flag; } pets[] = {  // pets found (runtime/hle/pets.c)
+        {"rooster", "unused0427"}, {"marin-companion", "unused0428"}, {"ghost", "unused0429"}};
+    for (auto &t : pets) {
+        auto f = g_flag_idx.find(t.flag);
+        give(t.tok, f != g_flag_idx.end() && flag_set(f->second));
+    }
     static const char *dn[] = {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"};
     for (int d = 0; d < 9; d++) {  // dungeon records: dungeon n = record 2(n-1), Color Dungeon = 18
         int rec = d < 8 ? 2 * d : 18;

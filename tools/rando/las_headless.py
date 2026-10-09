@@ -97,6 +97,7 @@ def default_settings(seed):
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
+        'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -223,7 +224,13 @@ def main():
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
 
-    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors
+    import pets as pets_mod  # companions as items (tools/rando/pets.py)
+    pets = pets_mod.add_to_pool(logic_defs, item_defs, settings)
+    if pets:
+        print('pets:', ', '.join(pets), flush=True)
+
+    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors,
+    # tier 3 = + connector caves
     tier = int(settings.get('entrance-tier', 0))
     ent = None
     if tier >= 1:
@@ -231,17 +238,50 @@ def main():
     if tier >= 2:
         import random as _random
         import entrance_logic as el
-        ent_doors = el.pool(el.load())
-        ent_entry, ent_exit = el.shuffle(ent_doors, bool(settings.get('entrance-decoupled', False)),
-                                         _random.Random(f"{settings['seed']}-entrances"))
+        ed = el.load()
+        ent_doors = el.pool(ed)
+        decoupled = bool(settings.get('entrance-decoupled', False))
+        ent_entry, ent_exit = el.shuffle(ent_doors, decoupled, _random.Random(f"{settings['seed']}-entrances"))
         extra = {}
         lv_door = {d['dest_level']: d['id'] for d in ent_doors}
         for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
             if p['level'] in lv_door:
                 extra.setdefault(lv_door[p['level']], []).append((name, 'break-pot'))
-        moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
-        ent = (ent_doors, ent_entry, ent_exit)
-        print('entrances:', len(ent_entry), 'doors shuffled,', moved, 'locations moved', flush=True)
+        cave = ([], {}, {})
+        if tier >= 3:  # connector caves: their own pool, logic first (house exits are ORed into regions it rewrites)
+            cdoors = el.connector_pool(ed)
+            lv_node = el.connector_levels(cdoors)
+            cextra = {}
+            for name, p in pot_locs.items():
+                if p['level'] in lv_node:
+                    cextra.setdefault(lv_node[p['level']], []).append((name, 'break-pot'))
+            pockets = el.pocket_screens(cdoors)
+
+            def with_caves(cv):
+                lg = copy.deepcopy(logic_defs)
+                n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
+                for name, b in bush_locs.items():  # a bush on a pocket's screen may stand in the pocket: needs it
+                    if cv[0] and pockets.get(b['room']) and name in lg:
+                        lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
+                return lg, n + el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
+
+            items = lambda lg: {k for k in el.reach_all(lg, item_defs, settings) if lg[k].get('type') == 'item'}
+            want = items(with_caves(cave)[0])
+            for attempt in range(100):  # re-roll a cave layout that loses a location even with every item
+                rng = _random.Random(f"{settings['seed']}-connectors" + (f'-{attempt}' if attempt else ''))
+                cave = (cdoors,) + el.shuffle(cdoors, decoupled, rng)
+                lg, moved = with_caves(cave)
+                if not want - items(lg):
+                    break
+                print(f'caves: layout {attempt} loses', ', '.join(sorted(want - items(lg))[:6]), flush=True)
+            else:
+                raise RuntimeError('no connector cave layout keeps every location reachable')
+            logic_defs.clear()
+            logic_defs.update(lg)
+        else:
+            moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
+        ent = (ent_doors + cave[0], {**ent_entry, **cave[1]}, {**ent_exit, **cave[2]})
+        print('entrances:', len(ent_entry), 'doors +', len(cave[1]), 'cave doors shuffled,', moved, 'locations moved', flush=True)
 
     # ---- Dungeon room shuffle (Coherent / Chaos): the layouts are planned first, the item logic follows them
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
@@ -378,6 +418,10 @@ def main():
 
     if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
+    if pets:
+        print('pets placed:', pets_mod.mark_indexes(result['placements'], logic_defs), flush=True)
+    from RandomizerCore.Randomizers import item_get as _item_get
+    _item_get.GHOST_PET = 'ghost' in pets
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
@@ -393,6 +437,9 @@ def main():
     if errors:
         print('MODS ERROR', errors, file=sys.stderr)
         sys.exit(2)
+    if pets:
+        from RandomizerCore.Tools import event_tools, oead_tools
+        print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data
