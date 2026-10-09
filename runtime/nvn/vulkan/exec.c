@@ -21,13 +21,14 @@ static uint64_t stat_upload_bytes;
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
 static VkQueryPool prof_qp;
+static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
-static char stats_text[448];
+static char stats_text[640];
 void vk_collect_dead(void);
 
 // ================================================================== submissions
@@ -436,6 +437,11 @@ const char *renderer_stats(void) {
         snprintf(stats_text + n, sizeof stats_text - n, " | tex checks %llu samples %llu full %llu (%.1f MB, dynamic %llu)",
                  (unsigned long long)prof_tex_checks, (unsigned long long)prof_tex_samples, (unsigned long long)prof_tex_full,
                  prof_tex_full_bytes / 1048576.0, (unsigned long long)prof_tex_dyn);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " | pass ends:");
+        for (int l = 0; l < 4096; l++)
+            if (prof_end_line[l] > 20) { n = strlen(stats_text); snprintf(stats_text + n, sizeof stats_text - n, " %d:%u", l, prof_end_line[l]); }
+        memset(prof_end_line, 0, sizeof prof_end_line);
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = 0;
     }
@@ -481,8 +487,12 @@ static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
 static int debug_pass_no;
 
-void vk_end_pass(void) {
+static void vk_end_pass_at(int line);
+void vk_end_pass(void) { vk_end_pass_at(0); }
+#define vk_end_pass() vk_end_pass_at(__LINE__)
+static void vk_end_pass_at(int line) {
     if (!in_pass) return;
+    if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {

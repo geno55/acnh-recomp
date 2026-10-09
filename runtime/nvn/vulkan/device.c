@@ -220,9 +220,12 @@ void vk_pipeline_cache_save(void) {
 
 // ================================================================== swapchain
 static VkPresentModeKHR present_mode(void) {
-    // FIFO paces the game like the Switch's vsync; LARECOMP_VK_PRESENT=mailbox|immediate for tests
+    // MAILBOX by default: the game paces itself (vi.c's emulated 60 Hz vsync), and with FIFO every submission
+    // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
+    // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
+    // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
     const char *e = getenv("LARECOMP_VK_PRESENT");
-    VkPresentModeKHR want = !e ? VK_PRESENT_MODE_FIFO_KHR : !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
+    VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
