@@ -113,13 +113,14 @@ struct GenOpts {
     bool decoupled = false, pots = false, grass = false;
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
+    int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos (tools/rando/dungeon_gen.py)
 };
 static GenOpts g_opts;
 
 // ---- Seed IDs: a 20-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and every
 // generation option, with a checksum. Same ID + same LAS Recomp version = the same seed, so IDs can be shared. The
 // generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout changes.
-enum { SEED_ID_VERSION = 2, SEED_ID_BITS = 100 };  // v2: 36-bit random part, room for more options
+enum { SEED_ID_VERSION = 3, SEED_ID_BITS = 100 };  // v2: 36-bit random part; v3: + dungeon room shuffle (v2 IDs still load)
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 struct Bits {
@@ -149,6 +150,7 @@ static void seed_id_encode(GenOpts &o, char *out, size_t cap) {
     x.put(o.rng, 36);
     x.put(o.logic, 3); x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
     x.put(o.tunic, 4); x.put(o.entrances, 2); x.put(o.start_rupees, 10);
+    x.put(o.room_shuffle, 2);  // (v3)
     for (int i = 0; bool *f = opt_flags(o, i); i++) x.put(*f, 1);
     int data = x.n;
     x.put(0, SEED_ID_BITS - 5 - data);
@@ -183,13 +185,14 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
         return "typo? (checksum doesn't match)";
     x.n = 0;
     int ver = (int)x.get(4);
-    if (ver != SEED_ID_VERSION) return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
+    if (ver != SEED_ID_VERSION && ver != 2) return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
     GenOpts t = o;
     t.rng = x.get(36);
     t.logic = (int)x.get(3); t.dungeon_items = (int)x.get(2); t.keysanity = (int)x.get(2); t.traps = (int)x.get(3);
     t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
+    t.room_shuffle = ver >= 3 ? (int)x.get(2) : 0;
     for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.get(1);
-    if (t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
+    if (t.room_shuffle > 2 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
         return "not a valid seed ID";
     t.ohko = false;
     o = t;
@@ -267,6 +270,8 @@ static void start_generation(void) {
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
+    static const char *rs[] = {"off", "coherent", "chaos"};
+    fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"include\": [\"5-seashell-reward\", \"15-seashell-reward\", \"30-seashell-reward\", \"40-seashell-reward\", \"50-seashell-reward\"],\n");
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
@@ -586,6 +591,24 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::BeginDisabled(g_opts.entrances < 2);
     ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leaving a house puts you outside a different door than the one you came in by.");
+    ImGui::EndDisabled();
+    static const char *rshuf[] = {"Off", "Coherent", "Chaos"};
+    combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 3);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Rebuilds the dungeons (all but Eagle's Tower) from shuffled rooms. Boss, mini-boss, stairs and\n"
+                          "other key rooms stay where they are.\n"
+                          "Coherent: rooms connect north/south/east/west like they look and the dungeon map is right. To keep\n"
+                          "every dungeon connected, a few rooms appear in two dungeons.\n"
+                          "Chaos: any doorway can lead to any doorway of the dungeon. Every room is used once. Matching letters\n"
+                          "(A-A, B-B...) appear on the dungeon map once you've been through a doorway, or all of them with the Map.\n"
+                          "EXPERIMENTAL: the item logic doesn't know rooms moved yet - a seed may need items in a different order.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Experimental:");
+    ImGui::BeginDisabled(!g_opts.randomize_enemies);
+    ImGui::Checkbox("Mini-bosses among overworld enemies", &g_opts.enemy_minibosses);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Needs Randomize enemies. Some overworld enemies become mini-bosses (Hinox, Cue Ball, ...).\n"
+                          "Known issue: they appear but don't fight yet (they wait for their dungeon room's start event).");
     ImGui::EndDisabled();
     ImGui::Spacing();
     ImGui::TextDisabled("In development: connector caves in the entrance pool, grass holds items.");

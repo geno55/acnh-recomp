@@ -96,6 +96,7 @@ def default_settings(seed):
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
         'bushes': False,
+        'dungeon-room-shuffle': 'off',  # off / coherent / chaos (tools/rando/dungeon_gen.py)
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
@@ -108,6 +109,65 @@ _T0 = _time.time()
 def stage(label, frac):
     """Progress line for the in-game menu (runtime/ui/rando_tab.mm): `stage <fraction> <label>`."""
     print(f'stage {frac:.3f} {label}', flush=True)
+
+
+def shuffle_dungeon_rooms(romfs, out_dir, seed, mode):
+    """Dungeon room shuffle (Coherent / Chaos, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
+    rooms from an overlay romfs where the seed's own room files (LAS chests, pots, bushes, entrances) replace the
+    game's - as copies, since it writes the seed's rooms while still reading others."""
+    import shutil
+    import dungeon_gen
+
+    def link(src, dst):  # symlink; Windows (no symlink rights): directory junction / hard link / copy
+        src = os.path.abspath(src)
+        try:
+            os.symlink(src, dst, target_is_directory=os.path.isdir(src))
+        except OSError:
+            if os.path.isdir(src):
+                import _winapi
+                _winapi.CreateJunction(src, dst)
+            else:
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copyfile(src, dst)
+    out_romfs = os.path.join(out_dir, 'romfs')
+    overlay = os.path.join(out_dir, '.room_overlay')
+    shutil.rmtree(overlay, ignore_errors=True)
+    rc = os.path.join(overlay, 'region_common')
+    os.makedirs(os.path.join(rc, 'level'))
+    for e in os.listdir(romfs):
+        if e != 'region_common':
+            link(os.path.join(romfs, e), os.path.join(overlay, e))
+    src_rc = os.path.join(romfs, 'region_common')
+    for e in os.listdir(src_rc):
+        if e != 'level':
+            link(os.path.join(src_rc, e), os.path.join(rc, e))
+    for lv in os.listdir(os.path.join(src_rc, 'level')):
+        src_lv = os.path.join(src_rc, 'level', lv)
+        seed_lv = os.path.join(out_romfs, 'region_common', 'level', lv)
+        if not os.path.isdir(seed_lv):
+            link(src_lv, os.path.join(rc, 'level', lv))
+            continue
+        dst = os.path.join(rc, 'level', lv)
+        os.makedirs(dst)
+        for f in os.listdir(src_lv):
+            link(os.path.join(src_lv, f), os.path.join(dst, f))
+        for f in os.listdir(seed_lv):  # the seed's version, copied (a snapshot)
+            if os.path.lexists(os.path.join(dst, f)):
+                os.remove(os.path.join(dst, f))
+            shutil.copyfile(os.path.join(seed_lv, f), os.path.join(dst, f))
+    cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
+    try:
+        if mode == 'chaos':
+            layouts, jumps = dungeon_gen.plan_all_chaos(cat, seed, overlay)
+            dungeon_gen.write_all(overlay, out_romfs, layouts, jumps)
+        else:
+            layouts = dungeon_gen.plan_all(cat, seed, overlay)
+            dungeon_gen.write_all(overlay, out_romfs, layouts)
+    finally:
+        shutil.rmtree(overlay, ignore_errors=True)
+    return f"{mode}, {len(layouts)} dungeons, {sum(sum(1 for k, v in L.items() if k != v) for L in layouts.values())} rooms moved"
 
 
 def main():
@@ -351,6 +411,16 @@ def main():
         with open(os.path.join(out_dir, f'entrances_{settings["seed"]}.txt'), 'w') as f:
             f.write(el.spoiler(*ent) + '\n')
         print('entrance rooms edited:', n, flush=True)
+
+    room_mode = settings.get('dungeon-room-shuffle', 'off')
+    if room_mode in ('coherent', 'chaos'):
+        stage('Shuffling dungeon rooms', 0.975)
+        print('dungeon rooms:', shuffle_dungeon_rooms(romfs, out_dir, settings['seed'], room_mode), flush=True)
+        # gold pots / bushes are found by position: moved rooms moved their item actors too
+        if pot_locs:
+            print('pots.tsv:', pots_mod.write_tsv(out_dir, leb), flush=True)
+        if bush_locs:
+            print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
 
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
