@@ -170,6 +170,11 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
 static bool room_crop(uint64_t frame, double shape, float *u0, float *u1) {
     float lo[3], hi[3];
     uint32_t id;
+    if (ENV("LARECOMP_LOG_INDOOR") && frame % 30 == 0) {
+        bool z = current_zone(lo, hi, &id);
+        LOG("[widescreen] f%llu vp %d zone %d id %u x %.1f..%.1f z %.1f..%.1f\n", (unsigned long long)frame, g_vp_frame == frame,
+            z, z ? id : 0, lo[0], hi[0], lo[2], hi[2]);
+    }
     if (shape <= 1.0 || g_vp_frame != frame || !current_zone(lo, hi, &id) || ENV("LARECOMP_NO_ROOM_WIDE")) return false;
     if (hi[0] - lo[0] < 16.0f) return false;  // one screen wide (cells are 15)
     const float *r0 = g_vp, *r1 = g_vp + 4, *r3 = g_vp + 12;

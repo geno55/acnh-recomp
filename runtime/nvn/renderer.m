@@ -1479,6 +1479,12 @@ static id<MTLBuffer> expand_indices(uint32_t mode, uint32_t count, const void *i
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     static uint64_t dump_fs = 1;
     if (dump_fs == 1) { const char *e = getenv("LARECOMP_DUMP_UBO"); dump_fs = e ? strtoull(e, NULL, 16) : 0; }
+    if (getenv("LARECOMP_DUMP_SMALLVB") && st.vbuf[0].addr && st.vbuf[0].size <= 256) {  // (debug frame: tiny meshes)
+        const float *v = (const float *)(uintptr_t)st.vbuf[0].addr;
+        LOG("[smallvb]");
+        for (uint64_t k = 0; k < st.vbuf[0].size / 4; k++) LOG(" %g", v[k]);
+        LOG("\n");
+    }
     if (dump_fs && st.program && st.program->stages[1].code_addr == dump_fs) {
         for (int i = 0; i < 18; i++) {
             if (!st.ubuf[1][i].addr) continue;
