@@ -21,6 +21,15 @@ static char g_level[64], g_locator[64];
 static volatile int g_pending;
 static volatile uint64_t g_request;
 
+static uint64_t g_req;  // our level-jump request (HLE heap)
+static volatile int g_give_pending;
+RT_ON_RESET(warp_reset) {  // (reboot: nothing queued; the request objects were in the wiped memory)
+    g_pending = 0;
+    g_request = 0;
+    g_req = 0;
+    g_give_pending = 0;
+}
+
 // Called from the generated code when a level registers its request object.
 void rt_warp_request_obj(uint64_t r) {
     if (r != g_request) LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
@@ -163,8 +172,8 @@ void warp_game_tick(Cpu *c) {
         LOG("[warp] ignored: not in a game\n");
         return;
     }
-    static uint64_t req;
-    if (!req) req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    if (!g_req) g_req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    uint64_t req = g_req;
     pthread_mutex_lock(&g_lock);
     size_t ll = strlen(g_level), lc = strlen(g_locator);
     memset((void *)(uintptr_t)req, 0, 0x200);
@@ -187,7 +196,6 @@ void warp_game_tick(Cpu *c) {
 // ---- give item (game thread): main+0x7e18b0 = AddItem(itemId, count, index, autoEquip), the call behind the
 // Inventory.AddItemByKey event action (itemId = row of datasheets/Items.gsheet, e.g. 78 PanelDungeonPiece).
 #define ADD_ITEM (MAIN_BASE + 0x7e18b0)
-static volatile int g_give_pending;
 static int g_give_id, g_give_count, g_give_index;
 
 void give_item_request(int id, int count, int index) {
@@ -428,7 +436,8 @@ static void memdump_tick(uint64_t frame) {
     }
 }
 
-// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (RE: pane name at +0xB0,
+// LARECOMP_PANE_SCAN=<frame>:<hex addr>[:<depth>]: log UI panes reachable from an object (addr 0 = LARECOMP_FNPROF_BT's
+// x0, 1 = the dungeon map page) (RE: pane name at +0xB0,
 // translate +0x30/+0x34, scale +0x48/+0x4C), following pointers up to <depth> levels (default 2)
 static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *seen, int *nseen) {
     extern int kernel_data_regions(uint64_t *a, uint64_t *s, int max);
@@ -438,7 +447,7 @@ static void pane_scan_rec(uint64_t obj, int depth, const char *path, uint64_t *s
     for (uint32_t off = 0; off < 0x800; off += 8) {
         uint64_t p = LD64(obj + off);
         bool ok = false;
-        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 <= ra[i] + rs[i];
+        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];  // (-1: wraps)
         if (!ok) continue;
         bool dup = false;
         for (int i = 0; i < *nseen && !dup; i++) dup = seen[i] == p;
@@ -473,6 +482,7 @@ static void pane_scan_tick(uint64_t frame) {
     if (at < 0 || (long)frame != at) return;
     extern uint64_t g_bt_first_x0;  // fnprof.c: x0 of the first LARECOMP_FNPROF_BT function hit (addr 0 = use it)
     if (!addr) addr = g_bt_first_x0;
+    if (addr == 1) { extern uint64_t chaos_dgnmap_obj(void); addr = chaos_dgnmap_obj(); }  // 1 = the dungeon map page
     LOG("[pane] scanning from %llx\n", (unsigned long long)addr);
     if (!addr) return;
     static uint64_t seen[4096];

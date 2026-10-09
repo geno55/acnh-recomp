@@ -66,6 +66,8 @@ def makeStartChanges(flowchart, settings):
         {'symbol': 'FirstClear'}, {0: player_start_flags_first_event, 1: None})
 
     player_start_event_flags = list(START_FLAGS)
+    if not settings.get('open-desert', True):  # LARecomp pets: the Walrus sleeps until Marin sings to him
+        player_start_event_flags.remove('WalrusAwaked')
 
     if settings['open-kanalet']:
         player_start_event_flags.append('GateOpen_Switch_KanaletCastle_01B')
@@ -83,8 +85,8 @@ def makeStartChanges(flowchart, settings):
         player_start_event_flags.append('AppearStairsFld10N')
         player_start_event_flags.append('AppearStairsFld11O')
     
-    if settings.get('skip-story-events', True):  # LARecomp: the one Owl talk LAS leaves on (Lv5 owl, dialogue only)
-        player_start_event_flags.append('EighthClear')
+    # (LARecomp: EighthClear stays off even with skip-story-events: that Owl, at the Ghost's grave once he is laid to
+    # rest, gives the ghost-reward check - LAS mod_generator ghostRewardChanges)
 
     if settings['fast-stalfos']: # set the door open flags for the first 3 master stalfos fights to be true
         player_start_event_flags.append('DoorOpen_Btl1_L05_05F')

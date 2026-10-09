@@ -10,6 +10,7 @@
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
+#include "../texpatch.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -337,6 +338,22 @@ static void destroy_image(TexBackend *b) {
     b->mem = VK_NULL_HANDLE;
 }
 
+// Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
+static NvnTexture **g_live;
+static int g_nlive, g_cap_live;
+static void live_add(NvnTexture *t, TexBackend *b) {
+    if (g_nlive == g_cap_live) { g_cap_live = g_cap_live ? g_cap_live * 2 : 1024; g_live = realloc(g_live, g_cap_live * sizeof *g_live); }
+    g_live[g_nlive++] = t;
+    b->reg = g_nlive;
+}
+static void live_remove(TexBackend *b) {
+    if (!b->reg) return;
+    NvnTexture *last = g_live[--g_nlive];
+    g_live[b->reg - 1] = last;
+    if (last->backend) ((TexBackend *)last->backend)->reg = b->reg;
+    b->reg = 0;
+}
+
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
@@ -351,17 +368,27 @@ static TexBackend *tex_backend(NvnTexture *t) {
     b->scalable = tex_scalable(t);
     create_image(t, b);
     t->backend = b;
+    live_add(t, b);
     return b;
 }
 
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
+        live_remove(b);
         destroy_image(b);
         free(b->pending_rgba);
         free(b);
     }
     t->backend = NULL;
+}
+
+// Reboot (device.c backend_reset; GPU idle): every game texture and its views go.
+void vk_textures_reset(void) {
+    int n = g_nlive;
+    while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
+    vk_collect_dead();
+    LOG("[vk] reboot: %d textures released\n", n);
 }
 
 // ================================================================== uploads (same change detection as metal.m)
@@ -430,7 +457,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    if (!full) {
+    if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
+    if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
@@ -439,8 +468,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->uploaded && h == b->data_hash) return;
-    if (b->uploaded) b->dynamic = true;
+    if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
@@ -458,6 +488,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * 16);
                 if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
+                if (b->tp > 0 && lv == 0 && layer == 0) texpatch_apply(b->tp - 1, blocks, l.w, l.h, l.wb * 16);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 free(blocks);
@@ -478,6 +509,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
+            if (b->tp > 0 && lv == 0 && layer == 0) texpatch_apply(b->tp - 1, lin, l.w, l.h, row);
             if (expand) {  // RGB8 -> RGBA8
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;

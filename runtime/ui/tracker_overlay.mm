@@ -172,6 +172,14 @@ static void load(void) {
 
 // ---- reachability
 static std::vector<int> g_acc;  // count per token
+
+RT_ON_RESET(tracker_reset) {  // (reboot: the next seed's tracker.tsv; the map page object was guest memory)
+    g_tok.clear(), g_tok_names.clear(), g_nodes.clear(), g_checks.clear(), g_groups.clear();
+    g_seed_settings.clear(), g_flag_idx.clear(), g_acc.clear();
+    g_loaded = 0;
+    g_map_frame = g_map_opened = g_map_obj = 0;
+    g_map_zoomed = 0;
+}
 static bool flag_set(int i) { return i >= 0 && i < 2048 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1; }
 static int &A(int id) {  // access count; tokens interned after sizing (e.g. "x[pit]") grow the table
     if (id >= (int)g_acc.size()) g_acc.resize(id + 64, 0);
@@ -229,6 +237,12 @@ static void inventory(void) {
     for (auto &t : trade) {
         auto f = g_flag_idx.find(t.flag);
         give(t.tok, held == t.slot || (f != g_flag_idx.end() && flag_set(f->second)));
+    }
+    static const struct { const char *tok, *flag; } pets[] = {  // pets found (runtime/hle/pets.c)
+        {"rooster", "unused0427"}, {"marin-companion", "unused0428"}, {"ghost", "unused0429"}};
+    for (auto &t : pets) {
+        auto f = g_flag_idx.find(t.flag);
+        give(t.tok, f != g_flag_idx.end() && flag_set(f->second));
     }
     static const char *dn[] = {"D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"};
     for (int d = 0; d < 9; d++) {  // dungeon records: dungeon n = record 2(n-1), Color Dungeon = 18
@@ -334,7 +348,6 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
             if (!(msc > 0.1f && msc < 20)) { mtx = mty = 0; msc = 1; }
         }
     }
-    bool zoomed = msc > 1.01f;
     auto to_screen = [&](float cx, float cy) {
         float sx = 187 + cx * (909.0f / 16), sy = 123 + cy * (507.0f / 16);  // default view, 1280x720 UI space
         sx = 640 + mtx + msc * (sx - 640);
@@ -342,20 +355,26 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         return ImVec2(ox + sx * u, oy + sy * u);
     };
     ImDrawList *dl = ImGui::GetForegroundDrawList();
-    if (zoomed) dl->PushClipRect(ImVec2(ox + 60 * u, oy + 112 * u), ImVec2(ox + 1222 * u, oy + 640 * u), true);
+    dl->PushClipRect(ImVec2(ox + 60 * u, oy + 112 * u), ImVec2(ox + 1222 * u, oy + 640 * u), true);  // the map window
     ImVec2 mouse = ImGui::GetIO().MousePos;
     const char *hover = NULL;
     std::vector<int> gr_reach(g_groups.size(), 0), gr_left(g_groups.size(), 0);
     int reach = 0, left = 0;
-    // stack several checks of one screen side by side
-    std::unordered_map<int, int> slot;
+    // stack several checks of one screen side by side; a screen with more (bushsanity: up to ~50 bushes) gets one
+    // small "reachable/left" badge instead of a wall of dots
+    auto spot = [](const Check &c) { return (int)(c.x * 4) * 1000 + (int)(c.y * 4); };
+    std::unordered_map<int, int> slot, crowd, crowd_reach;
+    std::unordered_map<int, const Check *> crowd_at;
+    for (const Check &c : g_checks)
+        if (c.group < 0 && !flag_set(c.flag)) crowd[spot(c)]++;
     for (const Check &c : g_checks) {
         if (flag_set(c.flag)) continue;
         bool ok = A(c.node) > 0;
         left++;
         reach += ok;
         if (c.group >= 0) { gr_left[c.group]++; gr_reach[c.group] += ok; continue; }
-        int key = (int)(c.x * 4) * 1000 + (int)(c.y * 4);
+        int key = spot(c);
+        if (crowd[key] > 8) { crowd_reach[key] += ok; crowd_at.emplace(key, &c); continue; }
         int k = slot[key]++;
         ImVec2 p = to_screen(c.x, c.y);
         p.x += ((k % 4) - 1.5f) * 9 * u;
@@ -363,10 +382,33 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         float r = 4.2f * u;
         dl->AddCircleFilled(p, r + 1.2f * u, IM_COL32(20, 14, 6, 220));
         dl->AddCircleFilled(p, r, ok ? IM_COL32(90, 230, 90, 255) : IM_COL32(230, 70, 60, 255));
-        bool vis = !zoomed || (p.x > ox + 60 * u && p.x < ox + 1222 * u && p.y > oy + 112 * u && p.y < oy + 640 * u);
+        bool vis = p.x > ox + 60 * u && p.x < ox + 1222 * u && p.y > oy + 112 * u && p.y < oy + 640 * u;
         if (vis && fabsf(mouse.x - p.x) < r * 1.6f && fabsf(mouse.y - p.y) < r * 1.6f) hover = c.name.c_str();
     }
     std::vector<ImVec4> placed;  // badge rects already drawn (nudge overlapping ones down)
+    static std::string hover_crowd;
+    for (auto &e : crowd_at) {
+        const Check &c = *e.second;
+        int n = crowd[e.first], ok = crowd_reach[e.first];
+        ImVec2 p = to_screen(c.x, c.y);
+        char txt[16];
+        snprintf(txt, sizeof txt, "%d/%d", ok, n);
+        float fs = 13 * u * (msc > 1 ? fminf(msc, 1.6f) : 1.0f);
+        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, txt);
+        ImVec2 a(p.x - ts.x * 0.5f - 6 * u, p.y - ts.y * 0.5f - 1.5f * u), b(p.x + ts.x * 0.5f + 4 * u, p.y + ts.y * 0.5f + 1.5f * u);
+        placed.push_back(ImVec4(a.x, a.y, b.x, b.y));
+        dl->AddRectFilled(a, b, IM_COL32(20, 14, 6, 220), ts.y);
+        dl->AddCircleFilled(ImVec2(a.x + 5 * u, p.y), 3 * u, ok ? IM_COL32(90, 230, 90, 255) : IM_COL32(230, 70, 60, 255));
+        dl->AddText(font, fs, ImVec2(a.x + 9 * u, a.y + 1.5f * u), IM_COL32(255, 250, 235, 255), txt);
+        bool vis = p.x > ox + 60 * u && p.x < ox + 1222 * u && p.y > oy + 112 * u && p.y < oy + 640 * u;
+        if (vis && mouse.x >= a.x && mouse.x <= b.x && mouse.y >= a.y && mouse.y <= b.y) {
+            std::string nm = pretty(c.name);
+            size_t dash = c.name.rfind('-');  // "bush-13H-4" -> "Bushes 13H"
+            if (!c.name.compare(0, 5, "bush-") && dash > 5) nm = "Bushes " + c.name.substr(5, dash - 5);
+            hover_crowd = nm + " (" + std::to_string(n) + " checks)";
+            hover = hover_crowd.c_str();
+        }
+    }
     const char *hover_group = NULL;
     static std::string hover_group_s;
     for (size_t g = 0; g < g_groups.size(); g++) {
@@ -395,7 +437,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
             hover_group = hover_group_s.c_str();
         }
     }
-    if (zoomed) dl->PopClipRect();
+    dl->PopClipRect();
     if (!hover && hover_group) hover = hover_group;
     char sum[64];
     snprintf(sum, sizeof sum, "Checks: %d reachable / %d left", reach, left);

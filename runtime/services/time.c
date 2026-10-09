@@ -102,6 +102,9 @@ static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
+static uint32_t g_shmem_handle;
+RT_ON_RESET(time_reset) { g_shmem_handle = 0; }
+
 static void static_service(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
@@ -111,9 +114,8 @@ static void static_service(Service *s, IpcReq *req, IpcResp *resp) {
     case 2: ipc_return_object(resp, service_new("ISteadyClock", steady_clock, NULL)); break;
     case 3: ipc_return_object(resp, service_new("ITimeZoneService", timezone_service, NULL)); break;
     case 20: {  // GetSharedMemoryNativeHandle
-        static uint32_t h;
-        if (!h) kernel_create_shared_memory(0x1000, time_shmem_map, &h);
-        resp->copy_handles[resp->ncopy++] = h;
+        if (!g_shmem_handle) kernel_create_shared_memory(0x1000, time_shmem_map, &g_shmem_handle);
+        resp->copy_handles[resp->ncopy++] = g_shmem_handle;
         break;
     }
     case 100: case 101: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;

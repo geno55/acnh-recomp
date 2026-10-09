@@ -31,6 +31,8 @@ void rando_tab_draw(float scale);
 bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
+void controls_bindings_draw(float scale);  // controls_ui.mm
+#include "../input_bind.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -66,6 +68,7 @@ static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
     input_reset();  // nothing held while the menu had focus leaks into the game
+    bind_capture_cancel();
     if (open) save_editor_on_open();
     else settings_save();
 }
@@ -134,6 +137,7 @@ static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
+    if (g_open.load() && bind_capture_event(e)) return true;  // Controls tab waiting for a new binding: it takes the press
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
     if (g_kbd.load() == 1 && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
@@ -252,6 +256,7 @@ void menu_apply_window_requests(void *win) {
 
 // ------------------------------------------------------------------ render thread
 static bool g_inited;
+static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
 static int g_tab, g_tab_request = -1;
 int g_tab_request_ext = -1;
@@ -290,7 +295,6 @@ static void style_init(void) {
     c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
 }
 
-extern "C" void rt_restart_to_title(void);  // runtime/main.c: back to the start screen
 
 #ifdef __APPLE__
 static void init(id<MTLDevice> dev) {
@@ -298,7 +302,8 @@ static void init(id<MTLDevice> dev) {
 static void init(void) {
 #endif
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    g_ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -392,6 +397,7 @@ static bool toggle(const char *label, bool *v) {
 }
 
 extern "C" void renderer_get_scale(float *sx, float *sy);
+extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
 
 static void tab_display(void) {
@@ -431,6 +437,12 @@ static void tab_display(void) {
          "raising it again when it can. Changing it briefly pauses while the render targets are rebuilt.");
     ImGui::Spacing();
     toggle("Show FPS", &g_settings.show_fps);
+    ImGui::Spacing();
+    header("Game");
+    toggle("Remove blur", &g_settings.blur_removal);
+    hint("Turns off the tilt-shift blur at the top and bottom of the screen. Takes effect the next time the game starts.");
+    toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
+    hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
 }
 
 static void tab_audio(void) {
@@ -447,17 +459,31 @@ static void tab_audio(void) {
 }
 
 static void tab_about(void) {
+    header("Controls");
+    controls_bindings_draw(ImGui::GetFontSize() / 34);
+    ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
     hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
+    toggle("360-degree movement", &g_settings.move_360);
+    hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
     ImGui::Spacing();
-    header("Controls");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, or Minus + Plus (Back + Start)");
+    header("Button prompts");
+    {
+        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
+        char autol[64];
+        snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
+        choice("Button icons", &g_settings.prompts, names, 4);
+        hint("The game's button icons drawn for your controller. Auto follows the controller that's connected "
+             "(Nintendo icons with a keyboard or other pads). The icons follow the controller bindings above; by "
+             "default buttons are matched by position: Switch A is Xbox B / PlayStation circle.");
+    }
+    ImGui::Spacing();
+    header("Menu");
+    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, Back + Start, or Home");
     ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
     ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
-    ImGui::Spacing();
-    header("Keyboard play");
-    ImGui::TextUnformatted("Move WASD   A K   B J   X L   Y I   L Q   R E   ZL 1   ZR 3   + Enter   - Backspace");
 }
 
 extern "C" bool inventory_overlay_wanted(void);
@@ -467,17 +493,14 @@ extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
 
-// Toasts: short notices any thread can post (e.g. keysanity "Small Key - Key Cavern"), shown top-centre ~3.5 s.
-static pthread_mutex_t g_toast_lock = PTHREAD_MUTEX_INITIALIZER;
-static char g_toast[160];
-static double g_toast_at = -100;
-extern "C" void ui_toast(const char *text) {
-    pthread_mutex_lock(&g_toast_lock);
-    strlcpy(g_toast, text, sizeof g_toast);
-    g_toast_at = SDL_GetTicks() / 1000.0;
-    pthread_mutex_unlock(&g_toast_lock);
+// Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
+RT_ON_RESET(menu_reset) {
+    set_open(false);
+    g_kbd = 0;
+    pthread_mutex_lock(&q_lock);
+    q_events.clear();
+    pthread_mutex_unlock(&q_lock);
 }
-static bool toast_active(void) { return SDL_GetTicks() / 1000.0 - g_toast_at < 3.5; }
 
 static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
@@ -545,7 +568,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
-    while (g_kbd.load() == 1) {  // ~60 Hz
+    while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
         backend_represent();
         uint64_t dt = SDL_GetTicks() - t0;
@@ -566,12 +589,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
-    bool toast = toast_active();
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !toast) {
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -580,6 +602,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #else
     if (!g_inited) init();
 #endif
+    ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)tw, (float)th);
     io.DisplayFramebufferScale = ImVec2(1, 1);
@@ -624,23 +647,6 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
-    if (toast && !open) {
-        char t[160];
-        pthread_mutex_lock(&g_toast_lock);
-        strlcpy(t, g_toast, sizeof t);
-        double age = SDL_GetTicks() / 1000.0 - g_toast_at;
-        pthread_mutex_unlock(&g_toast_lock);
-        float a = age < 0.25 ? (float)(age / 0.25) : age > 3.0 ? (float)((3.5 - age) / 0.5) : 1.0f;
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 90 * scale), 0, ImVec2(0.5f, 0));
-        ImGui::SetNextWindowBgAlpha(0.72f * a);
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
-        ImGui::Begin("##toast", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.45f, 1), "%s", t);
-        ImGui::End();
-        ImGui::PopStyleVar();
-    }
-
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (inv) {
@@ -666,7 +672,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         if (ImGui::Button("Resume game", ImVec2(230 * scale, 0))) set_open(false);
         if (ImGui::BeginPopupModal("##totitle", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::Text("Return to the title screen? Progress since your last save is lost.");
-            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) rt_restart_to_title();
+            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) {  // (the game reboots in place)
+                ImGui::CloseCurrentPopup();
+                rt_request_reboot(RT_REBOOT_TITLE);
+            }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(230 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
                 ImGui::CloseCurrentPopup();

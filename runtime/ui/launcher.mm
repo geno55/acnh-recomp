@@ -5,7 +5,7 @@
 // that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
 //
 // Skipped with --play, LARECOMP_NO_LAUNCHER=1, or any scripted test run (LARECOMP_INPUT): tests boot straight in.
-// Choosing a seed here (or vanilla) is how seeds change without the in-game restart dance.
+// The in-game menu's "Title screen" comes back here without leaving the process (runtime/main.c reboots the game).
 #ifdef __APPLE__
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -33,6 +33,8 @@ extern "C" {
 #include "platform.h"
 #include "ui/ui_scale.h"
 #include "settings.h"
+#include "input_bind.h"
+void controls_bindings_draw(float scale);  // ui/controls_ui.mm
 void ui_window_init(void);
 SDL_Window *ui_window(void);
 #ifdef __APPLE__
@@ -324,7 +326,7 @@ static std::vector<std::string> list_seeds() {
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP };
+enum Page { MAIN, SETTINGS, SETUP, CONTROLS };
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
@@ -341,12 +343,72 @@ static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
     if (hovered) *hovered = hot;
     ImU32 col = !enabled ? IM_COL32(150, 150, 150, 130) : hot ? IM_COL32(250, 205, 90, 255) : IM_COL32(245, 245, 240, 255);
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    if (hot && enabled) dl->AddText(ImVec2(at.x - sz.y * 0.75f, at.y), col, "\xe2\x96\xb8");
+    if (hot && enabled) {  // a drawn arrow (the fonts we use have no glyph for one: it showed as '?')
+        float h = sz.y * 0.42f, cx = at.x - sz.y * 0.55f, cy = at.y + sz.y * 0.52f;
+        dl->AddTriangleFilled(ImVec2(cx - h * 0.45f, cy - h * 0.6f), ImVec2(cx - h * 0.45f, cy + h * 0.6f),
+                              ImVec2(cx + h * 0.55f, cy), col);
+    }
     dl->AddText(at, col, label);
     ImGui::Dummy(ImVec2(0, sz.y * 0.35f));  // line spacing
     ImGui::EndDisabled();
     ImGui::PopFont();
     return clicked;
+}
+
+// Controllers, as in the in-game menu (runtime/ui/menu.mm): read straight from SDL, Nintendo layout - the right face
+// button (A) confirms, the bottom one (B) goes back; d-pad / left stick move. (ImGui's own SDL gamepad handling is
+// switched off: it used the Xbox layout and, per the user, didn't work on the start screen.)
+static ImGuiKey launcher_pad_key(Uint8 b) {
+    switch (b) {
+    case SDL_GAMEPAD_BUTTON_EAST: return ImGuiKey_GamepadFaceDown;   // A: activate
+    case SDL_GAMEPAD_BUTTON_SOUTH: return ImGuiKey_GamepadFaceRight; // B: back
+    case SDL_GAMEPAD_BUTTON_NORTH: return ImGuiKey_GamepadFaceUp;
+    case SDL_GAMEPAD_BUTTON_WEST: return ImGuiKey_GamepadFaceLeft;
+    case SDL_GAMEPAD_BUTTON_DPAD_UP: return ImGuiKey_GamepadDpadUp;
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ImGuiKey_GamepadDpadDown;
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ImGuiKey_GamepadDpadLeft;
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ImGuiKey_GamepadDpadRight;
+    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ImGuiKey_GamepadL1;
+    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ImGuiKey_GamepadR1;
+    case SDL_GAMEPAD_BUTTON_START: return ImGuiKey_GamepadStart;
+    case SDL_GAMEPAD_BUTTON_BACK: return ImGuiKey_GamepadBack;
+    default: return ImGuiKey_None;
+    }
+}
+
+static void launcher_pad_open_all(void) {
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    for (int i = 0; ids && i < n; i++) SDL_OpenGamepad(ids[i]);
+    SDL_free(ids);
+}
+
+// true when the event was a controller event (handled here)
+static bool launcher_pad_event(const SDL_Event &e) {
+    ImGuiIO &io = ImGui::GetIO();
+    switch (e.type) {
+    case SDL_EVENT_GAMEPAD_ADDED:
+        SDL_OpenGamepad(e.gdevice.which);
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        return true;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
+        ImGuiKey k = launcher_pad_key(e.gbutton.button);
+        if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+        return true;
+    }
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+        float v = e.gaxis.value / 32767.0f;
+        if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, v < -0.3f, v < -0.3f ? -v : 0);
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, v > 0.3f, v > 0.3f ? v : 0);
+        } else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, v < -0.3f, v < -0.3f ? -v : 0);
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, v > 0.3f, v > 0.3f ? v : 0);
+        }
+        return true;
+    }
+    default: return false;
+    }
 }
 
 // Returns when PLAY is chosen (seed stored in g_settings.rando_seed); QUIT exits.
@@ -363,7 +425,9 @@ extern "C" void launcher_run(const char *root) {
 #endif
 
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    ImGuiContext *prev_ctx = ImGui::GetCurrentContext();  // the in-game menu's, when back here after a reboot
+    ImGuiContext *ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
@@ -390,6 +454,9 @@ extern "C" void launcher_run(const char *root) {
     ImGui_ImplSDL3_InitForVulkan(win);
     vk_imgui_backend_init();
 #endif
+    ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_Manual, NULL, 0);  // (controllers: launcher_pad_event)
+    launcher_pad_open_all();
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
     std::string status = check_game_files(g_root);
     if (status.empty()) load_background(dev);
@@ -410,6 +477,7 @@ extern "C" void launcher_run(const char *root) {
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
+        if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -427,7 +495,8 @@ extern "C" void launcher_run(const char *root) {
     while (!play) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            ImGui_ImplSDL3_ProcessEvent(&e);
+            if (page == CONTROLS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
+            if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
         }
         // extraction finished: re-check, load the background
@@ -539,7 +608,21 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetNextItemWidth(420 * s);
                 ImGui::SliderFloat("Volume", &g_settings.volume, 0, 1, "%.2f");
                 ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("360-degree movement", &g_settings.move_360);
+                ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("Remove blur", &g_settings.blur_removal);
+                ImGui::SetCursorPosX(x0);
+                ImGui::Checkbox("Hide Hero Mode icon", &g_settings.hide_hero_icon);
+                ImGui::SetCursorPosX(x0);
+                ImGui::SetNextItemWidth(420 * s);
+                static const char *const prompts[] = {"Auto (follow the controller)", "Nintendo", "Xbox", "PlayStation"};
+                ImGui::Combo("Button icons", &g_settings.prompts, prompts, 4);
+                ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("More options are in the in-game menu (Esc).");
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("CONTROLS", true)) page = CONTROLS;
+                ImGui::PushFont(g_font_small);
                 ImGui::Dummy(ImVec2(0, 12 * s));
                 import_fonts();
                 bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
@@ -564,7 +647,21 @@ extern "C" void launcher_run(const char *root) {
                     if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true)) { settings_save(); page = MAIN; }
+                if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                    ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = MAIN; }  // (B / Esc: back)
+                } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
+                ImGui::PushFont(g_font_small);
+                controls_bindings_draw(s);
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                int cap_dev;
+                bind_capture_active(&cap_dev, NULL, NULL);
+                if (menu_item("BACK", true) || (cap_dev < 0 && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                                ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    bind_capture_cancel();
+                    settings_save();
+                    page = SETTINGS;
+                }
                 } else {  // SETUP
                 pthread_mutex_lock(&g_lock);
                 std::string dump = g_dump, keys = g_keys, job = g_job;
@@ -608,7 +705,8 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::PopFont();
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", !busy)) page = MAIN;
+                if (menu_item("BACK", !busy) || (!busy && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
@@ -679,6 +777,7 @@ extern "C" void launcher_run(const char *root) {
     vk_imgui_backend_shutdown();
 #endif
     ImGui_ImplSDL3_Shutdown();
-    ImGui::DestroyContext();
+    ImGui::DestroyContext(ctx);
+    ImGui::SetCurrentContext(prev_ctx);
     g_bg = 0;
 }
