@@ -227,6 +227,8 @@ static void fill_state(Cpu *c) {
         lx = dx * m, ly = dy * m;
     }
     {   // door jumps stop Link for a moment before moving him (runtime/hle/doorjump.c): stick + d-pad released
+        extern int32_t g_stick_lx, g_stick_ly;  // (what the player holds, before that: doorjump.c reads it)
+        g_stick_lx = lx, g_stick_ly = ly;
         extern uint64_t g_stick_freeze_until;
         extern uint64_t renderer_present_count(void);
         if (renderer_present_count() < g_stick_freeze_until) {

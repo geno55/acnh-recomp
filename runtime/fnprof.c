@@ -35,8 +35,11 @@ static void bt_check(uint64_t a, uint64_t lr, uint64_t x0) {
             if (i == 0) g_bt_first_x0 = x0;
             void *fr[64];
             int n = backtrace(fr, 64);
-            fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx x0 %llx:\n", (unsigned long long)a, (unsigned long long)lr,
-                    (unsigned long long)x0);
+            uint64_t vt = x0 >= 0x7000000000ull && x0 < 0x7800000000ull ? *(uint64_t *)(uintptr_t)x0 : 0;
+            uint64_t v100 = vt >= 0x7000000000ull && vt < 0x7800000000ull ? *(uint64_t *)(uintptr_t)(vt + 0x100) : 0;
+            fprintf(stderr, "[fnprof-bt] %llx entered from guest lr %llx x0 %llx (vtable %llx, +0x100 %llx):\n",
+                    (unsigned long long)a, (unsigned long long)lr, (unsigned long long)x0, (unsigned long long)vt,
+                    (unsigned long long)v100);
             backtrace_symbols_fd(fr + 2, n - 2, 2);
         }
 }

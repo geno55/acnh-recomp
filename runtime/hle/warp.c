@@ -448,6 +448,7 @@ static void pane_scan_tick(uint64_t frame) {
 }
 
 void give_item_tick(Cpu *c, uint64_t frame) {
+    { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)

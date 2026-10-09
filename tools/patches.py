@@ -267,3 +267,20 @@ def _res_name(gen, a):
 
 
 PATCHES[RES_NAME_SITE] = _res_name
+
+
+# Field mini-bosses (enemy randomizer): a mini-boss starts its fight when the dungeon's zone-change signal reaches
+# it (zone manager -> f_7000029520 -> actor vfunc +0x100), which never happens in the Field. f_70003bf2b0 (a type
+# check run on these actors every frame) tells the runtime which actors exist (runtime/hle/miniboss.c), and the
+# runtime sends the start itself.
+MB_SEEN_SITE = 0x70003bf2b0
+
+
+def _mb_seen(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf81e0ff3, hex(w)  # str x19, [sp, #-32]!
+    return ('{ extern void rt_mb_seen(Cpu *); rt_mb_seen(c); uint64_t ea = c->sp - 32; ST64(ea, c->x[19]); c->sp = ea; }'
+            f'  /* {a:#x}: str x19, [sp, #-32]! (mini-boss actor seen) */')
+
+
+PATCHES[MB_SEEN_SITE] = _mb_seen

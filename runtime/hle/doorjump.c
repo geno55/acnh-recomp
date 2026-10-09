@@ -205,6 +205,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
 }
 
 uint64_t g_test_buttons, g_test_buttons_until;
+int32_t g_stick_lx, g_stick_ly;  // left stick as the player holds it (runtime/hle/input.c)
 
 // LARECOMP_PLACE=<frame>:<x>:<z>[:<script>] (test): put Link at x, z (any level) once the level has been loaded 60
 // frames, then run <script> relative to that moment: steps "<delay>:<L|R|U|D|A|B>:<frames>" separated by '/', e.g.
@@ -321,6 +322,11 @@ void doorjump_tick(uint64_t frame) {
         if (depth > 0.7f || fabsf(lateral - j->own * 0.75f) > 1.2f) { j->still = 0; continue; }  // per doorway: a cell's other doorways mustn't reset it
         if (depth > 0.55f) continue;
         if (!j->still && out <= 0.01f) continue;  // armed only by walking in (not by landing here)
+        // ...with the stick held out through the doorway (not knocked into it by an enemy: DevChaos1 Catfish 03D W)
+        if (!j->still) {
+            int32_t along = j->side == 'W' ? -g_stick_lx : j->side == 'E' ? g_stick_lx : j->side == 'N' ? g_stick_ly : -g_stick_ly;
+            if (along < 8000) continue;
+        }
         // in the doorway's last half tile: release the stick for a moment (moving him while he walks gets undone by
         // that frame's movement, and where the neighbour has no wall he'd walk on into its void), jump at rest
         g_stick_freeze_until = frame + 3;
