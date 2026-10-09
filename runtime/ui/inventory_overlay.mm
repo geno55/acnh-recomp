@@ -1,6 +1,6 @@
 // Inventory overlay for randomizer seeds: while the pause menu's Items page is shown, a panel along its bottom
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
-// game's per-dungeon records. (Randomized keys can be found anywhere, and the game only shows the current
+// game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
 // dungeon's keys.) The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
 #include <math.h>
 #include <stdint.h>
@@ -24,19 +24,23 @@ static volatile uint64_t g_items_frame;
 #define EVENT_FLAGS (MAIN_BASE + 0x1CBB220 + 0x5DC0)  // live save: GlobalFlags bitfield
 #define TRADE_SLOT (MAIN_BASE + 0x1CBB220 + 0x555A)   // live save: current trade item (1..14, 0 = none)
 
-// Trade sequence (save TRADE_SLOT values 1..14) and the LAS flag set when each one is obtained.
-static const struct { const char *name, *flag; } kTrade[] = {
-    {"Doll", "TradeYoshiDollGet"}, {"Ribbon", "TradeRibbonGet"}, {"Dog Food", "TradeDogFoodGet"},
-    {"Bananas", "TradeBananasGet"}, {"Stick", "TradeStickGet"}, {"Honey", "TradeHoneycombGet"},
-    {"Pineapple", "TradePineappleGet"}, {"Hibiscus", "TradeHibiscusGet"}, {"Letter", "TradeLetterGet"},
-    {"Broom", "TradeBroomGet"}, {"Hook", "TradeFishingHookGet"}, {"Necklace", "TradeNecklaceGet"},
-    {"Scale", "TradeMermaidsScaleGet"}, {"Lens", NULL}};
-static int g_trade_flag[14];
+// Trade sequence (save TRADE_SLOT values 1..14), the LAS flag set when each one is obtained, and the flag the trade
+// NPC's flow sets when it takes the item (its "...Drop" = what it hands over; tools/rando/seed_tables.py exports them).
+// Trade quest shuffle lets Link carry several at once, so the row tells which he still has.
+static const struct { const char *name, *flag, *done; } kTrade[] = {
+    {"Doll", "TradeYoshiDollGet", "RibbonDrop"}, {"Ribbon", "TradeRibbonGet", "DogfoodDrop"},
+    {"Dog Food", "TradeDogFoodGet", "BananaDrop"}, {"Bananas", "TradeBananasGet", "StickDrop"},
+    {"Stick", "TradeStickGet", "HoneycombDrop"}, {"Honey", "TradeHoneycombGet", "PineappleGet"},
+    {"Pineapple", "TradePineappleGet", "HibiscusDrop"}, {"Hibiscus", "TradeHibiscusGet", "LetterDrop"},
+    {"Letter", "TradeLetterGet", "BroomDrop"}, {"Broom", "TradeBroomGet", "FishhookDrop"},
+    {"Hook", "TradeFishingHookGet", "BrassiereDrop"}, {"Necklace", "TradeNecklaceGet", "ScaleDrop"},
+    {"Scale", "TradeMermaidsScaleGet", "MarthaStatueOpened"}, {"Lens", NULL, NULL}};
+static int g_trade_flag[14], g_trade_done[14];  // -1 = not in the seed's flags.tsv (older seeds: no "done" flags)
 static int g_trade_loaded;
 
 static void load_trade_flags(void) {
     g_trade_loaded = 1;
-    for (int i = 0; i < 14; i++) g_trade_flag[i] = -1;
+    for (int i = 0; i < 14; i++) g_trade_flag[i] = g_trade_done[i] = -1;
     char path[512];
     snprintf(path, sizeof path, "%s/flags.tsv", rando_seed_dir());
     FILE *f = fopen(path, "r");
@@ -44,8 +48,10 @@ static void load_trade_flags(void) {
     char name[96];
     int idx;
     while (fscanf(f, "%95s %d", name, &idx) == 2)
-        for (int i = 0; i < 14; i++)
+        for (int i = 0; i < 14; i++) {
             if (kTrade[i].flag && !strcmp(kTrade[i].flag, name)) g_trade_flag[i] = idx;
+            if (kTrade[i].done && !strcmp(kTrade[i].done, name)) g_trade_done[i] = idx;
+        }
     fclose(f);
 }
 
@@ -116,17 +122,24 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
             else dl->AddCircle(pc, 4.5f * u, IM_COL32(120, 100, 70, 200), 12, 1.2f * u);
         }
     }
-    // trade sequence: obtained items lit, the one Link holds outlined
+    // trade sequence: items Link has lit, the one in the trade slot outlined, traded-away ones dark with a tick
     if (!g_trade_loaded) load_trade_flags();
     int held = LD8(TRADE_SLOT);
     float tw = (p1.x - p0.x - 16 * u) / 14, ty = p0.y + 84 * u, th = 26 * u, tfs = 17 * u;
     for (int i = 0; i < 14; i++) {
-        bool got = flag_set(g_trade_flag[i]) || held == i + 1;
+        bool done = flag_set(g_trade_done[i]) && held != i + 1;
+        bool got = !done && (flag_set(g_trade_flag[i]) || held == i + 1);
         ImVec2 a(p0.x + 8 * u + tw * i + 2 * u, ty), b(a.x + tw - 4 * u, ty + th);
-        dl->AddRectFilled(a, b, got ? IM_COL32(120, 92, 40, 235) : IM_COL32(70, 54, 30, 160), 6 * u);
+        dl->AddRectFilled(a, b, got ? IM_COL32(120, 92, 40, 235) : done ? IM_COL32(48, 40, 28, 200) : IM_COL32(70, 54, 30, 160),
+                          6 * u);
         if (held == i + 1) dl->AddRect(a, b, IM_COL32(255, 220, 120, 255), 6 * u, 0, 2.2f * u);
         ImVec2 ts = font->CalcTextSizeA(tfs, FLT_MAX, 0, kTrade[i].name);
-        dl->AddText(font, tfs, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f),
-                    got ? IM_COL32(255, 240, 200, 255) : IM_COL32(150, 130, 100, 200), kTrade[i].name);
+        ImU32 tc = got ? IM_COL32(255, 240, 200, 255) : done ? IM_COL32(120, 160, 100, 220) : IM_COL32(150, 130, 100, 200);
+        dl->AddText(font, tfs, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), tc, kTrade[i].name);
+        if (done) {  // a small tick in the corner: given to its NPC
+            ImVec2 k(b.x - 9 * u, a.y + 3 * u);
+            ImVec2 pts[3] = {ImVec2(k.x, k.y + 4 * u), ImVec2(k.x + 2.5f * u, k.y + 6.5f * u), ImVec2(k.x + 7 * u, k.y)};
+            dl->AddPolyline(pts, 3, IM_COL32(140, 210, 110, 255), 0, 1.8f * u);
+        }
     }
 }

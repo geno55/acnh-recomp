@@ -23,6 +23,7 @@ Settings g_settings = {
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
+    .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
 #ifdef __APPLE__
     .upscaler = UPSCALE_METALFX,  // (MetalFX on macOS by default)
@@ -66,6 +67,8 @@ void settings_load(void) {
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
         else if (!strcmp(key, "tracker")) g_settings.tracker = atoi(val) != 0;
+        else if (!strcmp(key, "chaos_letters"))
+            g_settings.chaos_letters = !strcmp(val, "off") ? CHAOS_LETTERS_OFF : !strcmp(val, "explored") ? CHAOS_LETTERS_EXPLORED : CHAOS_LETTERS_MAP;
         else if (!strcmp(key, "cheat_hearts")) g_settings.cheat_hearts = atoi(val) != 0;
         else if (!strcmp(key, "cheat_ammo")) g_settings.cheat_ammo = atoi(val) != 0;
         else if (!strcmp(key, "cheat_rupees")) g_settings.cheat_rupees = atoi(val) != 0;
@@ -103,6 +106,8 @@ void settings_save(void) {
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "tracker = %d\n", g_settings.tracker);
+    static const char *const letters[] = {"off", "explored", "map"};
+    fprintf(f, "chaos_letters = %s\n", letters[g_settings.chaos_letters]);
     fprintf(f, "cheat_hearts = %d\ncheat_ammo = %d\ncheat_rupees = %d\n", g_settings.cheat_hearts, g_settings.cheat_ammo,
             g_settings.cheat_rupees);
     fprintf(f, "diff_damage = %.2f\ndiff_ohko = %d\ndiff_hero = %d\n", g_settings.diff_damage, g_settings.diff_ohko,
