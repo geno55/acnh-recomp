@@ -4,6 +4,9 @@ from RandomizerCore.Randomizers import item_get
 
 
 
+SOUL_KEYS = []  # boss soul item keys of this seed (set by tools/rando/las_headless.py)
+
+
 def writeChestEvent(flowchart):
     """Writes an itemKey comparision and itemGet chain and connects it to the chest open events"""
 
@@ -212,9 +215,16 @@ def writeChestEvent(flowchart):
     # {'value1': 'itemKey', 'value2': 'ShadowLink'},
     # {0: shadow_get, 1: rooster_check})
 
+    # LAS Recomp boss souls (tools/rando/souls.py): their own chain (sets the soul flag, no inventory item)
+    head = bottle_check
+    for soul in SOUL_KEYS:
+        soul_get = item_get.insertItemGetAnimation(flowchart, soul, -1, None, auto_save)
+        head = event_tools.createSwitchEvent(flowchart, 'FlowControl', 'CompareString',
+            {'value1': 'itemKey', 'value2': soul}, {0: soul_get, 1: head})
+
     # add this chain to TreasureBox_Open and TreasureBox_ShockOpen
-    event_tools.insertEventAfter(flowchart, 'Event32', bottle_check)
-    event_tools.insertEventAfter(flowchart, 'Event28', bottle_check)
+    event_tools.insertEventAfter(flowchart, 'Event32', head)
+    event_tools.insertEventAfter(flowchart, 'Event28', head)
     
     # now make the rest of the items also request an autosave
     event_tools.insertEventAfter(flowchart, 'Event40', auto_save)

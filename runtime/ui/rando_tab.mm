@@ -114,6 +114,7 @@ struct GenOpts {
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
     int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos (tools/rando/dungeon_gen.py)
+    bool boss_souls = false;  // boss-souls: a boss only appears once its soul is found (tools/rando/souls.py)
 };
 static GenOpts g_opts;
 
@@ -121,6 +122,7 @@ static GenOpts g_opts;
 // generation option, with a checksum. Same ID + same LAS Recomp version = the same seed, so IDs can be shared. The
 // generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout changes.
 enum { SEED_ID_VERSION = 3, SEED_ID_BITS = 100 };  // v2: 36-bit random part; v3: + dungeon room shuffle (v2 IDs still load)
+// (v3 with boss souls: all 95 data bits are used - the next option needs a longer ID)
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 struct Bits {
@@ -134,7 +136,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
     bool *f[] = {&o.bomb_bag, &o.powder_bag, &o.environments, &o.pets_in_dungeons, &o.skip_story, &o.enemy_minibosses,
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
-                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes};
+                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes, &o.boss_souls};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -272,6 +274,7 @@ static void start_generation(void) {
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     static const char *rs[] = {"off", "coherent", "chaos"};
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
+    fprintf(f, " \"boss-souls\": %s,\n", g_opts.boss_souls ? "true" : "false");
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"include\": [\"5-seashell-reward\", \"15-seashell-reward\", \"30-seashell-reward\", \"40-seashell-reward\", \"50-seashell-reward\"],\n");
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
@@ -583,6 +586,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
+    ImGui::Checkbox("Boss souls", &g_opts.boss_souls);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the\n"
+                          "boss isn't in its lair: its room is empty and open, and its Heart Container and instrument (the\n"
+                          "Color Dungeon: the fairy's reward) can't be had. Found souls show on the Items screen.");
     static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
     combo("Entrance randomizer", &g_opts.entrances, ent, 3);
     if (ImGui::IsItemHovered())

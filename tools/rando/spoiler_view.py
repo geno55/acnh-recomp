@@ -61,6 +61,8 @@ def pretty_item(it):
     m = re.match(r'^(small-key|key|nightmare-key|compass|map|stone-beak)-?(D\d)$', base)
     if m:
         return pretty_item(f'{m.group(2)}-{m.group(1)}')
+    if base.startswith('soul-'):  # boss souls (tools/rando/souls.py)
+        return base[5:].replace('-', ' ').title() + "'s Soul"
     return ITEMS.get(base) or base.replace('-', ' ').title()
 
 

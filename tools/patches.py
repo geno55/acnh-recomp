@@ -302,3 +302,20 @@ def _frame_steps(gen, a):
 
 
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
+
+
+# Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
+# create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
+# its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
+BOSS_SPAWN_SITE = 0x70008f5ed4
+
+
+def _boss_spawn(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+
+
+PATCHES[BOSS_SPAWN_SITE] = _boss_spawn

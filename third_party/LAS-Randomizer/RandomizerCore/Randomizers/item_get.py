@@ -343,6 +343,13 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
             ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': ''})
         ], after)
         
+    ### Boss souls (LAS Recomp, tools/rando/souls.py): not an inventory item - the flag of the same name lets the boss appear
+    if item.startswith('BossSoul'):
+        return event_tools.createActionChain(flowchart, before, [
+            ('EventFlags', 'SetFlag', {'symbol': item, 'value': True}),
+            ('Link', 'GenericItemGetSequenceByKey', {'itemKey': item, 'keepCarry': False, 'messageEntry': item})
+        ], after)
+
     ### everything else - play the get event before giving the item, otherwise it messes with index related messages
     # this is how the game normally does it, and so for the "you've collected them all" messages,
     # the game actually checks for 3 heart pieces and 4 golden leaves respectively
@@ -355,6 +362,9 @@ def insertItemGetAnimation(flowchart, item, index, before=None, after=None, play
 
 def insertItemWithoutAnimation(item, index):
     """Same as insertItemGetAnimation but without the Generic ItemGet animation"""
+
+    if item.startswith('BossSoul'):
+        return [('EventFlags', 'SetFlag', {'symbol': item, 'value': True})]
     
     if item == 'PowerBraceletLv1':
         return [
