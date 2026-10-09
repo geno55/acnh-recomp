@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "hle.h"
+#include "input_bind.h"
 
 #define SETTINGS_FILE settings_file()
 
@@ -72,6 +73,7 @@ void settings_load(void) {
         else if (!strcmp(key, "diff_damage")) g_settings.diff_damage = (float)atof(val);
         else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
         else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
+        else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -107,6 +109,7 @@ void settings_save(void) {
             g_settings.cheat_rupees);
     fprintf(f, "diff_damage = %.2f\ndiff_ohko = %d\ndiff_hero = %d\n", g_settings.diff_damage, g_settings.diff_ohko,
             g_settings.diff_hero);
+    bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);
 }

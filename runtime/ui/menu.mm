@@ -31,6 +31,8 @@ void rando_tab_draw(float scale);
 bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
+void controls_bindings_draw(float scale);  // controls_ui.mm
+#include "../input_bind.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -66,6 +68,7 @@ static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
     input_reset();  // nothing held while the menu had focus leaks into the game
+    bind_capture_cancel();
     if (open) save_editor_on_open();
     else settings_save();
 }
@@ -134,6 +137,7 @@ static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
+    if (g_open.load() && bind_capture_event(e)) return true;  // Controls tab waiting for a new binding: it takes the press
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
     if (g_kbd.load() == 1 && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) {  // Enter confirms, Esc cancels
@@ -454,6 +458,9 @@ static void tab_audio(void) {
 }
 
 static void tab_about(void) {
+    header("Controls");
+    controls_bindings_draw(ImGui::GetFontSize() / 34);
+    ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
     hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
@@ -468,17 +475,14 @@ static void tab_about(void) {
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         choice("Button icons", &g_settings.prompts, names, 4);
         hint("The game's button icons drawn for your controller. Auto follows the controller that's connected "
-             "(Nintendo icons with a keyboard or other pads). Buttons are matched by position: Switch A is "
-             "Xbox B / PlayStation circle.");
+             "(Nintendo icons with a keyboard or other pads). The icons follow the controller bindings above; by "
+             "default buttons are matched by position: Switch A is Xbox B / PlayStation circle.");
     }
     ImGui::Spacing();
-    header("Controls");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, or Minus + Plus (Back + Start)");
+    header("Menu");
+    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, Back + Start, or Home");
     ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
     ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
-    ImGui::Spacing();
-    header("Keyboard play");
-    ImGui::TextUnformatted("Move WASD   A K   B J   X L   Y I   L Q   R E   ZL 1   ZR 3   + Enter   - Backspace");
 }
 
 extern "C" bool inventory_overlay_wanted(void);

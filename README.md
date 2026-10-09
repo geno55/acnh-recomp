@@ -43,9 +43,10 @@ This is a 0.1 alpha release. That means bug are likely, crashes could occur, ran
 - Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts.
   - Switch games use fonts built into the Switch operating system for some text. Some sensible replacements were picked but optionally you may setup the Switch fonts for an authentic look. Switch fonts are Nintendo IP, you must provide them from your own hardware.
 - In-game overlay menu (F1, or Minus + Plus on a controller)
-- Keyboard and controller support
+- Keyboard and controller support, with every button and key remappable (Controls tab / start screen Settings >
+  Controls; menus keep a fixed layout, so a remap can never lock you out)
 - Button prompts for your controller: Xbox or PlayStation icons in the game's own UI and text when SDL reports
-  that controller (or pick Nintendo / Xbox / PlayStation yourself).
+  that controller (or pick Nintendo / Xbox / PlayStation yourself); the icons follow your controller remapping.
 - Optional 360-degree movement, blur removal and a hidden Hero Mode icon.
 - Apple MetalFX upscaler for macOS builds. Default.
 - Internal resolution adjustments. Pick how high you want the resolution to be or cut it down, match the display and dynamic resolution options. When combined with the MetalFX upscaler on Macs even a Macbook Air should be able to handle this easily with the right settings. Bilenear upscaling is the only option on Windows currently.
