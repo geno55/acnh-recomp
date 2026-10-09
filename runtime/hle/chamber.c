@@ -42,6 +42,15 @@ typedef struct { uint64_t addr; int32_t old; } Saved;
 static Saved g_saved[512];
 static int g_nsaved;  // a generated run is in progress (jumps out of PanelAdventure go to the exit)
 
+RT_ON_RESET(chamber_reset) {  // (reboot: no run in progress; the catalogue rows live in the wiped guest memory)
+    g_entrance = -1;
+    g_pending = 0;
+    g_run_active = 0;
+    g_novr = g_nsaved = 0;
+    strlcpy(g_exit_level, "Field", sizeof g_exit_level);
+    strlcpy(g_exit_loc, "Field_14D", sizeof g_exit_loc);
+}
+
 // Load a layout file; returns 0 on success.
 int chamber_load_file(const char *path) {
     FILE *f = fopen(path, "r");

@@ -59,9 +59,21 @@ static const char *current_level(void) {
 // m: the draw's model matrix (3x4 row-major). Fills tint (float4[2]) and returns true for an unchecked pot.
 // Pots of the current level, sorted by x (draws binary-search them); rebuilt when the level changes. (The Field has
 // ~920 bushes: a fixed 512-entry list left most of them never gold, and a linear scan per draw was slow.)
+typedef struct { int pot; float x, y, z; uint64_t seen, mesh; } Track;
+static Track g_track[8];  // carried pots (see below)
 static int *g_lv_idx, g_nlv = 0;
 static char g_lv_name[40] = "\x01";
 static uint64_t g_lv_frame = ~0ull;
+// Reboot: the next seed's pots.tsv / bushes.tsv.
+RT_ON_RESET(pot_glow_reset) {
+    free(g_pots), free(g_lv_idx);
+    g_pots = NULL, g_lv_idx = NULL;
+    g_npots = -1, g_nlv = 0;
+    strlcpy(g_lv_name, "\x01", sizeof g_lv_name);
+    g_lv_frame = ~0ull;
+    memset(g_track, 0, sizeof g_track);
+}
+
 static int by_x(const void *a, const void *b) {
     float d = g_pots[*(const int *)a].x - g_pots[*(const int *)b].x;
     return d < 0 ? -1 : d > 0;
@@ -95,8 +107,6 @@ bool pot_glow_active(void) {
 // draw (rotation allowed) within a short step of where a tracked gold pot was drawn in the last couple of frames
 // with the same mesh (vertex buffer) is that pot. Pots stand a tile apart, so a step this small can't jump to a
 // neighbour, and the mesh check keeps other draws (full-screen passes, Link) out.
-typedef struct { int pot; float x, y, z; uint64_t seen, mesh; } Track;
-static Track g_track[8];
 
 bool flags_ext_get(int idx);  // runtime/hle/flags_ext.c (flags 2048+ for bushes)
 static bool unchecked(const Pot *p) { return !flags_ext_get(p->flag); }

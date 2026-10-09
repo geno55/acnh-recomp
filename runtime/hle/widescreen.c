@@ -41,6 +41,8 @@ void widescreen_set_allowed(bool on) { g_allowed = on; }
 static volatile uint64_t g_site0_frame = ~0ull;
 static int g_indoor_streak, g_outdoor_streak;
 
+RT_ON_RESET(widescreen_reset) { g_indoor = false; g_indoor_streak = g_outdoor_streak = 0; }
+
 void widescreen_frame_end(uint64_t frame) {
     bool saw = g_site0_frame == frame;
     if (saw) { g_outdoor_streak++; g_indoor_streak = 0; }

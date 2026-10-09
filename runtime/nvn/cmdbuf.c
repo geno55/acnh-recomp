@@ -273,6 +273,7 @@ NVN(nvnCommandBufferSaveZCullData) { (void)c; }
 NVN(nvnCommandBufferRestoreZCullData) { (void)c; }
 
 static uint64_t copy_row_stride, copy_image_stride;
+RT_ON_RESET(cmdbuf_reset) { copy_row_stride = copy_image_stride = 0; }
 NVN(nvnCommandBufferSetCopyRowStride) {
     Snap s = snap(c);
     copy_row_stride = s.x[1];

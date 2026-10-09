@@ -31,7 +31,8 @@ Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (SDL3, FFmpeg, Vulkan, 
   inline-asm passthrough.
 - Renderer: Vulkan (runtime/nvn/vulkan) instead of Metal; shaders are translated to GLSL and compiled with
   shaderc. macOS keeps Metal.
-- Restart (seed switch, "Title screen") starts a new process and exits instead of exec().
+- Seed switches and "Title screen" reboot the game in place on both (runtime/main.c); the only re-exec left is
+  the startup retry when the guest window is taken, which on Windows starts a new process and exits.
 
 ## Tests
 - `tools/test_translate.sh`: shader translator fuzz (MSL output unchanged, GLSL compiles and validates).

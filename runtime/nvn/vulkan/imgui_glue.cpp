@@ -7,10 +7,10 @@ extern "C" {
 #include "vk.h"
 }
 
-static bool g_imgui_vk;
-
+// Per ImGui context (the start screen and the in-game menu each have one, and the start screen comes back after an
+// in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
-    if (g_imgui_vk) return true;
+    if (ImGui::GetIO().BackendRendererUserData) return true;
     ImGui_ImplVulkan_InitInfo ii = {};
     ii.ApiVersion = VK_API_VERSION_1_3;
     ii.Instance = g_vk.inst;
@@ -27,16 +27,15 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &g_vk.sc_format;
-    g_imgui_vk = ImGui_ImplVulkan_Init(&ii);
-    if (!g_imgui_vk) LOG("[vk] ImGui Vulkan backend init failed\n");
-    return g_imgui_vk;
+    bool ok = ImGui_ImplVulkan_Init(&ii);
+    if (!ok) LOG("[vk] ImGui Vulkan backend init failed\n");
+    return ok;
 }
 
 extern "C" void vk_imgui_backend_shutdown(void) {
-    if (!g_imgui_vk) return;
+    if (!ImGui::GetIO().BackendRendererUserData) return;
     vkDeviceWaitIdle(g_vk.dev);
     ImGui_ImplVulkan_Shutdown();
-    g_imgui_vk = false;
 }
 
 // A static RGBA8 image for ImGui (start screen background). Returns the ImTextureID.
