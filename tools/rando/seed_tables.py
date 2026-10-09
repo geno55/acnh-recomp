@@ -6,6 +6,9 @@ import sys
 import types
 
 WANT = ('Trade',)
+# + the flags runtime/hle/pets.c reads / sets (tools/rando/pets.py RUNTIME_FLAGS)
+EXACT = {'unused0427', 'unused0428', 'unused0429', 'unused0430', 'GhostClear1', 'Ghost2_Clear', 'Ghost3_Clear',
+         'Ghost4_Clear', 'WalrusAwaked'}
 
 
 def write_flags(seed_dir, oead_tools, romfs=None):
@@ -13,7 +16,7 @@ def write_flags(seed_dir, oead_tools, romfs=None):
     if not os.path.exists(p) and romfs:
         p = os.path.join(romfs, 'region_common', 'datasheets', 'GlobalFlags.gsheet')
     sheet = oead_tools.readSheet(p)
-    rows = [f"{v['symbol']}\t{int(v['index'])}\n" for v in sheet['values'] if str(v['symbol']).startswith(WANT)]
+    rows = [f"{v['symbol']}\t{int(v['index'])}\n" for v in sheet['values'] if str(v['symbol']).startswith(WANT) or str(v['symbol']) in EXACT]
     with open(os.path.join(seed_dir, 'flags.tsv'), 'w') as f:
         f.writelines(rows)
     return len(rows)

@@ -114,13 +114,17 @@ struct GenOpts {
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
     int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos (tools/rando/dungeon_gen.py)
+    bool pet_rooster = false, pet_ghost = false;  // pets in the pool (tools/rando/pets.py)
+    bool pet_marin = false;   // Marin in the pool, the desert closed until she wakes the Walrus (open-desert off)
 };
 static GenOpts g_opts;
 
-// ---- Seed IDs: a 20-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and every
-// generation option, with a checksum. Same ID + same LAS Recomp version = the same seed, so IDs can be shared. The
-// generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout changes.
-enum { SEED_ID_VERSION = 3, SEED_ID_BITS = 100 };  // v2: 36-bit random part; v3: + dungeon room shuffle (v2 IDs still load)
+// ---- Seed IDs: a 25-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and
+// every generation option, with a checksum in the last 5 bits. Same ID + same LAS Recomp version = the same seed, so
+// IDs can be shared. The generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout
+// changes. v2: 36-bit random part; v3: + dungeon room shuffle; v4: 25 characters (v2 / v3 IDs had 20: they still
+// load, the yes/no options that didn't fit them are off).
+enum { SEED_ID_VERSION = 4, SEED_ID_BITS = 125, SEED_ID_BITS_V3 = 100 };
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 struct Bits {
@@ -134,7 +138,8 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
     bool *f[] = {&o.bomb_bag, &o.powder_bag, &o.environments, &o.pets_in_dungeons, &o.skip_story, &o.enemy_minibosses,
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
-                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes};
+                 &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
+                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -180,19 +185,21 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
         x.put((uint64_t)(q - kB32), 5);
         chars++;
     }
-    if (chars != SEED_ID_BITS / 5) return "a seed ID has 20 characters";
-    if ((uint32_t)(x.b[95] | x.b[96] << 1 | x.b[97] << 2 | x.b[98] << 3 | x.b[99] << 4) != id_check(x, SEED_ID_BITS - 5))
+    if (chars != SEED_ID_BITS / 5 && chars != SEED_ID_BITS_V3 / 5) return "a seed ID has 25 characters";
+    int end = chars * 5 - 5;  // checksum position
+    if ((uint32_t)(x.b[end] | x.b[end + 1] << 1 | x.b[end + 2] << 2 | x.b[end + 3] << 3 | x.b[end + 4] << 4) != id_check(x, end))
         return "typo? (checksum doesn't match)";
     x.n = 0;
     int ver = (int)x.get(4);
-    if (ver != SEED_ID_VERSION && ver != 2) return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
+    if (chars == SEED_ID_BITS / 5 ? ver != SEED_ID_VERSION : ver != 2 && ver != 3)
+        return "made by another LAS Recomp version (ID format " + std::to_string(ver) + ")";
     GenOpts t = o;
     t.rng = x.get(36);
     t.logic = (int)x.get(3); t.dungeon_items = (int)x.get(2); t.keysanity = (int)x.get(2); t.traps = (int)x.get(3);
     t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
     t.room_shuffle = ver >= 3 ? (int)x.get(2) : 0;
-    for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.get(1);
-    if (t.room_shuffle > 2 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
+    for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.n < end ? x.get(1) : false;  // (20-char IDs: beyond = off)
+    if (t.room_shuffle > 2 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 3 || t.start_rupees > 999)
         return "not a valid seed ID";
     t.ohko = false;
     o = t;
@@ -273,6 +280,8 @@ static void start_generation(void) {
     static const char *rs[] = {"off", "coherent", "chaos"};
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
+    fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
+            g_opts.pet_ghost ? "true" : "false", g_opts.pet_marin ? "false" : "true");
     fprintf(f, " \"include\": [\"5-seashell-reward\", \"15-seashell-reward\", \"30-seashell-reward\", \"40-seashell-reward\", \"50-seashell-reward\"],\n");
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
@@ -344,6 +353,7 @@ static void section(const char *t) {
 }
 
 bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.mm
+extern "C" void pets_ui_draw(void);  // pets_ui.mm: call a found pet
 static std::string g_spoiler_seed;  // seed whose spoiler page is open
 
 extern "C" void rando_tab_draw(float scale) {
@@ -375,6 +385,7 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::PushTextWrapPos(0);
     ImGui::TextDisabled("Each seed has its own save files.");
     ImGui::PopTextWrapPos();
+    if (active) pets_ui_draw();
 
     ImGui::Checkbox("Show dungeon keys on the Items screen", &g_settings.inv_keys);
     if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
@@ -583,15 +594,35 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
-    static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
-    combo("Entrance randomizer", &g_opts.entrances, ent, 3);
+    static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves", "+ connector caves"};
+    combo("Entrance randomizer", &g_opts.entrances, ent, 4);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Houses & caves: the 43 single-entrance interiors are shuffled among themselves (with logic).\n"
-                          "Marin & Tarin's house, water entrances and caves only reached through other caves stay vanilla.");
+                          "Marin & Tarin's house, water entrances and caves only reached through other caves stay vanilla.\n"
+                          "Connector caves: also the 12 caves / houses with two or three doors linking two areas (Goponga,\n"
+                          "graveyard, Kanalet tunnel, river crossing, Tal Tal caves, Face Shrine cave, Richard's villa...):\n"
+                          "every cave door leads to another cave door, and the logic follows where each cave comes out.");
     ImGui::BeginDisabled(g_opts.entrances < 2);
     ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leaving a house puts you outside a different door than the one you came in by.");
     ImGui::EndDisabled();
+    ImGui::TextDisabled("Pets in the item pool:");
+    ImGui::SameLine();
+    ImGui::Checkbox("Flying Rooster", &g_opts.pet_rooster);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The Flying Rooster is an item: found, he follows you. The logic counts him wherever he can stand in\n"
+                          "for the feather or hookshot (in dungeons only with \"Companions allowed in dungeons\").");
+    ImGui::SameLine();
+    ImGui::Checkbox("Ghost", &g_opts.pet_ghost);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The Ghost is an item: found, he follows you and asks for his grave; take him there for the\n"
+                          "grave's check (the Owl). He no longer appears by himself after the Surf Harp.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Marin (desert closed)", &g_opts.pet_marin);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The Walrus sleeps in front of Yarna Desert until Marin sings to him: Marin is an item, and the\n"
+                          "desert needs her. Off: the desert is open from the start and Marin isn't in the pool.\n"
+                          "Found pets can be called back any time from this tab while playing (one follows you at a time).");
     static const char *rshuf[] = {"Off", "Coherent", "Chaos"};
     combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 3);
     if (ImGui::IsItemHovered())
@@ -613,7 +644,7 @@ extern "C" void rando_tab_draw(float scale) {
                           "Known issue: they appear but don't fight yet (they wait for their dungeon room's start event).");
     ImGui::EndDisabled();
     ImGui::Spacing();
-    ImGui::TextDisabled("In development: connector caves in the entrance pool, grass holds items.");
+    ImGui::TextDisabled("In development: grass holds items.");
     ImGui::Spacing();
     ImGui::BeginDisabled(g_gen_pid != 0);
     if (ImGui::Button(g_gen_pid ? "Generating..." : "Generate seed", ImVec2(320 * scale, 0))) start_generation();
