@@ -112,7 +112,7 @@ struct GenOpts {
     bool decoupled = false, pots = false, grass = false;
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
-    int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos (tools/rando/dungeon_gen.py)
+    int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
 };
 static GenOpts g_opts;
 
@@ -191,7 +191,7 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     t.seashells = (int)x.get(3); t.tunic = (int)x.get(4); t.entrances = (int)x.get(2); t.start_rupees = (int)x.get(10);
     t.room_shuffle = ver >= 3 ? (int)x.get(2) : 0;
     for (int i = 0; bool *f = opt_flags(t, i); i++) *f = x.get(1);
-    if (t.room_shuffle > 2 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
+    if (t.room_shuffle > 3 || t.logic > 4 || t.traps > 4 || t.seashells > 5 || t.tunic >= 14 || t.entrances > 2 || t.start_rupees > 999)
         return "not a valid seed ID";
     t.ohko = false;
     o = t;
@@ -269,7 +269,7 @@ static void start_generation(void) {
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
-    static const char *rs[] = {"off", "coherent", "chaos"};
+    static const char *rs[] = {"off", "coherent", "chaos", "madness"};
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"include\": [\"5-seashell-reward\", \"15-seashell-reward\", \"30-seashell-reward\", \"40-seashell-reward\", \"50-seashell-reward\"],\n");
@@ -589,8 +589,8 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leaving a house puts you outside a different door than the one you came in by.");
     ImGui::EndDisabled();
-    static const char *rshuf[] = {"Off", "Coherent", "Chaos"};
-    combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 3);
+    static const char *rshuf[] = {"Off", "Coherent", "Chaos", "Madness"};
+    combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 4);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Rebuilds the dungeons (all but Eagle's Tower) from shuffled rooms. Boss, mini-boss, stairs and\n"
                           "other key rooms stay where they are.\n"
@@ -598,6 +598,8 @@ extern "C" void rando_tab_draw(float scale) {
                           "every dungeon connected, a few rooms appear in two dungeons.\n"
                           "Chaos: any doorway can lead to any doorway of the dungeon. Every room is used once. Matching letters\n"
                           "(A-A, B-B...) appear on the dungeon map once you've been through a doorway, or all of them with the Map.\n"
+                          "Madness: Chaos with one-way doorways - going back through the door you came in by takes you\n"
+                          "somewhere else. Every room can still be reached and left.\n"
                           "The item logic follows the new layout (keys, locks, boss doors, one-way doors). Without keysanity\n"
                           "a dungeon's keys are inside that dungeon. Experimental: what a room needs to cross it (pits, water\n"
                           "inside the room) and what opens each shutter are approximated.");

@@ -125,6 +125,7 @@ static void boot(const char *root) {
 
     loader_load(exefs);
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
+    { extern void qol_tick(void), settings_load(void); settings_load(); qol_tick(); }  // (blur removal: before the post-process reads it)
     kernel_init();
     dispatch_init();
 

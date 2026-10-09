@@ -14,6 +14,7 @@
 
 #include "nvn.h"
 #include "renderer.h"
+#include "texpatch.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -161,6 +162,8 @@ typedef struct {
     uint64_t frame_cleared;  // LARECOMP_FRAME_CLEAR: frame it was last cleared at first use
     float sx, sy;        // allocation scale relative to the guest's size
     int reg;             // slot in g_reg (live textures, for the "largest textures" dump) + 1
+    int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
+    uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
 } TexBackend;
 
 // Live textures (diagnostics: the overworld slowdown at 32:9 - the same textures used 870 MB and 4x the GPU time
@@ -444,15 +447,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    if (!full) {
+    if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
+    if (!full && !restyle) {
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
     uint64_t h = hash_full(mem, total);
     b->full_frame = g_frame_counter;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->uploaded && h == b->data_hash) return;
-    if (b->uploaded) b->dynamic = true;
+    if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
     // callers without an encoder get a private upload command buffer, created only when needed
@@ -473,6 +479,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
+            if (b->tp > 0 && lv == 0 && layer == 0) texpatch_apply(b->tp - 1, lin, l.w, l.h, row);
             uint8_t *data = lin;
             uint32_t out_row = row;
             static int bc5log;  // LARECOMP_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
@@ -970,6 +977,8 @@ void ui_window_init(void) {
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow("Link's Awakening (LAS Recomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();

@@ -12,12 +12,13 @@
 #include "../hle.h"
 
 #define LIVE_SAVE 0x7001CBB220ull
-enum { IT_COMPASS = 43, IT_MAP = 44, IT_BEAK = 45, IT_SMALL_KEY = 46, IT_NIGHTMARE_KEY = 47 };
+// item ids as AddItem gets them: Items.gsheet `itemID` (not the row number; rows 41+ differ)
+enum { IT_COMPASS = 44, IT_MAP = 45, IT_BEAK = 47, IT_SMALL_KEY = 48, IT_NIGHTMARE_KEY = 49 };
 
 // Pot filler refills (tools/rando/pots.py REFILL_INDEX): bombs / magic powder / arrows only once Link has the bomb
 // bag / powder / bow (a refill would otherwise unlock them - "bombs must be found first"); before that a blue rupee.
 // Inventory bits: live save +0x5568 (notes/save_format.md): bit 2 bombs, bit 3 bow, bit 8 powder.
-enum { IT_BOMB = 4, IT_POWDER = 11, IT_ARROW = 58, IT_RUPEE_BLUE = 61, REFILL_INDEX = 80 };
+enum { IT_BOMB = 4, IT_POWDER = 11, IT_ARROW = 60, IT_RUPEE_BLUE = 102, REFILL_INDEX = 80 };
 
 static int refill(Cpu *c, int item, int count) {
     uint32_t inv = *(const uint32_t *)(uintptr_t)(LIVE_SAVE + 0x5568);
@@ -35,7 +36,7 @@ static int refill(Cpu *c, int item, int count) {
 int rt_add_item(Cpu *c) {
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
     if (index == REFILL_INDEX && (item == IT_BOMB || item == IT_POWDER || item == IT_ARROW)) return refill(c, item, count);
-    if (item < IT_COMPASS || item > IT_NIGHTMARE_KEY || index < 0 || index > 9 || index == 8) return 0;
+    if (index < 0 || index > 9 || index == 8) return 0;
     int rec = index == 9 ? 18 : 2 * index;
     uint8_t *r = (uint8_t *)(uintptr_t)(LIVE_SAVE + 0xE0 + 0x10 * rec);
     switch (item) {
@@ -44,14 +45,9 @@ int rt_add_item(Cpu *c) {
     case IT_MAP: r[1] |= 2; break;
     case IT_BEAK: r[1] |= 4; break;
     case IT_NIGHTMARE_KEY: r[1] |= 8; break;
+    default: return 0;
     }
-    static const char *names[] = {"Tail Cave", "Bottle Grotto", "Key Cavern", "Angler's Tunnel", "Catfish's Maw",
-                                  "Face Shrine", "Eagle's Tower", "Turtle Rock", "", "Color Dungeon"};
-    static const char *what[] = {"Compass", "Dungeon Map", "Stone Beak", "Small Key", "Nightmare Key"};
-    char t[96];
-    snprintf(t, sizeof t, "%s  -  %s", what[item - IT_COMPASS], names[index]);
-    extern void ui_toast(const char *text);
-    ui_toast(t);
+    // (the get-item message names the dungeon: seed text, tools/rando/keysanity_text.py)
     LOG("[keysanity] item %d x%d -> dungeon %d (record %d: keys %d bits %#x)\n", item, count, index, rec, r[0], r[1]);
     return 1;
 }
