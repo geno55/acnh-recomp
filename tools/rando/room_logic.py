@@ -47,6 +47,10 @@ OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 MAX_TERMS = 48
 
 
+# location subtypes LAS shuffles (shuffler.py: every other item location keeps its vanilla content)
+RANDOMIZED_SUBTYPES = ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')
+
+
 def cell_pos(cell):  # '06C' -> (col 2, row 6)
     return ord(cell[2]) - ord('A'), int(cell[:2])
 
@@ -407,16 +411,23 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             delta = locks - item_defs[f'key-D{n}']['quantity']
             item_defs[f'key-D{n}']['quantity'] = locks
             junk_delta[0] += delta
-    # balance the pool: take (or give back) junk for the keys added (or removed)
+    # balance the pool: take (or give back) junk for the keys added (or removed). Junk that locations LAS keeps
+    # vanilla still hold stays (e.g. the Color Dungeon's blue rupees without blupsanity: 'x not in list' in LAS)
+    kept = {}
+    for k, v in logic_defs.items():
+        if v.get('type') == 'item' and (v.get('subtype') not in RANDOMIZED_SUBTYPES or k.startswith('D0-rupee-')):
+            kept[v.get('content')] = kept.get(v.get('content'), 0) + 1
+    spare = lambda k: item_defs[k]['quantity'] - kept.get(k, 0)  # noqa: E731
     junk = sorted((k for k, d in item_defs.items() if k.startswith(('rupee-', 'chamber-stone')) and d.get('quantity', 0) > 0),
                   key=lambda k: -item_defs[k]['quantity'])
     left = junk_delta[0]
+    junk = [k for k in junk if spare(k) > 0]
     while left > 0 and junk:
         for k in junk:
-            if left and item_defs[k]['quantity'] > 0:
+            if left and spare(k) > 0:
                 item_defs[k]['quantity'] -= 1
                 left -= 1
-        junk = [k for k in junk if item_defs[k]['quantity'] > 0]
+        junk = [k for k in junk if spare(k) > 0]
     if left < 0 and junk:
         item_defs[junk[0]]['quantity'] -= left
     shuffled = {LEVELS[lv][0] for lv in layouts}
