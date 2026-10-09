@@ -1318,6 +1318,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         vk_views_forget(d);  // (resolution change)
         vk_defer_image(d->image, d->mem);
         d->image = VK_NULL_HANDLE;
+        d->mem = VK_NULL_HANDLE;
     }
     if (!d->image) {
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = src->format,

@@ -332,8 +332,9 @@ void vk_defer_view(VkImageView v) { defer((Dead){.view = v}); }
 
 static void destroy_image(TexBackend *b) {
     views_forget(b);
-    defer((Dead){.img = b->image, .mem = b->mem});
+    if (b->image || b->mem) defer((Dead){.img = b->image, .mem = b->mem});  // (never the same allocation twice)
     b->image = VK_NULL_HANDLE;
+    b->mem = VK_NULL_HANDLE;
 }
 
 static TexBackend *tex_backend(NvnTexture *t) {
