@@ -179,6 +179,12 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             }
             pos[0] = pos2[0] = x;
             pos[2] = pos2[2] = z;
+            // on this doorway's floor: the pair's way back lands here and knows its height (raised doorways, Chaos)
+            for (int k = 0; k < g_njumps; k++) {
+                const Jump *b = &g_jumps[k];
+                if (b->trow == row && b->tcol == col && b->tside == side && !strcmp(b->level, lv) && b->height > 0.3f)
+                    { pos[1] = pos2[1] = b->height + 0.05f; break; }
+            }
             px0 = x, pz0 = z;
             er = j->trow, ec = j->tcol;
             g_test_lx = side == 'W' ? -32767 : side == 'E' ? 32767 : 0;  // walk out
@@ -317,7 +323,7 @@ void doorjump_tick(uint64_t frame) {
         default: depth = 12.0f - lz; lateral = lx; out = dz; break;
         }
         if (ENV("LARECOMP_DOORJUMP_LOG") && depth < 1.5f)
-            LOG("[doorjump] f%llu %c depth %.3f lateral %.3f out %.4f still %d\n", (unsigned long long)frame, j->side, depth, lateral, out, j->still);
+            LOG("[doorjump] f%llu %c depth %.3f lateral %.3f out %.4f still %d y %.2f\n", (unsigned long long)frame, j->side, depth, lateral, out, j->still, pos[1]);
         // (pressed against the wall he bounces between two positions each frame, ~0.3 from the edge)
         if (depth > 0.7f || fabsf(lateral - j->own * 0.75f) > 1.2f) { j->still = 0; continue; }  // per doorway: a cell's other doorways mustn't reset it
         if (depth > 0.55f) continue;
