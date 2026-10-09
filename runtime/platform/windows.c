@@ -252,7 +252,14 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     STARTUPINFOW si = {.cb = sizeof si, .dwFlags = STARTF_USESTDHANDLES, .hStdInput = NULL, .hStdOutput = log,
                        .hStdError = log};
     PROCESS_INFORMATION pi;
-    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    // CreateProcess doesn't resolve relative paths written with '/' (tools/hactool/hactool.exe): pass the program
+    // as a full path, like posix_spawn takes it as given
+    static __thread wchar_t wprog[MAX_PATH], wfull[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, argv[0], -1, wprog, MAX_PATH);
+    for (wchar_t *p = wprog; *p; p++) if (*p == L'/') *p = L'\\';
+    const wchar_t *app = GetFullPathNameW(wprog, MAX_PATH, wfull, NULL) ? wfull : NULL;
+    BOOL ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (!ok) fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
     CloseHandle(log);
     if (!ok) return 0;
     CloseHandle(pi.hThread);
