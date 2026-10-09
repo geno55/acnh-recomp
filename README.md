@@ -41,7 +41,7 @@ This is a 0.1 alpha release. That means bug are likely, crashes could occur, ran
 - Unlocked aspect ratio: wider (or taller) windows show more of the island, up to ultrawide; houses and dungeons
   keep their framing. The original 16:9 framing is one option away.
 - Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts.
-- -Switch games use fonts built into the Switch operating system for some text. Some sensible replacements were picked but optionally you may setup the Switch fonts for an authentic look. Switch fonts are Nintendo IP, you must provide them from your own hardware.
+  - Switch games use fonts built into the Switch operating system for some text. Some sensible replacements were picked but optionally you may setup the Switch fonts for an authentic look. Switch fonts are Nintendo IP, you must provide them from your own hardware.
 - In-game overlay menu (F1, or Minus + Plus on a controller)
 - Keyboard and controller support
 - Apple MetalFX upscaler for macOS builds. Default.
@@ -66,10 +66,10 @@ This is a 0.1 alpha release. That means bug are likely, crashes could occur, ran
 - Pets - Ghost, Marin (unlocks Dessert, open dessert an option and Marin not in the pool), Rooster (In Logic for Feather checks, including in dungeons if enabled), Ghost (Find the Ghost drop to unlock grave check)
 - Entrance Randomizer - Shuffles all entrances. Includes a decoupled option.
 - Dungeon Room Shuffler - Shuffles all dungeon rooms creating unique custom dungeons every seed. Three modes:
-- -Coherent: Dungeon rooms are shuffled but connecting rooms are lined up, to make this work in logic dungeons use duplicate rooms sometimes (as little as possible) to maintain a workable logical dungeon.
-- -Chaos: Dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to door from another direction.
-- -Madness: Dungeon rooms are shuffled in a way that doesn't need to make sense AND are uncoupled creating nightmares to navigate.
-- -Optionally the map can show what's connected to what as you explore or in full when you find the in game map.
+  - Coherent: Dungeon rooms are shuffled but connecting rooms are lined up, to make this work in logic dungeons use duplicate rooms sometimes (as little as possible) to maintain a workable logical dungeon.
+  - Chaos: Dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to door from another direction.
+  - Madness: Dungeon rooms are shuffled in a way that doesn't need to make sense AND are uncoupled creating nightmares to navigate.
+  - Optionally the map can show what's connected to what as you explore or in full when you find the in game map.
 - Inventory screen tracks keys and trade items for individual dungeons so you can see at a glance what you have keys for or what trade items you have. 
 - Built in check tracker on overworld map (optional)
 
