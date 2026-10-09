@@ -13,6 +13,14 @@ static KEvent *msg_event;
 static uint32_t msg_queue[16];
 static int msg_count;
 
+static bool preselected_popped;
+RT_ON_RESET(am_reset) {  // (reboot: the message queue starts over with FocusStateChanged)
+    msg_event = NULL;
+    msg_event_r = msg_event_w = 0;
+    msg_count = 0;
+    preselected_popped = false;
+}
+
 static void am_init_once(void) {
     if (msg_event) return;
     msg_event = kernel_create_event_pair(&msg_event_w, &msg_event_r);
@@ -128,7 +136,6 @@ extern const uint8_t g_user_id[16];
 
 static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
-    static bool preselected_popped;
     switch (req->cmd) {
     case 1:  // PopLaunchParameter(kind)
         if (IN(uint32_t, 0) == 2 && !preselected_popped) {  // PreselectedUser

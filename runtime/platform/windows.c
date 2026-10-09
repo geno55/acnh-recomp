@@ -45,6 +45,11 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     return true;
 }
 
+// Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
+bool plat_reset_guest(uint64_t lo, uint64_t hi) {
+    return VirtualFree((void *)(uintptr_t)lo, hi - lo, MEM_DECOMMIT) != 0;
+}
+
 void plat_commit(uint64_t addr, uint64_t size) {
     if (!size) return;
     uint64_t a = addr & ~0xFFFull, e = (addr + size + 0xFFF) & ~0xFFFull;

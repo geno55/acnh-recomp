@@ -13,6 +13,7 @@ static uint32_t new_event_handle(void) {
 // ------------------------------------------------------------------ hid
 KSharedMem *g_hid_shmem;
 static uint32_t hid_shmem_handle;
+RT_ON_RESET(hid_reset) { g_hid_shmem = NULL; hid_shmem_handle = 0; }
 
 static void applet_resource(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;

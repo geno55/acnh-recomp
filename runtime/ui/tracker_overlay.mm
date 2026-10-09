@@ -172,6 +172,14 @@ static void load(void) {
 
 // ---- reachability
 static std::vector<int> g_acc;  // count per token
+
+RT_ON_RESET(tracker_reset) {  // (reboot: the next seed's tracker.tsv; the map page object was guest memory)
+    g_tok.clear(), g_tok_names.clear(), g_nodes.clear(), g_checks.clear(), g_groups.clear();
+    g_seed_settings.clear(), g_flag_idx.clear(), g_acc.clear();
+    g_loaded = 0;
+    g_map_frame = g_map_opened = g_map_obj = 0;
+    g_map_zoomed = 0;
+}
 static bool flag_set(int i) { return i >= 0 && i < 2048 && (LD8(EVENT_FLAGS + (i >> 3)) >> (i & 7)) & 1; }
 static int &A(int id) {  // access count; tokens interned after sizing (e.g. "x[pit]") grow the table
     if (id >= (int)g_acc.size()) g_acc.resize(id + 64, 0);

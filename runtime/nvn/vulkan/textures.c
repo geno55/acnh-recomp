@@ -338,6 +338,22 @@ static void destroy_image(TexBackend *b) {
     b->mem = VK_NULL_HANDLE;
 }
 
+// Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
+static NvnTexture **g_live;
+static int g_nlive, g_cap_live;
+static void live_add(NvnTexture *t, TexBackend *b) {
+    if (g_nlive == g_cap_live) { g_cap_live = g_cap_live ? g_cap_live * 2 : 1024; g_live = realloc(g_live, g_cap_live * sizeof *g_live); }
+    g_live[g_nlive++] = t;
+    b->reg = g_nlive;
+}
+static void live_remove(TexBackend *b) {
+    if (!b->reg) return;
+    NvnTexture *last = g_live[--g_nlive];
+    g_live[b->reg - 1] = last;
+    if (last->backend) ((TexBackend *)last->backend)->reg = b->reg;
+    b->reg = 0;
+}
+
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
@@ -352,17 +368,27 @@ static TexBackend *tex_backend(NvnTexture *t) {
     b->scalable = tex_scalable(t);
     create_image(t, b);
     t->backend = b;
+    live_add(t, b);
     return b;
 }
 
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
+        live_remove(b);
         destroy_image(b);
         free(b->pending_rgba);
         free(b);
     }
     t->backend = NULL;
+}
+
+// Reboot (device.c backend_reset; GPU idle): every game texture and its views go.
+void vk_textures_reset(void) {
+    int n = g_nlive;
+    while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
+    vk_collect_dead();
+    LOG("[vk] reboot: %d textures released\n", n);
 }
 
 // ================================================================== uploads (same change detection as metal.m)

@@ -585,6 +585,51 @@ void backend_init(void) {
 
 id<MTLCommandQueue> renderer_queue(void) { return queue; }
 
+// ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
+static NvnTexture *g_last_presented;
+// Every game texture goes (the NvnTexture structs themselves are leaked: guest memory pointed at them), the
+// renderer drops what is keyed by guest addresses / objects, and the heap wrapper is let go: guest memory is
+// about to be replaced (backend_guest_memory_reset wraps the new pages).
+void backend_reset(void) {
+    if (!queue) return;  // the game never initialised NVN
+    extern void renderer_reset(void);
+    extern void renderer_flush(void);
+    renderer_flush();  // (everything submitted has completed)
+    int n = g_reg_n;
+    while (g_reg_n > 0) backend_texture_destroyed(g_reg[g_reg_n - 1]);
+    renderer_reset();
+    g_last_presented = NULL;
+    g_guest_buffer = nil;
+    LOG("[metal] reboot: %d textures released (%d left alive, %.0f MB)\n", n, g_tex_live, g_tex_live_bytes / 1048576.0);
+}
+
+void backend_guest_memory_reset(void) {
+    if (!queue) return;
+    g_guest_buffer = [dev newBufferWithBytesNoCopy:(void *)HEAP_BASE length:HEAP_MAX
+                                           options:MTLResourceStorageModeShared deallocator:nil];
+    if (!g_guest_buffer) FATAL("cannot wrap guest heap in a Metal buffer\n");
+}
+
+// The window goes black while the game is down (instead of holding its last frame).
+void backend_clear_window(void) {
+    if (!layer || !dev) return;
+    @autoreleasepool {
+        id<CAMetalDrawable> drawable = [layer nextDrawable];
+        if (!drawable) return;
+        id<MTLCommandQueue> q = queue ? queue : [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = drawable.texture;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+        [cb presentDrawable:drawable];
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
+
 // ================================================================== screenshots
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -738,7 +783,6 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
 
 static double last_fps_time;
 
-static NvnTexture *g_last_presented;
 void backend_present(NvnTexture *t);
 // Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
 // keeps drawing and taking input.
@@ -872,6 +916,8 @@ void backend_present(NvnTexture *t) {
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);
     warp_frame(total_frames);
+    extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
+    reboot_test_frame(total_frames);
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     static long shot_every = -1;
@@ -945,16 +991,18 @@ SDL_Window *ui_window(void) { return window; }
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 
-void ui_run(void) {
+int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
     // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
     static id activity;
-    activity = [[NSProcessInfo processInfo]
-        beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
-                          reason:@"Game emulation"];
+    if (!activity)
+        activity = [[NSProcessInfo processInfo]
+            beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
+                              reason:@"Game emulation"];
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
+        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }

@@ -2,7 +2,7 @@
 //
 // A seed lives in rando/<name>/: romfs/ (replacement game files), exefs/1.0.0.pchtxt (code/data patches),
 // settings.json, spoiler log, and save/ (this seed's own save slots). The active seed is chosen in the menu
-// (larecomp.ini `rando_seed`); the game reboots to switch.
+// (larecomp.ini `rando_seed`); switching reboots the game in place (runtime/main.c), which calls rando_boot.
 //
 // Code patches: gen.py compiled every variant of every patched instruction in (tools/rando/patch_variants.json);
 // rando_word() tells the generated code which one the seed uses (0 = the original instruction).
@@ -25,7 +25,8 @@ static struct { uint64_t addr; uint32_t word; } words[WORD_TAB];
 static int nwords;
 static char g_seed_dir[512];
 static bool g_active;
-static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+static int g_inited;
+static pthread_mutex_t g_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void rando_init(void);
 const char *rando_seed_dir(void) {
@@ -102,7 +103,32 @@ static void init(void) {
     LOG("[rando] seed \"%s\" active\n", seed);
 }
 
-void rando_init(void) { pthread_once(&g_once, init); }
+void rando_init(void) {
+    if (__atomic_load_n(&g_inited, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_init_lock);
+    if (!g_inited) { init(); __atomic_store_n(&g_inited, 1, __ATOMIC_RELEASE); }
+    pthread_mutex_unlock(&g_init_lock);
+}
+
+// Each boot, right after the modules are loaded (runtime/main.c): the chosen seed (it may have changed since the
+// last boot) and its data patches, into the freshly loaded module.
+void rando_boot(void) {
+    pthread_mutex_lock(&g_init_lock);
+    nwords = 0;
+    g_active = false;
+    g_seed_dir[0] = 0;
+    init();
+    __atomic_store_n(&g_inited, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_init_lock);
+}
+
+// Pick the seed for the next boot ("" = vanilla) and remember it (larecomp.ini); a choice made in the game wins over
+// LARECOMP_RANDO_SEED (test runs).
+void rando_select(const char *seed) {
+    strlcpy(g_settings.rando_seed, seed ? seed : "", sizeof g_settings.rando_seed);
+    settings_save();
+    unsetenv("LARECOMP_RANDO_SEED");
+}
 
 uint32_t rando_word(uint64_t addr) {
     rando_init();

@@ -103,10 +103,12 @@ static int load_one(const char *path, Font *ft) {
     return 1;
 }
 
+static int g_fonts_loaded;
+RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); }  // (they were in the HLE heap)
+
 static void load_fonts(void) {
-    static int done;
-    if (done) return;
-    done = 1;
+    if (g_fonts_loaded) return;
+    g_fonts_loaded = 1;
     const char *env = getenv("LARECOMP_FONT");
     const char *std[] = {env, "fonts/nintendo_udsg-r_std_003.bfttf", "fonts/nintendo_udsg-r_std_003.ttf",
                          "fonts/nintendo_udsgr_std_003.ttf", "fonts/nintendo_udsgr_std_003.bfttf",

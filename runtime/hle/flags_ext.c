@@ -33,6 +33,21 @@ static int g_nslots;
 static char g_current[1024];    // slot file of the save in play ("" = unknown / new game)
 static uint32_t g_live_crc;     // body CRC of the save in play when we last matched it
 
+static bool g_was_blank = true;  // the live save's flags were all clear at the last sync (title screen / new game)
+static uint8_t g_prev_ext[256];  // (log extended flags set by the game)
+
+// Reboot: the next seed decides whether the extension is on; no save in play.
+RT_ON_RESET(flags_ext_reset) {
+    memset(g_buf, 0, sizeof g_buf);
+    memset(g_shadow, 0, sizeof g_shadow);
+    memset(g_prev_ext, 0, sizeof g_prev_ext);
+    g_on = -1;
+    g_nslots = 0;
+    g_current[0] = 0;
+    g_live_crc = 0;
+    g_was_blank = true;
+}
+
 static bool enabled(void) {
     if (g_on < 0) {
         const char *e = ENV("LARECOMP_FLAGS_EXT");
@@ -117,11 +132,10 @@ void flags_ext_tick(void) {
             }
     }
     // a new game: the save's flags start all clear -> so do the extra ones
-    static bool was_blank = true;
     bool blank = true;
     for (int i = 0; i < 256 && blank; i++) blank = live[i] == 0;
-    if (blank && !was_blank) { memset(g_buf + 256, 0, 256); g_current[0] = 0; LOG("[flags] new game: extra flags cleared\n"); }
-    was_blank = blank;
+    if (blank && !g_was_blank) { memset(g_buf + 256, 0, 256); g_current[0] = 0; LOG("[flags] new game: extra flags cleared\n"); }
+    g_was_blank = blank;
     if (p == LIVE_FLAGS) {  // take over the bitfield
         memcpy(g_buf, live, 256);
         memcpy(g_shadow, live, 256);
@@ -137,13 +151,12 @@ void flags_ext_tick(void) {
     }
     memcpy(live, g_buf, 256);
     memcpy(g_shadow, g_buf, 256);
-    static uint8_t prev_ext[256];  // (log extended flags set by the game)
     for (int i = 0; i < 256; i++)
-        if (g_buf[256 + i] != prev_ext[i]) {
+        if (g_buf[256 + i] != g_prev_ext[i]) {
             for (int b = 0; b < 8; b++)
-                if ((g_buf[256 + i] ^ prev_ext[i]) >> b & 1)
+                if ((g_buf[256 + i] ^ g_prev_ext[i]) >> b & 1)
                     LOG("[flags] flag %d -> %d\n", 2048 + i * 8 + b, (g_buf[256 + i] >> b) & 1);
-            prev_ext[i] = g_buf[256 + i];
+            g_prev_ext[i] = g_buf[256 + i];
         }
 }
 

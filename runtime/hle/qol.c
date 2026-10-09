@@ -57,15 +57,17 @@ static void set_tilt_name(bool removed) {
     else memcpy(p, g_tilt_orig, sizeof g_tilt_orig);
 }
 
+static int g_tilt_applied = -1;  // blur removal as last applied to the module (-1: not yet)
+RT_ON_RESET(qol_reset) { g_tilt_applied = -1; }  // (reboot: the module is loaded again with the original name)
+
 // Game thread, once per frame (runtime/hle/input.c) and at boot (before the post-process is set up).
 void qol_tick(void) {
-    static int applied = -1;
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
     int want = env == 2 ? g_settings.blur_removal : env;
-    if (want != applied) {
+    if (want != g_tilt_applied) {
         set_tilt_name(want);
-        if (applied >= 0 || want) LOG("[qol] blur removal %s\n", want ? "on" : "off");
-        applied = want;
+        if (g_tilt_applied >= 0 || want) LOG("[qol] blur removal %s\n", want ? "on" : "off");
+        g_tilt_applied = want;
     }
 }

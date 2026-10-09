@@ -21,6 +21,15 @@ static char g_level[64], g_locator[64];
 static volatile int g_pending;
 static volatile uint64_t g_request;
 
+static uint64_t g_req;  // our level-jump request (HLE heap)
+static volatile int g_give_pending;
+RT_ON_RESET(warp_reset) {  // (reboot: nothing queued; the request objects were in the wiped memory)
+    g_pending = 0;
+    g_request = 0;
+    g_req = 0;
+    g_give_pending = 0;
+}
+
 // Called from the generated code when a level registers its request object.
 void rt_warp_request_obj(uint64_t r) {
     if (r != g_request) LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
@@ -163,8 +172,8 @@ void warp_game_tick(Cpu *c) {
         LOG("[warp] ignored: not in a game\n");
         return;
     }
-    static uint64_t req;
-    if (!req) req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    if (!g_req) g_req = (uint64_t)(uintptr_t)hle_alloc(0x200);
+    uint64_t req = g_req;
     pthread_mutex_lock(&g_lock);
     size_t ll = strlen(g_level), lc = strlen(g_locator);
     memset((void *)(uintptr_t)req, 0, 0x200);
@@ -187,7 +196,6 @@ void warp_game_tick(Cpu *c) {
 // ---- give item (game thread): main+0x7e18b0 = AddItem(itemId, count, index, autoEquip), the call behind the
 // Inventory.AddItemByKey event action (itemId = row of datasheets/Items.gsheet, e.g. 78 PanelDungeonPiece).
 #define ADD_ITEM (MAIN_BASE + 0x7e18b0)
-static volatile int g_give_pending;
 static int g_give_id, g_give_count, g_give_index;
 
 void give_item_request(int id, int count, int index) {

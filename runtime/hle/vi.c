@@ -9,6 +9,7 @@ static uint32_t vsync_r, vsync_w;
 static KEvent *vsync_event;
 uint32_t vi_vsync_handle(void) { return vsync_r; }
 volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c)
+uint64_t g_native_window;
 
 static void *vsync_thread(void *arg) {
     (void)arg;
@@ -50,12 +51,16 @@ HLE_FUNC("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", vi_create_layer) 
 HLE_FUNC("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", vi_destroy_layer) { (void)c; }
 HLE_FUNC("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii", vi_set_layer_crop) { c->x[0] = 0; }
 
-uint64_t g_native_window;
-
 HLE_FUNC("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window) {
     if (!g_native_window) g_native_window = (uint64_t)hle_alloc(0x100);
     *(uint64_t *)(uintptr_t)c->x[0] = g_native_window;
     c->x[0] = 0;
+}
+
+// Reboot: the vsync timer and its event live on (the kernel's handle table doesn't): new handles at the next boot.
+RT_ON_RESET(vi_reset) {
+    vsync_r = vsync_w = 0;
+    g_native_window = 0;  // (HLE heap)
 }
 
 HLE_FUNC("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", vi_get_vsync_event) {
@@ -63,6 +68,9 @@ HLE_FUNC("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Display
         vsync_event = kernel_create_event_pair(&vsync_w, &vsync_r);
         pthread_t t;
         pthread_create(&t, NULL, vsync_thread, NULL);
+    } else if (!vsync_r) {
+        vsync_w = kernel_new_handle(vsync_event);
+        vsync_r = kernel_new_handle(vsync_event);
     }
     // nn::os::AttachReadableHandleToSystemEvent(event, handle, managed=false, clear_mode=AutoClear)
     c->x[1] = vsync_r;

@@ -17,6 +17,7 @@ void guest_call(Cpu *c, uint64_t addr);
 
 typedef struct { uint64_t obj, first, last; int woken; } Seen;
 static Seen g_seen[32];
+RT_ON_RESET(miniboss_reset) { memset(g_seen, 0, sizeof g_seen); }
 extern uint64_t renderer_present_count(void);
 
 void rt_mb_seen(Cpu *c) {

@@ -252,6 +252,7 @@ void menu_apply_window_requests(void *win) {
 
 // ------------------------------------------------------------------ render thread
 static bool g_inited;
+static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
 static int g_tab, g_tab_request = -1;
 int g_tab_request_ext = -1;
@@ -290,7 +291,6 @@ static void style_init(void) {
     c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
 }
 
-extern "C" void rt_restart_to_title(void);  // runtime/main.c: back to the start screen
 
 #ifdef __APPLE__
 static void init(id<MTLDevice> dev) {
@@ -298,7 +298,8 @@ static void init(id<MTLDevice> dev) {
 static void init(void) {
 #endif
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    g_ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -488,6 +489,15 @@ extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
 
+// Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
+RT_ON_RESET(menu_reset) {
+    set_open(false);
+    g_kbd = 0;
+    pthread_mutex_lock(&q_lock);
+    q_events.clear();
+    pthread_mutex_unlock(&q_lock);
+}
+
 static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
     float w = fminf(io.DisplaySize.x * 0.9f, 1100 * scale);
@@ -554,7 +564,7 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
-    while (g_kbd.load() == 1) {  // ~60 Hz
+    while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
         backend_represent();
         uint64_t dt = SDL_GetTicks() - t0;
@@ -588,6 +598,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #else
     if (!g_inited) init();
 #endif
+    ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)tw, (float)th);
     io.DisplayFramebufferScale = ImVec2(1, 1);
@@ -657,7 +668,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         if (ImGui::Button("Resume game", ImVec2(230 * scale, 0))) set_open(false);
         if (ImGui::BeginPopupModal("##totitle", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::Text("Return to the title screen? Progress since your last save is lost.");
-            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) rt_restart_to_title();
+            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) {  // (the game reboots in place)
+                ImGui::CloseCurrentPopup();
+                rt_request_reboot(RT_REBOOT_TITLE);
+            }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(230 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
                 ImGui::CloseCurrentPopup();

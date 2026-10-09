@@ -1,5 +1,7 @@
 // Kernel object types shared by kernel.c and the IPC/service layer.
 #pragma once
+#include <setjmp.h>
+
 #include "rt.h"
 
 #define STACK_BASE 0x7200000000ull
@@ -31,6 +33,10 @@ struct KThread {
     KThread *wnext;
     KThread *snext;        // in WaitSynchronization (g_syncwaiters)
     pthread_cond_t cond;   // each thread sleeps on its own condition; wakers signal it directly
+    // in-place reboot (kernel_stop_threads): thread_main's setjmp point, where the thread unwinds to and ends
+    jmp_buf unwind;
+    bool started, finished;
+    KThread *anext;        // every thread of this boot (g_klock)
 };
 
 typedef struct KSharedMem {

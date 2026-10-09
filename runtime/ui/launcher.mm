@@ -5,7 +5,7 @@
 // that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
 //
 // Skipped with --play, LARECOMP_NO_LAUNCHER=1, or any scripted test run (LARECOMP_INPUT): tests boot straight in.
-// Choosing a seed here (or vanilla) is how seeds change without the in-game restart dance.
+// The in-game menu's "Title screen" comes back here without leaving the process (runtime/main.c reboots the game).
 #ifdef __APPLE__
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -423,7 +423,9 @@ extern "C" void launcher_run(const char *root) {
 #endif
 
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    ImGuiContext *prev_ctx = ImGui::GetCurrentContext();  // the in-game menu's, when back here after a reboot
+    ImGuiContext *ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
@@ -754,6 +756,7 @@ extern "C" void launcher_run(const char *root) {
     vk_imgui_backend_shutdown();
 #endif
     ImGui_ImplSDL3_Shutdown();
-    ImGui::DestroyContext();
+    ImGui::DestroyContext(ctx);
+    ImGui::SetCurrentContext(prev_ctx);
     g_bg = 0;
 }

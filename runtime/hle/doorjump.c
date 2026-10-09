@@ -87,6 +87,24 @@ static void load(void) {
     LOG("[doorjump] %d mismatched doorways from %s\n", g_njumps, path);
 }
 
+static uint64_t g_player;          // find_player: the PlayerCollision component found last
+static uint64_t g_player_scan;     // frame of the last heap scan
+static char g_player_level[64];    // level it was found in
+extern uint64_t g_stick_freeze_until;  // (below)
+static uint64_t g_hold_until;      // place_tick: Link held at a far jump's landing spot until this frame
+
+// Reboot: the next seed's door_jumps.tsv, nothing found in the old heap.
+RT_ON_RESET(doorjump_reset) {
+    free(g_jumps);
+    g_jumps = NULL;
+    g_njumps = -1;
+    g_npairs = 0;
+    g_player = g_player_scan = 0;
+    g_player_level[0] = 0;
+    g_hold_until = 0;
+    g_stick_freeze_until = 0;
+}
+
 static int is_player_collision(uint64_t p) {
     return LD64(p) == PLAYER_COLLISION_VT && LD64(p + 8) == p &&
            !memcmp((const void *)(uintptr_t)(p + 0x18), "PlayerCollision", 16);
@@ -96,20 +114,18 @@ static int is_player_collision(uint64_t p) {
 // player can stay in freed memory looking valid) and when the cached pointer goes stale. Several candidates:
 // log them all (LARECOMP_DOORJUMP_LOG) and take the last one found (newest allocation is the live one - checked).
 static uint64_t find_player(uint64_t frame) {
-    static uint64_t cached, last_scan;
-    static char level[64];
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
-    if (strncmp(level, lv, sizeof level - 1)) {  // new level: rescan once it has settled
-        strlcpy(level, lv, sizeof level);
-        cached = 0;
-        last_scan = frame;
+    if (strncmp(g_player_level, lv, sizeof g_player_level - 1)) {  // new level: rescan once it has settled
+        strlcpy(g_player_level, lv, sizeof g_player_level);
+        g_player = 0;
+        g_player_scan = frame;
         return 0;
     }
-    if (cached && is_player_collision(cached)) return cached;
-    cached = 0;
-    if (frame - last_scan < 30) return 0;
-    last_scan = frame;
+    if (g_player && is_player_collision(g_player)) return g_player;
+    g_player = 0;
+    if (frame - g_player_scan < 30) return 0;
+    g_player_scan = frame;
     extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
     uint64_t ra[64], rs[64];
     int nr = kernel_data_regions(ra, rs, 64), n = 0;
@@ -120,12 +136,12 @@ static uint64_t find_player(uint64_t frame) {
                 if (ENV("LARECOMP_DOORJUMP_LOG"))
                     LOG("[doorjump] candidate %llx (%.2f, %.2f, %.2f) parent %llx\n", (unsigned long long)(ra[r] + k),
                         p[0], p[1], p[2], (unsigned long long)LD64(ra[r] + k + 0x10));
-                cached = ra[r] + k;
+                g_player = ra[r] + k;
                 n++;
             }
-    LOG("[doorjump] %s: PlayerCollision %s %llx (%d candidates)\n", lv, cached ? "at" : "not found",
-        (unsigned long long)cached, n);
-    return cached;
+    LOG("[doorjump] %s: PlayerCollision %s %llx (%d candidates)\n", lv, g_player ? "at" : "not found",
+        (unsigned long long)g_player, n);
+    return g_player;
 }
 
 // LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side> (test): from <frame> on, once the level with jumps has been loaded
@@ -296,8 +312,7 @@ void doorjump_tick(uint64_t frame) {
     // after a jump to a room that isn't next door, the game hasn't loaded that room's floor yet (it streams the
     // rooms around Link) and he'd fall through: hold him at the landing spot for a moment
     static float hold_x, hold_y, hold_z;
-    static uint64_t hold_until;
-    if (frame < hold_until) {
+    if (frame < g_hold_until) {
         pos[0] = pos2[0] = hold_x, pos[1] = pos2[1] = hold_y, pos[2] = pos2[2] = hold_z;
         x = hold_x, z = hold_z;
     }
@@ -365,7 +380,7 @@ void doorjump_tick(uint64_t frame) {
         if (j->height > -90.0f) pos[1] = pos2[1] = j->height + 0.05f;  // onto the landing floor (raised rooms: 1.5)
         else if (falling) pos[1] = pos2[1] = 0.0f;  // back on the floor (doorways are at floor height 0)
         px = nx, pz = nz;
-        if (abs(j->tcol - col) + abs(j->trow - row) != 1) { hold_x = nx, hold_y = pos[1], hold_z = nz; hold_until = frame + 30; }  // (y set above)
+        if (abs(j->tcol - col) + abs(j->trow - row) != 1) { hold_x = nx, hold_y = pos[1], hold_z = nz; g_hold_until = frame + 30; }  // (y set above)
         g_jumps_fired++;
         if (j->pair >= 0) { extern void flags_ext_set(int idx); flags_ext_set(CHAOS_FLAG_BASE + j->pair); }
         if (ENV("LARECOMP_DOORJUMP_TRACE")) trace_until = (long)frame + 90;

@@ -1,5 +1,5 @@
-// Randomizer tab: choose / generate LAS-Randomizer seeds (rando/<seed>/). Switching seeds restarts the game
-// (game data is read at boot); each seed keeps its own save slots.
+// Randomizer tab: choose / generate LAS-Randomizer seeds (rando/<seed>/). Switching seeds reboots the game in place
+// (game data is read at boot: runtime/main.c), the window stays; each seed keeps its own save slots.
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -18,7 +18,6 @@ extern "C" {
 #include "../hle.h"
 #include "../rando.h"
 #include "../settings.h"
-void rt_restart(void);
 extern const char *g_romfs_dir;
 }
 
@@ -366,10 +365,9 @@ extern "C" void rando_tab_draw(float scale) {
     else ImGui::TextUnformatted("Playing:  Vanilla (no randomizer)");
     if (active) {
         ImGui::SameLine();
-        if (ImGui::Button("Switch to vanilla (restarts)")) {
-            g_settings.rando_seed[0] = 0;
-            settings_save();
-            rt_restart();
+        if (ImGui::Button("Switch to vanilla")) {
+            rando_select("");
+            rt_request_reboot(RT_REBOOT_GAME);
         }
     }
     ImGui::PushTextWrapPos(0);
@@ -430,10 +428,9 @@ extern "C" void rando_tab_draw(float scale) {
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(s.logic.empty() ? "-" : s.logic.c_str());
             ImGui::TableNextColumn();
-            if (!is_active && ImGui::Button("Play (restarts)")) {
-                strlcpy(g_settings.rando_seed, s.name.c_str(), sizeof g_settings.rando_seed);
-                settings_save();
-                rt_restart();
+            if (!is_active && ImGui::Button("Play")) {
+                rando_select(s.name.c_str());
+                rt_request_reboot(RT_REBOOT_GAME);
             }
             ImGui::SameLine();
             if (ImGui::Button("Spoiler")) g_spoiler_seed = s.name;

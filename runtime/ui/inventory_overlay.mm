@@ -38,6 +38,8 @@ static const struct { const char *name, *flag, *done; } kTrade[] = {
 static int g_trade_flag[14], g_trade_done[14];  // -1 = not in the seed's flags.tsv (older seeds: no "done" flags)
 static int g_trade_loaded;
 
+RT_ON_RESET(inventory_overlay_reset) { g_trade_loaded = 0; g_items_frame = 0; }  // (the next seed's flags.tsv)
+
 static void load_trade_flags(void) {
     g_trade_loaded = 1;
     for (int i = 0; i < 14; i++) g_trade_flag[i] = g_trade_done[i] = -1;
