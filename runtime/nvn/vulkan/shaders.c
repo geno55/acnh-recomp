@@ -7,12 +7,10 @@
 
 #include "shaders.h"
 
-static shaderc_compiler_t compiler;
-static pthread_mutex_t compile_lock = PTHREAD_MUTEX_INITIALIZER;
-
-void vk_shaders_init(void) {
-    compiler = shaderc_compiler_initialize();
-    if (!compiler) FATAL("shaderc_compiler_initialize failed\n");
+void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
+    shaderc_compiler_t c = shaderc_compiler_initialize();
+    if (!c) FATAL("shaderc_compiler_initialize failed\n");
+    shaderc_compiler_release(c);
 }
 
 static shaderc_shader_kind kind_of(int stage) {
@@ -20,16 +18,62 @@ static shaderc_shader_kind kind_of(int stage) {
 }
 
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe.
+// SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
+// GLSL compile (the driver's pipeline cache only covers the step after this one).
+static uint64_t src_hash(const char *src, int stage) {
+    uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)stage;
+    for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
+    return h;
+}
+
+static uint32_t *cache_load(uint64_t h, size_t *nwords) {
+    char path[64];
+    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint32_t *d = n > 20 && n % 4 == 0 ? malloc((size_t)n) : NULL;
+    if (d && fread(d, 1, (size_t)n, f) != (size_t)n) { free(d); d = NULL; }
+    fclose(f);
+    if (d && d[0] != 0x07230203) { free(d); d = NULL; }
+    if (d) *nwords = (size_t)n / 4;
+    return d;
+}
+
+static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
+    static int made;
+    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
+    char path[64], tmp[80];
+    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
+    snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&made ^ (unsigned long long)(uintptr_t)spv);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    bool ok = fwrite(spv, 4, nwords, f) == nwords;
+    fclose(f);
+    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+}
+
+// SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
+// compiler per thread (a shared one behind a lock serialised all the pipeline workers).
+// No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
+// their depths stopped matching (EQUAL test: black holes in foliage), and it was most of the compile time; the
+// driver optimises anyway. LARECOMP_VK_OPT=1 turns it back on (experiments).
 uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
+    uint64_t h = src_hash(src, stage);
+    static int nocache = -1;
+    if (nocache < 0) nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
+    uint32_t *out = nocache ? NULL : cache_load(h, nwords);
+    if (out) return out;
+    static __thread shaderc_compiler_t comp;
+    if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
     shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
-    shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_NO_OPT") ? shaderc_optimization_level_zero
-                                                                                     : shaderc_optimization_level_performance);
-    pthread_mutex_lock(&compile_lock);
-    shaderc_compilation_result_t r = shaderc_compile_into_spv(compiler, src, strlen(src), kind_of(stage), name, "main", o);
-    pthread_mutex_unlock(&compile_lock);
+    shaderc_compile_options_set_optimization_level(o, getenv("LARECOMP_VK_OPT") ? shaderc_optimization_level_performance
+                                                                                  : shaderc_optimization_level_zero);
+    shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
-    uint32_t *out = NULL;
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
         static int nlog;
         if (nlog++ < 20) LOG("[shader] %s: GLSL compile failed:\n%s\n%s\n", name, shaderc_result_get_error_message(r), src);
@@ -38,6 +82,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
+        if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);
     return out;

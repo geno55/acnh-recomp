@@ -1518,7 +1518,9 @@ static void draw(CmdRec *r, bool indexed) {
     }
     for (uint32_t i = 0; i < k.ncolor && i < 8; i++) {
         if (!st.rt.color[i] || k.color[i] == VK_FORMAT_UNDEFINED) continue;
-        k.write_mask[i] = (st.channel_mask >> (i * 4)) & 0xF;
+        // Targets the fragment shader doesn't output keep their contents on Metal, but are undefined in Vulkan
+        // (NVIDIA writes black): mask them. Foliage depth pre-passes left black silhouettes (user 2026-10-08).
+        k.write_mask[i] = ((pr->fi->out_mask >> (i * 4)) & 0xF) ? (st.channel_mask >> (i * 4)) & 0xF : 0;
         if (((st.color_state[0] >> i) & 1) && !rt_kind(st.rt.color[i]->format)) {
             k.blend_on |= (uint8_t)(1u << i);
             memcpy(k.blend[i], st.blend[i], 8);
@@ -1548,7 +1550,8 @@ static void draw(CmdRec *r, bool indexed) {
     bool dt = st.ds[0] && !nodt && pass_depth;
     vkCmdSetDepthTestEnable(cb, dt);
     vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
-    vkCmdSetDepthCompareOp(cb, dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS);
+    VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
+    vkCmdSetDepthCompareOp(cb, dop);
     bool sten = st.ds[3] && pass_stencil;
     vkCmdSetStencilTestEnable(cb, sten);
     if (sten) {
