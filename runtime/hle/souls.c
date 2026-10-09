@@ -39,6 +39,8 @@ static void load(void) {
 }
 
 uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info) {
+    extern bool rt_digs_skip_plant(uint32_t type, uint64_t info);  // digsanity: no grass / bush on a dug tile
+    if (rt_digs_skip_plant(type, info)) return 0;
     if (g_nsouls < 0) load();
     if (ENV("LARECOMP_LOG_SPAWN"))
         LOG("[spawn] type %#x info %llx: %016llx %016llx %016llx %016llx\n", type, (unsigned long long)info,
