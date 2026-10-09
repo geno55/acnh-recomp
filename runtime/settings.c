@@ -24,6 +24,9 @@ Settings g_settings = {
     .inv_keys = true,
     .tracker = true,
     .diff_damage = 1.0f,
+#ifdef __APPLE__
+    .upscaler = UPSCALE_METALFX,  // (MetalFX on macOS by default)
+#endif
 };
 
 void settings_load(void) {
