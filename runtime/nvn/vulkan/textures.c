@@ -1,5 +1,6 @@
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
+#include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
@@ -365,17 +366,22 @@ void backend_texture_destroyed(NvnTexture *t) {
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
+// Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
+// frame). Values are only compared within a run.
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
     uint64_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint64_t v;
-        memcpy(&v, p + i, 8);
-        h = (h ^ v) * 0x100000001B3ull;
-        h ^= h >> 29;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t v[4];
+        memcpy(v, p + i, 32);
+        h0 = (h0 ^ v[0]) * 0x100000001B3ull; h0 ^= h0 >> 29;
+        h1 = (h1 ^ v[1]) * 0x100000001B3ull; h1 ^= h1 >> 29;
+        h2 = (h2 ^ v[2]) * 0x100000001B3ull; h2 ^= h2 >> 29;
+        h3 = (h3 ^ v[3]) * 0x100000001B3ull; h3 ^= h3 >> 29;
     }
+    uint64_t h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 * 0xC2B2AE3D27D4EB4Full) ^ (h3 * 0x165667B19E3779F9ull);
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
-    return h;
+    return h ^ (h >> 31);
 }
 
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
@@ -404,6 +410,7 @@ static void upload_pending(TexBackend *b) {
     vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 }
 
+uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn;
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -414,6 +421,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
     uint64_t total = tegra_total_size(&t->layout);
     b->checked_frame = frame;
+    prof_tex_checks++;
     if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
@@ -422,9 +430,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && frame - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!full) {
+        prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
+    prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
@@ -490,7 +500,12 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);
     if (b->pending_rgba) upload_pending(b);
     if (for_render) b->gpu_owned = true;
-    else if (!b->gpu_owned) upload_texture(t, b);
+    else if (!b->gpu_owned) {
+        extern uint64_t prof_up_ns;
+        uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
+        upload_texture(t, b);
+        if (prof_up_ns != ~0ull) prof_up_ns += SDL_GetTicksNS() - t0;
+    }
     return b;
 }
 
