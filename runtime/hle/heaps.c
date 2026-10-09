@@ -4,6 +4,9 @@
 // These wrappers call the SDK's own implementation (loader_find_symbol), log heap creation (LARECOMP_LOG_HEAPS=1)
 // and every allocation that fails (once per caller), and can grow heaps (heap_scale) - a recomp has memory to spare.
 #include <pthread.h>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +58,12 @@ HLE_FUNC("_ZN2nn4lmem14CreateUnitHeapEPvmmiiPNS0_6detail8HeapHeadE", heap_create
     void *mem = NULL;
     if (k > 1 && unit) {
         uint64_t big = size * (uint64_t)k;
+#ifdef _WIN32
+        mem = _aligned_malloc(big, 0x1000);
+        if (mem) {
+#else
         if (posix_memalign(&mem, 0x1000, big) == 0) {
+#endif
             memset(mem, 0, big);
             c->x[0] = (uint64_t)(uintptr_t)mem;
             c->x[1] = big;
@@ -82,7 +90,15 @@ HLE_FUNC("_ZN2nn4lmem15DestroyUnitHeapEPNS0_6detail8HeapHeadE", heap_destroy_uni
     CALL("_ZN2nn4lmem15DestroyUnitHeapEPNS0_6detail8HeapHeadE");
     pthread_mutex_lock(&g_unit_lock);
     for (int i = 0; i < 256; i++)
-        if (g_unit[i].mem && g_unit[i].head == head) { free(g_unit[i].mem); g_unit[i].mem = NULL; break; }
+        if (g_unit[i].mem && g_unit[i].head == head) {
+#ifdef _WIN32
+            _aligned_free(g_unit[i].mem);
+#else
+            free(g_unit[i].mem);
+#endif
+            g_unit[i].mem = NULL;
+            break;
+        }
     pthread_mutex_unlock(&g_unit_lock);
 }
 
