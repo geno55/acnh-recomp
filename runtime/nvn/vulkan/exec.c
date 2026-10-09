@@ -1780,6 +1780,8 @@ static void draw_(CmdRec *r, bool indexed) {
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
+        extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
+        if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     resolve_feedback(pr);
