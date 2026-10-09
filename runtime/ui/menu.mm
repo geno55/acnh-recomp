@@ -391,8 +391,11 @@ static bool toggle(const char *label, bool *v) {
     return ch;
 }
 
+extern "C" void renderer_get_scale(float *sx, float *sy);
+extern "C" double output_scale_dynamic_factor(void);
+
 static void tab_display(void) {
-    header("Display");
+    header("Video");
     const char *aspects[] = {"Unlocked (fill the window)", "Original 16:9"};
     choice("Aspect ratio", &g_settings.aspect, aspects, 2);
     hint("Unlocked widens (or heightens) the camera to match the window: ultrawide shows more of the island. "
@@ -402,10 +405,23 @@ static void tab_display(void) {
     if (toggle("Fullscreen", &fs)) { g_settings.fullscreen = fs; g_want_fullscreen_apply.store(true); }
     hint("Also: F11, Alt+Enter or Cmd+Ctrl+F.");
     ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Resolution");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
-    ImGui::TextDisabled("Native (matches the window / display)");
+    static const char *res[] = {"Match display", "1x (1080p)", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Dynamic"};
+    choice("Internal resolution", &g_settings.res_mode, res, 10);
+    {
+        float sx, sy;
+        renderer_get_scale(&sx, &sy);
+        char line[200];
+        int n = snprintf(line, sizeof line, "Rendering at %.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
+        if (g_settings.res_mode == RES_DYNAMIC)
+            snprintf(line + n, sizeof line - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
+        hint(line);
+    }
+    hint("Match display renders at the window's own size. 1x-8x render at that many times the Switch's 1080p "
+         "(wide windows keep their shape; very high settings are capped at the GPU's 16384-pixel limit) and are "
+         "scaled to the window - above the display size this is supersampling. Dynamic matches the display and "
+         "lowers the resolution while the GPU can't hold 60 fps (the game slows down when a frame is missed), "
+         "raising it again when it can. Changing it briefly pauses while the render targets are rebuilt.");
+    ImGui::Spacing();
     toggle("Show FPS", &g_settings.show_fps);
 }
 
@@ -651,7 +667,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 
         // L/R (or Q/E) switch tabs; B / Esc with nothing to back out of closes the menu
         if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
-        static const char *tabs[] = {"Display", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
+        static const char *tabs[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
                                      "Controls"};
         const int ntabs = 8;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;

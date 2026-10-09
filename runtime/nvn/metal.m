@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
+#include "output_scale.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
@@ -714,36 +715,20 @@ void backend_present(NvnTexture *t) {
         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
         // Next frame's render resolution follows the window: the 1920x1080 image scaled to fit.
         double dw = drawable.texture.width, dh = drawable.texture.height;
-        double fit = fmin(dw / 1920.0, dh / 1080.0);
-        static double forced = -1;
-        if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-        // Any window shape: render targets match the window. Wider than 16:9 widens the camera, taller
-        // widens the vertical field of view (tools/patches.py); rooms that keep 16:9 framing (interiors)
-        // are letterboxed/pillarboxed instead.
-        static double wide_test = -1;
-        if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
         extern void widescreen_frame_end(uint64_t frame);
         widescreen_frame_end(total_frames);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
-        double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-        bool reshape = widescreen_allowed() && fabs(shape - 1.0) > 0.005;
-        double sx, sy, vx, vy, vw, vh;
-        if (!reshape) {  // 16:9 image fitted inside the window
-            sx = sy = forced > 0 ? forced : fmax(fit, 0.25);
-            vw = 1920.0 * fit; vh = 1080.0 * fit;
-            shape = 1.0;
-        } else if (wide_test > 0) {  // test: forced scale, wide_test times wider, fitted for viewing
-            sy = forced > 0 ? forced : fmax(fit, 0.25);
-            sx = sy * wide_test;
-            double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
-            vw = 1920.0 * wide_test * f2; vh = 1080.0 * f2;
-        } else {  // fill the window exactly
-            sx = dw / 1920.0; sy = dh / 1080.0;
-            if (forced > 0) { sx *= forced / sy; sy = forced; }
-            vw = dw; vh = dh;
-        }
-        vx = (dw - vw) / 2; vy = (dh - vh) / 2;
+        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution")
+        extern uint64_t g_gpu_total_ns;
+        static uint64_t gpu_prev;
+        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED);
+        double gpu_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1;
+        gpu_prev = gpu_now;
+        OutScale os;
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
+        double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
+        bool reshape = shape != 1.0;
         // Interior frames (16:9 backdrop drawn): show only the centre 16:9 region of the image.
         extern bool widescreen_frame_boxed(uint64_t frame);
         float crop[4] = {0, 0, 1, 1};  // uv origin and size

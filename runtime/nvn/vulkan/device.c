@@ -11,6 +11,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "../output_scale.h"
 #include "../renderer.h"
 
 VkG g_vk;
@@ -469,33 +470,15 @@ void backend_present(NvnTexture *t) {
     }
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
-        double fit = fmin(dw / 1920.0, dh / 1080.0);
-        static double forced = -1;
-        if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-        static double wide_test = -1;
-        if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
         extern void widescreen_frame_end(uint64_t frame);
         widescreen_frame_end(total_frames);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
-        double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-        bool reshape = widescreen_allowed() && fabs(shape - 1.0) > 0.005;
-        double sx, sy, vx, vy, vw, vh;
-        if (!reshape) {
-            sx = sy = forced > 0 ? forced : fmax(fit, 0.25);
-            vw = 1920.0 * fit; vh = 1080.0 * fit;
-            shape = 1.0;
-        } else if (wide_test > 0) {
-            sy = forced > 0 ? forced : fmax(fit, 0.25);
-            sx = sy * wide_test;
-            double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
-            vw = 1920.0 * wide_test * f2; vh = 1080.0 * f2;
-        } else {
-            sx = dw / 1920.0; sy = dh / 1080.0;
-            if (forced > 0) { sx *= forced / sy; sy = forced; }
-            vw = dw; vh = dh;
-        }
-        vx = (dw - vw) / 2; vy = (dh - vh) / 2;
+        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
+        // no GPU timer here (-1): dynamic resolution goes by the frame time
+        OutScale os;
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
+        double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         extern bool widescreen_frame_boxed(uint64_t frame);
         float crop[4] = {0, 0, 1, 1};
         if (shape != 1.0 && widescreen_frame_boxed(total_frames)) {

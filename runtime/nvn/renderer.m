@@ -24,6 +24,7 @@ static NSMutableDictionary<NSString *, id> *cache;
 static uint64_t stat_wait_by[3], stat_wait_n[3];
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static double stat_gpu_s;
+uint64_t g_gpu_total_ns;  // GPU time of all completed command buffers (dynamic resolution: output_scale.c)
 // (forward: texture-lifetime cleanup and stats, defined further down)
 static int g_views_live;
 static void views_forget(void *base);
@@ -218,6 +219,7 @@ void renderer_submit(void) {
         cmdbuf = nil;
         [c addCompletedHandler:^(id<MTLCommandBuffer> done) {
             stat_gpu_s += done.GPUEndTime - done.GPUStartTime;
+            __atomic_add_fetch(&g_gpu_total_ns, (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9), __ATOMIC_RELAXED);
             if (done.error) LOG("[metal] command buffer error: %s\n", done.error.localizedDescription.UTF8String);
         }];
         [c commit];
