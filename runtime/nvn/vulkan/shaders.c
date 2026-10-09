@@ -17,11 +17,10 @@ static shaderc_shader_kind kind_of(int stage) {
     return stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
 }
 
-// SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe.
 // SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
 // GLSL compile (the driver's pipeline cache only covers the step after this one).
 static uint64_t src_hash(const char *src, int stage) {
-    uint64_t h = 0xcbf29ce484222325ull ^ (uint64_t)stage;
+    uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
@@ -55,6 +54,60 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
 }
 
+// Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
+// pre-pass and colour pass are different shaders computing the same position, and the colour pass tests EQUAL:
+// any difference in fusing leaves holes (foliage flickered black). GLSL's `precise gl_Position` only covers what
+// glslang traces back from the position, which the translated register code defeats.
+static bool float_arith(const uint32_t *w, uint32_t wc, uint32_t op) {
+    switch (op) {
+    case 127: case 129: case 131: case 133: case 136:  // FNegate FAdd FSub FMul FDiv
+    case 142: case 143: case 144: case 145: case 146: case 148:  // vector/matrix products, Dot
+        return true;
+    case 12: return wc >= 5 && w[4] == 50;  // ExtInst GLSL.std.450 Fma
+    default: return false;
+    }
+}
+
+static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
+    enum { OP_DECORATE = 71, DEC_NO_CONTRACTION = 42 };
+    size_t n = *nwords, insert = 0, count = 0;
+    uint32_t bound = spv[3];
+    uint8_t *done = calloc(bound, 1);  // already decorated (glslang does it for what it traces from precise)
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc) break;
+        if (!insert && op >= 19 && op <= 39) insert = i;  // first type declaration: end of the annotations
+        if (op == OP_DECORATE && wc >= 3 && spv[i + 2] == DEC_NO_CONTRACTION && spv[i + 1] < bound) done[spv[i + 1]] = 1;
+        i += wc;
+    }
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc) break;
+        if (float_arith(spv + i, wc, op) && spv[i + 2] < bound && !done[spv[i + 2]]) count++;
+        i += wc;
+    }
+    if (!insert || !count) { free(done); return spv; }
+    uint32_t *out = malloc((n + count * 3) * 4);
+    memcpy(out, spv, insert * 4);
+    size_t o = insert;
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc) break;
+        if (float_arith(spv + i, wc, op) && spv[i + 2] < bound && !done[spv[i + 2]]) {
+            done[spv[i + 2]] = 1;
+            out[o++] = 3u << 16 | OP_DECORATE;
+            out[o++] = spv[i + 2];  // result id
+            out[o++] = DEC_NO_CONTRACTION;
+        }
+        i += wc;
+    }
+    memcpy(out + o, spv + insert, (n - insert) * 4);
+    *nwords = o + (n - insert);
+    free(done);
+    free(spv);
+    return out;
+}
+
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
 // compiler per thread (a shared one behind a lock serialised all the pipeline workers).
 // No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
@@ -82,6 +135,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
+        if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);

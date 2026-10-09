@@ -861,6 +861,7 @@ static VkFormat vertex_format_supported(VkFormat f) {
         known[i] = (p.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) ? 1 : 2;
     }
     if (known[i] == 1) return f;
+    { static uint8_t told[256]; if (!told[i]++) LOG("[vk] vertex format %d unsupported: read as 4 components\n", f); }
     switch (f) {
     case VK_FORMAT_R8G8B8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
     case VK_FORMAT_R8G8B8_SNORM: return VK_FORMAT_R8G8B8A8_SNORM;
@@ -1551,6 +1552,14 @@ static void draw(CmdRec *r, bool indexed) {
     vkCmdSetDepthTestEnable(cb, dt);
     vkCmdSetDepthWriteEnable(cb, dt && st.ds[1]);
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
+    // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees): on the Switch (and on
+    // Metal) both land on identical depths; here some meshes differ in the last bits and EQUAL leaves black holes.
+    // LESS_OR_EQUAL with a tiny bias towards the camera accepts the pre-pass's own surface within rounding (nothing
+    // can be nearer than what the pre-pass kept). LARECOMP_VK_EXACT_EQUAL=1: strict EQUAL (A/B).
+    static int exact = -1;
+    if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_EQUAL") != NULL;
+    bool equal_tol = dop == VK_COMPARE_OP_EQUAL && !exact;
+    if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
     vkCmdSetDepthCompareOp(cb, dop);
     bool sten = st.ds[3] && pass_stencil;
     vkCmdSetStencilTestEnable(cb, sten);
@@ -1584,6 +1593,7 @@ static void draw(CmdRec *r, bool indexed) {
         if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
         bool on = (st.poly[3] & 4) && !off;
         if (on) memcpy(f, st.poly_offset, sizeof f);
+        if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
         vkCmdSetDepthBiasEnable(cb, on);
         vkCmdSetDepthBias(cb, f[1], f[2], f[0]);
     }
