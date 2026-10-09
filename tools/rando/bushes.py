@@ -157,10 +157,11 @@ def add_to_logic(bushes, logic_defs, item_defs, traps='none', rng=None):
 
 def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
     lines = pots.apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARBush',
-                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B, hide_scale=HIDE_SCALE)
+                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B, hide_scale=HIDE_SCALE,
+                       cut_flag=True)
     open(os.path.join(out_dir, 'flags_ext'), 'w').write('bushsanity: event flags 2048+ (runtime/hle/flags_ext.c)\n')
     return lines
 
 
 def write_tsv(seed_dir, leb):
-    return pots.write_tsv(seed_dir, leb, flag_prefix='LARBush', name='bushes.tsv')
+    return pots.write_tsv(seed_dir, leb, flag_prefix='LARBush', name='bushes.tsv', hide_scale=HIDE_SCALE)

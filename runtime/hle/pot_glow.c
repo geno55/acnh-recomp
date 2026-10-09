@@ -15,7 +15,8 @@
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0
 #define EVENT_FLAGS (MAIN_BASE + 0x1CBB220 + 0x5DC0)  // live save: GlobalFlags bitfield (2048 bits)
 
-typedef struct { char level[40]; float x, y, z; int flag; } Pot;
+// bushes.tsv rows may add: cut flag, hidden item scale, full item scale (see pot_item_reveal)
+typedef struct { char level[40]; float x, y, z; int flag, cut; float small, full; } Pot;
 static Pot *g_pots;
 static int g_npots = -1;
 // gold = luminance remapped onto a gold ramp (keeps the pot's shading), plus a slow shimmer
@@ -40,8 +41,9 @@ static void load(void) {
         int n0 = g_npots;
         char line[256];
         while (fgets(line, sizeof line, f)) {
-            Pot p;
-            if (sscanf(line, "%39s %f %f %f %d", p.level, &p.x, &p.y, &p.z, &p.flag) != 5) continue;
+            Pot p = {.cut = -1};
+            if (sscanf(line, "%39s %f %f %f %d %d %f %f", p.level, &p.x, &p.y, &p.z, &p.flag, &p.cut, &p.small,
+                       &p.full) < 5) continue;
             if (g_npots == cap) g_pots = realloc(g_pots, sizeof(Pot) * (cap = cap ? cap * 2 : 256));
             g_pots[g_npots++] = p;
         }
@@ -152,6 +154,30 @@ bool pot_tint(const float *m, float tint[8], uint64_t mesh) {
     }
     if (hit) {
         pot_gold_tint(tint);
+        return true;
+    }
+    return false;
+}
+
+// Bushsanity: the item inside a bush is drawn small so the leaves hide it, which left it near invisible once the
+// bush was cut (players walked past it; the bush grew back gold over it). The bush's cut flag (set by the game when
+// it's cut; such a bush stays cut) -> draw the item full size: scale its model matrix (m: vertex UBO 2, 3x4 row-major,
+// guest memory) in place. Only a matrix at the hidden scale is touched, so a second pass over the same UBO (shadows)
+// leaves it alone. (Visual only: the pickup works as before - Link walks over the spot.)
+bool pot_item_reveal(float *m) {
+    if (!pot_glow_active()) return false;
+    float s2 = m[0] * m[0] + m[4] * m[4] + m[8] * m[8];
+    if (s2 > 0.9f) return false;  // (hidden items only: < ~0.95 scale)
+    float s = sqrtf(s2), x = m[3], y = m[7], z = m[11];
+    int lo = 0, hi = g_nlv;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (g_pots[g_lv_idx[mid]].x < x - 0.02f) lo = mid + 1; else hi = mid; }
+    for (int k = lo; k < g_nlv && g_pots[g_lv_idx[k]].x <= x + 0.02f; k++) {
+        const Pot *p = &g_pots[g_lv_idx[k]];
+        if (p->cut < 0 || fabsf(p->z - z) > 0.02f || fabsf(p->y - y) > 0.5f || fabsf(s - p->small) > 0.01f) continue;
+        if (!unchecked(p) || !flags_ext_get(p->cut)) return false;
+        float f = p->full / p->small;
+        for (int i = 0; i < 12; i++)
+            if ((i & 3) != 3) m[i] *= f;
         return true;
     }
     return false;

@@ -167,9 +167,12 @@ def mark_refills(placements):
 
 
 def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARPot',
-          flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE):
+          flag_base=FLAG_BASE, flag_limit=2048, key_tag=0x7A, hide_scale=HIDE_SCALE, cut_flag=False):
     """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess).
-    Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys."""
+    Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys.
+    cut_flag (bushes): a second flag per location, <prefix>Cut<n>: the bush's switch 0 (set when it's cut; a bush
+    with it set stays cut, as the Pothole Field's do) and the item's switch 0 (it appears once that's set) - so the
+    item only appears out in the open, at full size, and stays there until picked up; the bush drops nothing else."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -223,6 +226,13 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             set_flag = event_tools.createActionEvent(flow.flowchart, 'EventFlags', 'SetFlag',
                                                      {'symbol': flag, 'value': True}, tails[tail_key])
             event_tools.insertEventAfter(flow.flowchart, name, set_flag)
+            cut = None
+            if cut_flag:
+                if next_flag >= flag_limit:
+                    raise RuntimeError(f'out of GlobalFlags indices for {flag_prefix}')
+                cut = next_flag
+                sheet['values'].append({'symbol': f'{flag_prefix}Cut{cut}', 'index': cut})
+                next_flag += 1
             it = copy.deepcopy(pot)
             it.key = (key_tag << 56) | ((p['n'] & 0xFFFF) << 32) | (pot.key & 0xFFFFFFFF)
             it.name = b'SinkingSword-%016X' % it.key
@@ -230,6 +240,10 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             it.parameters = [model_path.encode(), model_name.encode(), name.encode(), flag.encode(),
                              b'true' if item_key == 'Seashell' else b'false', b'', b'', b'']
             it.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
+            if cut is not None:
+                it.switches[0] = (1, cut)
+                pot.switches[0] = (1, cut)
+                pot.parameters[1] = b'None'  # (ItemDrop key: no random drop beside the check)
             s = data.MODEL_SIZES.get(model_name, 1.0) * hide_scale
             it.scaleX = it.scaleY = it.scaleZ = s
             if model_name in data.MODEL_ROTATIONS:
@@ -243,9 +257,11 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     return spoiler
 
 
-def write_tsv(seed_dir, leb, flag_prefix='LARPot', name='pots.tsv'):
+def write_tsv(seed_dir, leb, flag_prefix='LARPot', name='pots.tsv', hide_scale=None):
     """rando/<seed>/pots.tsv for the runtime's golden unchecked pots: one line per item pot
-    (level, x, y, z, GlobalFlags index), taken from the item actors this module placed in the seed's rooms."""
+    (level, x, y, z, GlobalFlags index), taken from the item actors this module placed in the seed's rooms.
+    Items with a cut flag (bushes, apply(cut_flag=True)) add: cut flag index, the item's hidden scale and its full
+    size - once the bush is cut the runtime draws the item full size (runtime/hle/pot_glow.c pot_item_reveal)."""
     rows = []
     for f in sorted(glob.glob(os.path.join(seed_dir, 'romfs', 'region_common', 'level', '*', '*.leb'))):
         level = os.path.basename(os.path.dirname(f))
@@ -256,7 +272,10 @@ def write_tsv(seed_dir, leb, flag_prefix='LARPot', name='pots.tsv'):
                 continue
             m = re.match(flag_prefix.encode() + rb'(\d+)$', a.parameters[3])
             if m:
-                rows.append(f'{level}\t{a.posX:g}\t{a.posY:g}\t{a.posZ:g}\t{int(m.group(1))}\n')
+                cut = ''
+                if hide_scale and a.switches[0][0] == 1:
+                    cut = f'\t{a.switches[0][1]}\t{a.scaleX:g}\t{a.scaleX / hide_scale:g}'
+                rows.append(f'{level}\t{a.posX:g}\t{a.posY:g}\t{a.posZ:g}\t{int(m.group(1))}{cut}\n')
     with open(os.path.join(seed_dir, name), 'w') as fh:
         fh.writelines(rows)
     return len(rows)
