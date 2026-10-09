@@ -125,7 +125,10 @@ bool widescreen_frame_boxed(uint64_t frame) {
     static uint64_t interior_until;  // keep boxing briefly after leaving: the first (dark) frames still show stale sides
     bool in = level_is_interior();
     if (in) interior_until = frame + 8;
-    bool b = g_backdrop_frame == frame || in || frame < interior_until;
+    // title / file select (not in play): 16:9 screens; the title's logo glow is drawn too large in the wide image
+    // (a blurred copy in the left bar, user 2026-10-09)
+    extern int game_in_play(void);
+    bool b = g_backdrop_frame == frame || in || frame < interior_until || !game_in_play();
     if (b != last && ENV("LARECOMP_LOG_INDOOR")) LOG("[widescreen] boxed %d at frame %llu\n", b, (unsigned long long)frame);
     last = b;
     return b;
@@ -166,47 +169,61 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     return true;
 }
 
-// Horizontal crop (uv of the wide image) for a room wider than one screen; false = not such a room.
-static bool room_crop(uint64_t frame, double shape, float *u0, float *u1) {
+// Horizontal crop (uv of the wide image): ROOM_CROP for a room wider than one screen (u0..u1), ROOM_BOX for a
+// single-screen room (16:9 box), ROOM_FULL when the zone doesn't match the camera (no box: the game's camera clamps
+// for the wide view, so a 16:9 box around a stale zone's centre cut Link out - user 2026-10-09), ROOM_KEEP when
+// there's no recent scene camera (keep the last choice; after half a second without one, e.g. menus: box).
+enum { ROOM_KEEP, ROOM_BOX, ROOM_CROP, ROOM_FULL };
+static int room_crop(uint64_t frame, double shape, float *u0, float *u1) {
     float lo[3], hi[3];
     uint32_t id;
-    if (ENV("LARECOMP_LOG_INDOOR") && frame % 30 == 0) {
-        bool z = current_zone(lo, hi, &id);
-        LOG("[widescreen] f%llu vp %d zone %d id %u x %.1f..%.1f z %.1f..%.1f\n", (unsigned long long)frame, g_vp_frame == frame,
-            z, z ? id : 0, lo[0], hi[0], lo[2], hi[2]);
-    }
-    if (shape <= 1.0 || g_vp_frame != frame || !current_zone(lo, hi, &id) || ENV("LARECOMP_NO_ROOM_WIDE")) return false;
-    if (hi[0] - lo[0] < 16.0f) return false;  // one screen wide (cells are 15)
+    if (ENV("LARECOMP_NO_ROOM_WIDE")) return ROOM_BOX;
+    if (g_vp_frame > frame || g_vp_frame + 4 < frame) return g_vp_frame + 30 < frame ? ROOM_BOX : ROOM_KEEP;  // (menus: no scene)
+    if (!current_zone(lo, hi, &id)) return ROOM_FULL;
     const float *r0 = g_vp, *r1 = g_vp + 4, *r3 = g_vp + 12;
-    float p[3];
     bool side = hi[2] - lo[2] < 6.0f;  // side-view zones are thin in z (the camera looks along z)
-    p[0] = (lo[0] + hi[0]) / 2;
-    if (side) {  // on the zone's centre plane, at the height under the screen centre (ndc y = 0)
-        p[2] = (lo[2] + hi[2]) / 2;
-        if (fabsf(r1[1]) < 1e-4f) return false;
-        p[1] = -(r1[0] * p[0] + r1[2] * p[2] + r1[3]) / r1[1];
-    } else {  // on the floor (y 0), at the depth under the screen centre
-        p[1] = 0;
-        if (fabsf(r1[2]) < 1e-4f) return false;
-        p[2] = -(r1[0] * p[0] + r1[3]) / r1[2];
+    // the point under the screen centre (ndc 0, 0): on the floor (y 0) for top-down rooms, on the zone's centre
+    // plane for side views
+    float c[3];
+    if (side) {
+        c[2] = (lo[2] + hi[2]) / 2;
+        float a = r0[0], b = r0[1], e = -(r0[2] * c[2] + r0[3]), d = r1[0], f = r1[1], g = -(r1[2] * c[2] + r1[3]);
+        float det = a * f - b * d;
+        if (fabsf(det) < 1e-6f) return ROOM_KEEP;
+        c[0] = (e * f - b * g) / det, c[1] = (a * g - e * d) / det;
+    } else {
+        c[1] = 0;
+        float a = r0[0], b = r0[2], e = -r0[3], d = r1[0], f = r1[2], g = -r1[3];
+        float det = a * f - b * d;
+        if (fabsf(det) < 1e-6f) return ROOM_KEEP;
+        c[0] = (e * f - b * g) / det, c[2] = (a * g - e * d) / det;
     }
-    float ndc[2];
-    for (int e = 0; e < 2; e++) {
-        float x = e ? hi[0] : lo[0];
-        float w = r3[0] * x + r3[1] * p[1] + r3[2] * p[2] + r3[3];
-        if (!(w > 0.01f)) return false;
-        ndc[e] = (r0[0] * x + r0[1] * p[1] + r0[2] * p[2] + r0[3]) / w;
+    int r;
+    bool wide = hi[0] - lo[0] >= 16.0f;  // (cells are 15)
+    if (c[0] < lo[0] - 1 || c[0] > hi[0] + 1) r = ROOM_FULL;  // camera outside the zone: stale zone
+    else if (!wide) r = fabsf(c[0] - (lo[0] + hi[0]) / 2) < 1.0f ? ROOM_BOX : ROOM_FULL;  // centred or stale
+    else {
+        float ndc[2];
+        r = ROOM_CROP;
+        for (int e = 0; e < 2; e++) {
+            float x = e ? hi[0] : lo[0];
+            float w = r3[0] * x + r3[1] * c[1] + r3[2] * c[2] + r3[3];
+            if (!(w > 0.01f)) return ROOM_KEEP;
+            ndc[e] = (r0[0] * x + r0[1] * c[1] + r0[2] * c[2] + r0[3]) / w;
+        }
+        // never less than the 16:9 view the game frames
+        float b0 = (float)((1.0 - 1.0 / shape) / 2), b1 = 1.0f - b0;
+        *u0 = fminf(b0, fmaxf(0.0f, (ndc[0] + 1) / 2));
+        *u1 = fmaxf(b1, fminf(1.0f, (ndc[1] + 1) / 2));
     }
-    // never less than the 16:9 view the game frames (its camera keeps the room's walls at that box's edges)
-    float b0 = (float)((1.0 - 1.0 / shape) / 2), b1 = 1.0f - b0;
-    *u0 = fminf(b0, fmaxf(0.0f, (ndc[0] + 1) / 2));
-    *u1 = fmaxf(b1, fminf(1.0f, (ndc[1] + 1) / 2));
     static uint32_t last_id = ~0u;
-    if (id != last_id && ENV("LARECOMP_LOG_INDOOR"))
-        LOG("[widescreen] zone %u x %.1f..%.1f z %.1f..%.1f%s: crop %.3f..%.3f at frame %llu\n", id, lo[0], hi[0], lo[2],
-            hi[2], side ? " (side view)" : "", *u0, *u1, (unsigned long long)frame);
-    last_id = id;
-    return true;
+    static int last_r = -1;
+    if ((id != last_id || r != last_r) && ENV("LARECOMP_LOG_INDOOR"))
+        LOG("[widescreen] zone %u x %.1f..%.1f z %.1f..%.1f%s, camera x %.1f: %s at frame %llu\n", id, lo[0], hi[0], lo[2],
+            hi[2], side ? " (side view)" : "", c[0], r == ROOM_CROP ? "crop" : r == ROOM_BOX ? "box" : "full (stale zone)",
+            (unsigned long long)frame);
+    last_id = id, last_r = r;
+    return r;
 }
 
 // Presented part of the image (crop: uv origin and size) and its place in the window: interiors and dungeons show
@@ -222,9 +239,16 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
         double nh = *vh * shape; *vy += (*vh - nh) / 2; *vh = nh;
         return;
     }
-    float u0, u1;
-    g_room_wide = room_crop(frame, shape, &u0, &u1);
-    if (!g_room_wide) u0 = (float)((1.0 - 1.0 / shape) / 2), u1 = 1.0f - u0;
+    static int mode = ROOM_BOX;
+    float u0 = 0, u1 = 1;
+    static float k0, k1;  // (ROOM_KEEP: the last target)
+    extern int game_in_play(void);
+    int m = game_in_play() ? room_crop(frame, shape, &u0, &u1) : ROOM_BOX;
+    if (m == ROOM_KEEP) m = mode, u0 = k0, u1 = k1;
+    if (m == ROOM_BOX) u0 = (float)((1.0 - 1.0 / shape) / 2), u1 = 1.0f - u0;
+    if (m == ROOM_FULL) u0 = 0, u1 = 1;
+    mode = m, k0 = u0, k1 = u1;
+    g_room_wide = m != ROOM_BOX;
     if (frame <= last + 2 && frame > last) {
         const float step = 0.03f;  // of the image width per frame
         cu0 += fmaxf(-step, fminf(step, u0 - cu0));
