@@ -44,7 +44,12 @@ static uint32_t session_new(Service *s) {
     KSession *k = calloc(1, sizeof *k);
     k->obj.type = KOBJ_SESSION;
     k->svc = s;
+    s->refs++;
     return kernel_new_handle(&k->obj);
+}
+
+static void service_release(Service *s) {
+    if (s && --s->refs == 0 && s->on_close) s->on_close(s);
 }
 
 uint32_t ipc_connect_named_port(const char *name) {
@@ -129,6 +134,7 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
 
     if (req.type == 2) {  // close
         LOG("[ipc] close session %s (handle %x)\n", sess->svc->name, handle);
+        if (!sess->domain) service_release(sess->svc);  // (a domain's objects stay: closed one by one)
         return 0;
     }
     uint8_t *payload = (uint8_t *)aligned;
@@ -141,7 +147,11 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
             uint16_t dsize = *(uint16_t *)(payload + 2);
             req.domain_obj = *(uint32_t *)(payload + 4);
             if (dcmd == 2) {  // close object
-                sess->domain->objs[req.domain_obj] = NULL;
+                if (req.domain_obj < 256) {
+                    Service *o = sess->domain->objs[req.domain_obj];
+                    sess->domain->objs[req.domain_obj] = NULL;
+                    service_release(o);
+                }
                 goto write_response;
             }
             req.ndomain_in = nin;
@@ -198,6 +208,7 @@ write_response:;
             int id = 1;
             while (id < 256 && sess->domain->objs[id]) id++;
             sess->domain->objs[id] = resp.objects[i];
+            resp.objects[i]->refs++;
             domain_out[ndomain_out++] = id;
         } else {
             resp.move_handles[resp.nmove++] = session_new(resp.objects[i]);

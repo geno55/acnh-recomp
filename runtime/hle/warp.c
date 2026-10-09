@@ -203,6 +203,69 @@ void give_item_request(int id, int count, int index) {
     g_give_pending = 1;
 }
 
+// LARECOMP_FIND_FLOATS=<frame>:<f1>,<f2>,... (RE): log every address in writable guest memory holding these floats
+// in a row (e.g. a camera zone's box). For the first hit, LARECOMP_FIND_FLOATS_PATH=1 logs pointer paths towards it
+// (BFS, "MAIN+" = a global), LARECOMP_FIND_FLOATS_WATCH=1 reports the functions touching it (as LARECOMP_WATCH_ADDR).
+static void find_floats_tick(uint64_t frame) {
+    static long at = -2;
+    static float want[16];
+    static int nw;
+    if (at == -2) {
+        at = -1;
+        const char *e = getenv("LARECOMP_FIND_FLOATS");
+        if (e) {
+            at = strtol(e, (char **)&e, 10);
+            while (*e == ':' || *e == ',') { e++; if (nw < 16) want[nw++] = strtof(e, (char **)&e); }
+        }
+    }
+    if (at < 0 || (long)frame != at || !nw) return;
+    extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+    uint64_t ra[64], rs[64];
+    int nr = kernel_data_regions(ra, rs, 64), n = 0;
+    for (int i = 0; i < nr; i++) {
+        const float *p = (const float *)(uintptr_t)ra[i];
+        for (uint64_t k = 0; k + nw <= rs[i] / 4 && n < 200; k++) {
+            int j = 0;
+            while (j < nw && p[k + j] == want[j]) j++;
+            if (j != nw) continue;
+            uint64_t a = ra[i] + k * 4;
+            LOG("[findfloats] %llx:", (unsigned long long)a);
+            for (int d = -16; d < 32; d++) LOG(" %g", p[k + d]);
+            LOG("\n");
+            if (!n && ENV("LARECOMP_FIND_FLOATS_PATH")) {  // pointer paths from main's globals to the hit (BFS)
+                uint64_t lv[64] = {a}, nx[64];
+                int nl = 1;
+                for (int depth = 0; depth < 5 && nl; depth++) {
+                    int nn = 0;
+                    for (int r = 0; r < nr; r++)
+                        for (uint64_t q = 0; q + 8 <= rs[r]; q += 8) {
+                            uint64_t v = *(volatile uint64_t *)(uintptr_t)(ra[r] + q), loc = ra[r] + q;
+                            for (int t = 0; t < nl; t++)
+                                if (v <= lv[t] && v >= lv[t] - (depth ? 0x800 : 0x10)) {
+                                    bool gl = loc >= MAIN_BASE && loc < MAIN_BASE + 0x2000000;
+                                    LOG("[findfloats] path d%d %s%llx -> %llx (+%llx)\n", depth, gl ? "MAIN+" : "",
+                                        (unsigned long long)(gl ? loc - MAIN_BASE : loc), (unsigned long long)v,
+                                        (unsigned long long)(lv[t] - v));
+                                    if (!gl && nn < 64) nx[nn++] = loc;
+                                }
+                        }
+                    memcpy(lv, nx, sizeof(uint64_t) * nn);
+                    nl = nn;
+                }
+            }
+            if (!n && ENV("LARECOMP_FIND_FLOATS_WATCH")) {  // watch the first hit +-0x40 (LARECOMP_WATCH_ADDR)
+                extern uint64_t g_watch_lo, g_watch_hi;
+                extern void watch_arm(void);
+                g_watch_lo = a - 0x40, g_watch_hi = a + 0x40;
+                watch_arm();
+            }
+            n++;
+        }
+    }
+    LOG("[findfloats] %d hits\n", n);
+    at = -1;
+}
+
 // LARECOMP_FIND_MOVE=<A>,<B>,<C> (RE): snapshot writable guest memory at frames A and B; at C list the floats that
 // moved steadily (same step per frame A->B and B->C, step at least 1e-3/frame), e.g. Link's position while the
 // scripted stick is held. Output: build/find_move.txt (address, values at A/B/C).
@@ -493,6 +556,7 @@ static void pane_scan_tick(uint64_t frame) {
 
 void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
+    { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
@@ -500,6 +564,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     ptrscan_tick(frame);
     memdump_tick(frame);
     find_move_tick(frame);
+    find_floats_tick(frame);
     addf_tick(frame);
     {  // LARECOMP_WATCH_ADDR=<frame>:<hex lo>:<hex hi>: report host functions writing [lo,hi) (RE; one 16K page)
         static long wat = -2;

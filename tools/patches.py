@@ -319,6 +319,41 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# Escape Bottle (runtime/hle/escape.c): the player's per-item "use it now?" predicates (one per item slot, main+0xd50e60
+# .. 0xd52f00; each: X / Y newly pressed with that slot equipped on it) only run while Link may use items (no cutscene,
+# dialog, menu or transition). main+0xd50e60 is the third bottle's (slot 0xf): owned (PlayerStatus+0xa9 bit 7) and
+# empty (+0xc0 bit 2 clear) -> `cset w0, eq` = yes, and the bottle swing starts. In randomizer seeds that bottle is the
+# Escape Bottle: the runtime warps instead and the answer is no.
+BOTTLE3_USE_SITE = 0x7000d50f0c
+
+
+def _bottle3_use(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
+    return ('{ extern int rt_bottle3_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle3_use()) c->x[0] = 0; }'
+            f'  /* {a:#x}: cset w0, eq (third bottle used: Escape Bottle) */')
+
+
+PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
+
+
+# Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
+# create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
+# its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
+BOSS_SPAWN_SITE = 0x70008f5ed4
+
+
+def _boss_spawn(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+
+
+PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
+
+
 # Hookshot anything (runtime/hle/hookshot.c): the hookshot's Shot update (main+0xd7ecc0) loads the attribute word of
 # the surface its ray hit; bit 0x4000 (hookshot target) makes it latch (Adhere) instead of bouncing off (Return).
 HOOKSHOT_ATTR_SITE = 0x7000d7ee9c

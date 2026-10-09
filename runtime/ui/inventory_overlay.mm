@@ -1,7 +1,8 @@
 // Inventory overlay for randomizer seeds: while the pause menu's Items page is shown, a panel along its bottom
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
 // game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
-// dungeon's keys.) The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
+// dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found.
+// The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@ extern "C" {
 #include "../rando.h"
 #include "../settings.h"
 uint64_t renderer_present_count(void);
+int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in this seed
 }
 
 #define DUNGEON_RECORDS (MAIN_BASE + 0x1CBB220 + 0xE0)  // live save: 0x10-byte records (+0 keys, +1 item bits)
@@ -66,8 +68,21 @@ static bool items_page_shown(void) {
     return f && renderer_present_count() - f <= 2;
 }
 
+extern "C" bool escape_bottle_owned(void);  // runtime/hle/escape.c
 extern "C" bool inventory_overlay_wanted(void) {
-    return g_settings.inv_keys && rando_seed_dir() && items_page_shown();
+    return (g_settings.inv_keys || escape_bottle_owned()) && rando_seed_dir() && items_page_shown();
+}
+
+// Escape Bottle (runtime/hle/escape.c): item names are hidden in randomizer seeds, so the third bottle's slot (last of
+// the bottom row, game layout 1076, 428) gets a name tag under it
+static void escape_tag(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
+    const char *t = "Escape Bottle";
+    float fs = 19 * u;
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, t), c(ox + 1076 * u, oy + 488 * u);
+    ImVec2 a(c.x - ts.x * 0.5f - 9 * u, c.y - ts.y * 0.5f - 3 * u), b(c.x + ts.x * 0.5f + 9 * u, c.y + ts.y * 0.5f + 3 * u);
+    dl->AddRectFilled(a, b, IM_COL32(52, 38, 20, 225), 9 * u);
+    dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 9 * u, 0, 1.8f * u);
+    dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 240, 200, 255), t);
 }
 
 struct Dungeon { const char *label; int index; };
@@ -90,6 +105,22 @@ static void key_icon(ImDrawList *dl, ImVec2 c, float s, ImU32 col) {
     dl->AddRectFilled(ImVec2(c.x + s * 0.07f, c.y + s * 0.48f), ImVec2(c.x + s * 0.22f, c.y + s * 0.58f), col);
 }
 
+// A boss soul glyph: a wisp (round body, flame tip).
+static void soul_icon(ImDrawList *dl, ImVec2 c, float s, bool owned) {
+    ImU32 col = owned ? IM_COL32(200, 140, 255, 255) : IM_COL32(120, 100, 70, 200);
+    ImVec2 tip(c.x + s * 0.12f, c.y - s * 0.62f), l(c.x - s * 0.3f, c.y - s * 0.05f), r(c.x + s * 0.3f, c.y - s * 0.05f);
+    if (owned) {
+        dl->AddCircleFilled(c, s * 0.3f, col, 16);
+        dl->AddTriangleFilled(l, tip, r, col);
+        dl->AddCircleFilled(ImVec2(c.x - s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 30, 90, 255), 8);
+        dl->AddCircleFilled(ImVec2(c.x + s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 30, 90, 255), 8);
+    } else {
+        dl->AddCircle(c, s * 0.3f, col, 16, s * 0.07f);
+        dl->AddLine(l, tip, col, s * 0.07f);
+        dl->AddLine(tip, r, col, s * 0.07f);
+    }
+}
+
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     // the game's UI is drawn in a centred 16:9 box; place the panel in its free strip above the bottom rule
     float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
@@ -97,6 +128,8 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     float u = bw / 1280.0f;  // game layout units (1280x720)
     ImVec2 p0(ox + 150 * u, oy + 512 * u), p1(ox + 1130 * u, oy + 630 * u);
     ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (escape_bottle_owned()) escape_tag(dl, font, ox, oy, u);
+    if (!g_settings.inv_keys) return;
     dl->AddRectFilled(p0, p1, IM_COL32(52, 38, 20, 205), 14 * u);
     dl->AddRect(p0, p1, IM_COL32(214, 176, 92, 230), 14 * u, 0, 2.5f * u);
     int n = (int)(sizeof kDungeons / sizeof kDungeons[0]);
@@ -110,6 +143,8 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
         const char *lbl = kDungeons[k].label;
         ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
         dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, p0.y + 4 * u), IM_COL32(255, 245, 225, 255), lbl);
+        int dn = k == n - 1 ? 0 : k + 1, soul = souls_owned(dn);
+        if (soul >= 0) soul_icon(dl, ImVec2(cx + ts.x * 0.5f + 16 * u, p0.y + 22 * u), 26 * u, soul > 0);
         // small keys
         key_icon(dl, ImVec2(cx - 16 * u, p0.y + 50 * u), 26 * u, ok && keys ? gold : dim);
         char cnt[8];

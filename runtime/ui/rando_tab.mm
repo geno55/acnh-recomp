@@ -117,6 +117,7 @@ struct GenOpts {
     bool pet_marin = false;   // Marin in the pool, the desert closed until she wakes the Walrus (open-desert off)
     int shopsanity = 0;       // off / vanilla prices / random prices (tools/rando/shopsanity.py)
     bool trendsanity = false; // every Trendy Game prize is a check (tools/rando/trendsanity.py)
+    bool boss_souls = false;  // boss-souls: a boss only appears once its soul is found (tools/rando/souls.py)
     bool hookshot_any = false;  // hookshot-anything: latches onto any surface (runtime/hle/hookshot.c, hookshot_logic.py)
 };
 static GenOpts g_opts;
@@ -141,7 +142,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.inc_fishing, &o.inc_rapids, &o.inc_dampe, &o.inc_trade, &o.inc_blue, &o.shuffle_instruments,
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
-                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.hookshot_any};
+                 &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -287,6 +288,7 @@ static void start_generation(void) {
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     static const char *shop[] = {"off", "vanilla", "random"};
     fprintf(f, " \"shopsanity\": \"%s\", \"trendsanity\": %s,\n", shop[g_opts.shopsanity], g_opts.trendsanity ? "true" : "false");
+    fprintf(f, " \"boss-souls\": %s,\n", g_opts.boss_souls ? "true" : "false");
     fprintf(f, " \"hookshot-anything\": %s,\n", g_opts.hookshot_any ? "true" : "false");
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
@@ -613,6 +615,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 380 more checks; tall grass stays as it is).\n"
                           "Unchecked bushes are golden. Cut a bush to reveal its item.");
+    ImGui::Checkbox("Boss souls", &g_opts.boss_souls);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the\n"
+                          "boss isn't in its lair: its room is empty and open, and its Heart Container and instrument (the\n"
+                          "Color Dungeon: the fairy's reward) can't be had. Found souls show on the Items screen.");
     static const char *shopn[] = {"Off", "Vanilla prices", "Random prices"};
     combo("Shopsanity", &g_opts.shopsanity, shopn, 3);
     if (ImGui::IsItemHovered())

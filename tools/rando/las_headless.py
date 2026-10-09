@@ -95,7 +95,7 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'no-buff-drops': False,
-        'bushes': False,
+        'bushes': False, 'boss-souls': False,
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
@@ -193,6 +193,11 @@ def main():
     logic_defs = yaml.safe_load(rd.LOGIC_RAW)
     import copy
     item_defs = copy.deepcopy(rd.ITEM_DEFS)
+    # Escape Bottle (runtime/hle/escape.c): every seed starts with the game's third bottle as a warp item, so the pool
+    # has one Bottle less (the logic only ever needs one), a 50 Rupees in its place. Not a logic item: nothing may
+    # require it (the seed is marked only in the settings.json written at the end, never in LAS's access).
+    item_defs['bottle']['quantity'] -= 1
+    item_defs['rupee-50']['quantity'] += 1
     os.makedirs(out_dir, exist_ok=True)
     import shutil
     if os.path.isdir(os.path.join(out_dir, 'romfs')):  # regenerating into the same folder: start from vanilla files
@@ -209,6 +214,12 @@ def main():
     for k, d in item_defs.items():
         if ks_free and k.startswith(ks_free) and k[-2:-1] == 'D':
             d['type'] = 'important'
+
+    if settings.get('boss-souls'):  # boss souls: a boss only appears once its soul is found (tools/rando/souls.py)
+        import souls as souls_mod
+        from RandomizerCore.Randomizers import chests as las_chests
+        print('boss souls:', souls_mod.add_to_logic(logic_defs, item_defs), 'in the pool', flush=True)
+        las_chests.SOUL_KEYS[:] = [souls_mod.item_key(b[1]) for b in souls_mod.BOSSES]
 
     pot_locs = {}
     if settings.get('pots'):
@@ -434,6 +445,11 @@ def main():
 
     if pot_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         print('pot refills marked:', pots_mod.mark_refills(result['placements']), flush=True)
+    pl = result['placements']
+    bottles = {loc: i for loc, i in pl['indexes'].items() if pl.get(loc) == 'bottle'}
+    for loc, i in bottles.items():  # the third bottle slot (index 2) is the Escape Bottle's
+        if i == 2:
+            pl['indexes'][loc] = bottles[loc] = min({0, 1} - set(bottles.values()))
     if pets:
         print('pets placed:', pets_mod.mark_indexes(result['placements'], logic_defs), flush=True)
     from RandomizerCore.Randomizers import item_get as _item_get
@@ -468,6 +484,10 @@ def main():
     if pets:
         from RandomizerCore.Tools import event_tools, oead_tools
         print('pets:', pets_mod.apply(out_dir, romfs, pets, oead_tools, event_tools), 'item entries', flush=True)
+    if settings.get('boss-souls'):
+        import msbt
+        from RandomizerCore.Tools import event_tools, oead_tools
+        print('boss souls:', souls_mod.apply(out_dir, romfs, leb, oead_tools, event_tools, msbt), flush=True)
     if pot_locs:
         from RandomizerCore.Tools import event_tools, oead_tools
         from RandomizerCore.Randomizers import item_get, data as las_data
@@ -521,6 +541,8 @@ def main():
         if bush_locs:
             print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
 
+    import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
+    print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
     import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
     keysanity_text.apply(out_dir, romfs, result['placements'])
 
@@ -530,6 +552,7 @@ def main():
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
+        s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker
