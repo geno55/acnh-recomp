@@ -15,6 +15,21 @@ static float g_wide = 1.0f;  // output aspect divided by 16:9 (1 = normal)
 void widescreen_set_factor(float f) { g_wide = f; }
 float widescreen_factor(void) { return g_wide; }
 
+// Effects drawn as a mesh around the camera, sized to cover a 16:9 view: with the widened camera their outer edge
+// shows (Mysterious Woods fog ring: a hard-edged oval at 32:9, a stray cloud piece at the far left). Their draws
+// get a viewport widened by the widescreen factor (centred), so they cover the window as they cover 16:9.
+// Identified by fragment shader hash (both backends hash the shader code the same way).
+float widescreen_effect_stretch(uint64_t fs_hash) {
+    static const uint64_t k[] = {
+        0xffad3b2d795231a7ull,  // Mysterious Woods fog ring (Field 06C...; found 2026-10-09 by skipping shaders)
+        0xd66b33b13b2eac29ull,  // Mysterious Woods haze layer (vertical streaks at the far left at 32:9)
+    };
+    if (g_wide <= 1.0f) return 1.0f;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
+        if (k[i] == fs_hash) return g_wide;
+    return 1.0f;
+}
+
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;

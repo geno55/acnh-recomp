@@ -1942,7 +1942,13 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
         }
     }
-    set_viewport(vp[0] * vp_sx + vp_ox, vp[1] * vp_sy + vp_oy, vp[2] * vp_sx, vp[3] * vp_sy, zn, zf);
+    {   // camera-attached effects sized for 16:9 are widened with the view (runtime/hle/widescreen.c)
+        extern float widescreen_effect_stretch(uint64_t fs_hash);
+        float k = widescreen_effect_stretch(g_cur_fs_hash);
+        float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
+        if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
+        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+    }
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;

@@ -1916,7 +1916,13 @@ static void draw(CmdRec *r, bool indexed) {
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
         }
     }
-    [enc setViewport:(MTLViewport){vp[0] * vp_sx + vp_ox, vp[1] * vp_sy + vp_oy, vp[2] * vp_sx, vp[3] * vp_sy, zn, zf}];
+    {   // camera-attached effects sized for 16:9 are widened with the view (runtime/hle/widescreen.c)
+        extern float widescreen_effect_stretch(uint64_t fs_hash);
+        float k = widescreen_effect_stretch(g_cur_fs_hash);
+        double vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
+        if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
+        [enc setViewport:(MTLViewport){vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf}];
+    }
     apply_scissor();
     if (pr->fi->uses_rscale) {  // [0] = render target scale, [1 + i] = scale of texture i
         float rs[65][4] = {{vp_sx, vp_sy, vp_ox, vp_oy}};
