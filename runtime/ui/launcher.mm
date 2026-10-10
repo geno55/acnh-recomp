@@ -355,12 +355,14 @@ static bool menu_tip(float s) {
     ImGui::PopStyleVar(2);
     if (open) {
         ImGui::SetWindowFontScale(1.25f);
-        static const char *const pad[] = {"Minus + Plus", "View + Menu", "Create + Options"};  // (bind_label_family)
+        // the controller's home button first (what players reach for: the PS button on a DualSense), the combo second
+        static const char *const home[] = {"Home button", "Xbox button", "PlayStation button"};  // (bind_label_family)
+        static const char *const pad[] = {"Minus + Plus", "View + Menu", "Create + Options"};
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted("LAS Recomp has its own menu for settings, the randomizer, cosmetics and more.");
         ImGui::Spacing();
-        ImGui::Text("Open it in game with F1 or Esc, or on a controller with %s together (or the Home button).",
-                    pad[bind_label_family() % 3]);
+        int fam = bind_label_family() % 3;
+        ImGui::Text("Open it in game with F1 or Esc, or on a controller with the %s (or %s together).", home[fam], pad[fam]);
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 14 * s));
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 180 * s) * 0.5f);

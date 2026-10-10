@@ -496,7 +496,7 @@ static void tab_about(void) {
     }
     ImGui::Spacing();
     header("Menu");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, Back + Start, or Home");
+    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");
     ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
     ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
 }
