@@ -60,8 +60,34 @@ static void set_tilt_name(bool removed) {
 static int g_tilt_applied = -1;  // blur removal as last applied to the module (-1: not yet)
 RT_ON_RESET(qol_reset) { g_tilt_applied = -1; }  // (reboot: the module is loaded again with the original name)
 
+// LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
+// would (move_360, blur_removal, dpad_move).
+static void setting_at_tick(void) {
+    static const char *spec;
+    static int init;
+    static uint64_t last;
+    if (!init) { init = 1; spec = getenv("LARECOMP_SETTING_AT"); }
+    if (!spec) return;
+    extern uint64_t renderer_present_count(void);
+    uint64_t now = renderer_present_count();
+    if (now == last) return;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *save = NULL, *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        unsigned long f;
+        char key[32];
+        int v;
+        if (sscanf(tok, "%lu:%31[a-z_0-9]=%d", &f, key, &v) != 3 || f <= last || f > now) continue;
+        bool *b = !strcmp(key, "move_360") ? &g_settings.move_360 : !strcmp(key, "blur_removal") ? &g_settings.blur_removal :
+                  !strcmp(key, "dpad_move") ? &g_settings.dpad_move : NULL;
+        if (b) { *b = v != 0; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+    }
+    last = now;
+}
+
 // Game thread, once per frame (runtime/hle/input.c) and at boot (before the post-process is set up).
 void qol_tick(void) {
+    setting_at_tick();
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
     int want = env == 2 ? g_settings.blur_removal : env;
