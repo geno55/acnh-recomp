@@ -98,14 +98,92 @@ int pets_callable(int out[5]) {
 
 const char *pets_name(int c) { return c >= 0 && c < 5 ? kComp[c].name : "?"; }
 
-// Make companion c follow Link (from the next screen); the one it replaces stays callable
+static volatile int g_swap;  // a call to carry out on the game thread (pets_game_tick)
+
+// Make companion c follow Link; the one it replaces stays callable. The game thread then swaps the actors at once.
 void pets_call(int c) {
     int cur = pets_current();
     if (cur == c || c < 0 || c > C_ROOSTER) return;
     if (cur > C_NONE && cur <= C_ROOSTER) flag_put(kComp[cur].found, true);
     if (c == C_BOWWOW) flag_put(kComp[C_BOWWOW].found, false);  // (back with Link: Madam MeowMeow may take him)
     *(volatile uint8_t *)(uintptr_t)COMPANION = (uint8_t)c;
+    g_swap = 1;
     LOG("[pets] companion %d -> %d\n", cur, c);
+}
+
+// The follower actor, swapped in place (no screen change). The game spawns the companion on a level load
+// (f_700085d980: the level's allow_companions config, then COMPANION_SPAWN); Link.LeaveCompanion (event action)
+// is COMPANION_LEAVE. The Player keeps the follower's shared_ptr at +0x1b98 / +0x1ba0.
+#define GAME_SCENE (MAIN_BASE + 0x1c97188)  // -> +0x4b8 Player*
+#define COMPANION_SPAWN (MAIN_BASE + 0xd53c20)  // (x0 = shared_ptr out, x1 = Player): spawns the save's companion by Link
+#define COMPANION_LEAVE (MAIN_BASE + 0xd53ed0)  // (x0 = Player): companion byte 0, the follower sent away
+#define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0 (+0x9d = COMPANION)
+#define ACTOR_KILL (MAIN_BASE + 0xfabf70)  // (x0 = actor): actor vtable +0x58 (0) - the base actor's vtable +0xa0 and a follower's own leave use it
+
+// Levels whose config (.lvb allow_companions) keeps companions out; dungeons only with settings.json "bad-pets"
+// (LAS: every dungeon but the Egg). The game's own exceptions too: BowWow stays out of Madam MeowMeow's house, Marin
+// out of the crane game.
+static int g_bad_pets = -1;
+static bool companion_allowed(const char *lv, int c) {
+    static const char *const kOut[] = {"ArmosShrine", "BedRoom", "CatfishsMawEnter", "DreamShrine", "FishingBoat",
+                                       "FishingPond", "KanaletCastleEnter", "MamboCave", "SeashellHouse",
+                                       "Lv09WindFishsEgg"};
+    for (size_t i = 0; i < sizeof kOut / sizeof kOut[0]; i++)
+        if (!strcmp(lv, kOut[i])) return false;
+    if ((c == C_BOWWOW && !strcmp(lv, "MadamHouse")) || (c == C_MARIN && !strcmp(lv, "CraneGame"))) return false;
+    if (strncmp(lv, "Lv", 2)) return true;
+    if (g_bad_pets < 0) {
+        char p[600], buf[16384];
+        snprintf(p, sizeof p, "%s/settings.json", rando_seed_dir() ? rando_seed_dir() : ".");
+        FILE *f = rando_seed_dir() ? fopen(p, "r") : NULL;
+        size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+        if (f) fclose(f);
+        buf[n] = 0;
+        g_bad_pets = strstr(buf, "\"bad-pets\": true") != NULL;
+    }
+    return g_bad_pets;
+}
+
+// Game thread, each pad read (input.c fill_state). Waits for the pause menu to close (game_in_play), then sends the
+// old follower away and spawns the new one next to Link.
+void pets_game_tick(Cpu *c) {
+    extern int game_in_play(void);
+    extern int inventory_items_cursor(void);
+    if (!g_swap || !game_in_play() || inventory_items_cursor() >= 0) return;
+    g_swap = 0;
+    uint64_t scene = LD64(GAME_SCENE), player = scene ? LD64(scene + 0x4b8) : 0, ps = LD64(PLAYER_STATUS_PTR);
+    if (!player || !ps) return;  // (the next level load spawns it)
+    const char *lv = (const char *)(uintptr_t)ps;
+    int want = pets_current();
+    uint64_t saved[31], sp = c->sp;
+    memcpy(saved, c->x, sizeof saved);
+    if (LD64(player + 0x1b98)) {
+        // the follower interface sits at actor +0x2a8; hold a reference while it leaves, then the actor is killed
+        // (left alone, a dismissed follower just stands there until the next level load)
+        uint64_t actor = LD64(player + 0x1b98) - 0x2a8, ctrl = LD64(player + 0x1ba0);
+        if (ctrl) ST64(ctrl + 8, LD64(ctrl + 8) + 1);
+        c->x[0] = player;
+        guest_call(c, COMPANION_LEAVE);
+        *(volatile uint8_t *)(uintptr_t)COMPANION = (uint8_t)want;  // (it cleared the byte)
+        c->x[0] = actor;
+        guest_call(c, ACTOR_KILL);
+        if (ctrl) ST64(ctrl + 8, LD64(ctrl + 8) - 1);
+    }
+    bool spawn = want != C_NONE && companion_allowed(lv, want);
+    if (spawn) {
+        c->sp -= 0x20;
+        uint64_t out = c->sp;
+        ST64(out, 0);
+        ST64(out + 8, 0);
+        c->x[0] = out, c->x[1] = player;
+        guest_call(c, COMPANION_SPAWN);
+        uint64_t ctrl = LD64(out + 8);  // (drop the copy it hands back: the Player keeps its own reference)
+        if (ctrl) ST64(ctrl + 8, LD64(ctrl + 8) - 1);
+        c->sp = sp;
+    }
+    memcpy(c->x, saved, sizeof saved);
+    LOG("[pets] follower swapped in %s: %d%s (actor %llx)\n", lv, want, spawn || !want ? "" : " (not allowed here: from the next level that allows it)",
+        (unsigned long long)LD64(player + 0x1b98));
 }
 
 // Pause menu companion slot (runtime/ui/inventory_overlay.mm): the choices are "no companion" then every callable
@@ -177,4 +255,4 @@ int rt_pet_item(int n) {
     return 1;
 }
 
-RT_ON_RESET(pets_reset) { g_nflags = -1, g_ghost_item = -1; }  // (seed switch: the next seed's flags.tsv)
+RT_ON_RESET(pets_reset) { g_nflags = -1, g_ghost_item = -1, g_bad_pets = -1, g_swap = 0, g_slot = -1; }  // (seed switch: the next seed's flags.tsv)
