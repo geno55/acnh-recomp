@@ -479,6 +479,9 @@ extern "C" void launcher_run(const char *root) {
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
+    // fonts belong to this context: back here via "Title screen" (in-place reboot) the previous run's are gone with
+    // its context, so load them again (a stale pointer here aborted in PushFont - user, 0.1 RC)
+    g_font_small = g_font_menu = g_font_title = NULL;
     const char *fonts[] = {"fonts/nintendo_udsgr_std_003.ttf", "/System/Library/Fonts/Avenir Next.ttc",
                            "/System/Library/Fonts/Helvetica.ttc", "C:/Windows/Fonts/segoeui.ttf"};
     static const ImWchar ranges[] = {0x20, 0xFF, 0x2039, 0x203A, 0x2713, 0x2713, 0x25B8, 0x25B8, 0};  // + ‹ › ✓ ▸
@@ -531,7 +534,10 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "tip")) g_settings.menu_tip_seen = false, g_tip_test = true;
     }
 
-    if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
+    static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
+    const char *ap = getenv("LARECOMP_LAUNCHER_AUTOPLAY");
+    if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
+    runs++;
     if (const char *t = getenv("LARECOMP_LAUNCHER_EXTRACT")) {  // (test) <dump>:<keys>: extract, log, exit
         const char *c = strchr(t, ':');
         if (c) {
