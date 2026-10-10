@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -37,6 +38,7 @@ void controls_bindings_draw(float scale);  // controls_ui.mm
 
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};
+static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen keyboard has the keys (render thread: ui_text_busy)
 static std::atomic<bool> g_want_fullscreen_apply{false};
 
 struct QEvent {
@@ -70,7 +72,7 @@ static void set_open(bool open) {
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();
     if (open) save_editor_on_open();
-    else settings_save();
+    else { settings_save(); osk_cancel(); g_text_busy = false; }
 }
 
 static ImGuiKey key_from_scancode(SDL_Scancode sc) {
@@ -134,6 +136,8 @@ static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+// The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
+extern "C" bool menu_input_captured(void) { return capturing(); }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
@@ -148,11 +152,13 @@ bool menu_handle_event(const SDL_Event *e) {
         g_kbd = 2;
         return true;
     }
+    // typing (a text field, the on-screen keyboard, the name entry): keys are text, not menu shortcuts
+    bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
                                (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
-            set_open(!g_open.load());
+            if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
             return true;
         }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F11 ||
@@ -185,7 +191,7 @@ bool menu_handle_event(const SDL_Event *e) {
         bool down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
         if (e->gbutton.button == SDL_GAMEPAD_BUTTON_BACK) back_down = down;
         if (e->gbutton.button == SDL_GAMEPAD_BUTTON_START) start_down = down;
-        if (down && ((back_down && start_down) || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)) {
+        if (down && !typing && ((back_down && start_down) || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)) {
             set_open(!g_open.load());
             return true;
         }
@@ -362,13 +368,14 @@ static void hint(const char *t) {
 }
 
 // A row with a label on the left and a choice of options on the right (dpad left/right cycles).
-static bool choice(const char *label, int *value, const char *const *names, int n) {
+// reserve: room kept free right of the combo (a button on the same line)
+static bool choice(const char *label, int *value, const char *const *names, int n, float reserve = 0) {
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
     bool changed = false;
-    ImGui::SetNextItemWidth(-1);
+    ImGui::SetNextItemWidth(reserve > 0 ? -reserve : -1);
     if (ImGui::BeginCombo("##c", names[*value])) {
         for (int i = 0; i < n; i++) {
             if (ImGui::Selectable(names[i], i == *value)) { *value = i; changed = true; }
@@ -404,16 +411,20 @@ static void tab_display(void) {
     header("Video");
     const char *aspects[] = {"Unlocked (fill the window)", "Original 16:9"};
     choice("Aspect ratio", &g_settings.aspect, aspects, 2);
-    hint("Unlocked widens (or heightens) the camera to match the window: ultrawide shows more of the island. "
-         "Houses and dungeons stay 16:9. Original keeps the Switch framing with black bars.");
     ImGui::Spacing();
     bool fs = g_settings.fullscreen;
     if (toggle("Fullscreen", &fs)) { g_settings.fullscreen = fs; g_want_fullscreen_apply.store(true); }
     hint("Also: F11, Alt+Enter or Cmd+Ctrl+F.");
     ImGui::Spacing();
-    static const char *res[] = {"Match display", "1x (1080p)", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Dynamic",
-                                "75% of display", "67% of display", "50% of display"};
-    choice("Internal resolution", &g_settings.res_mode, res, 13);
+    // display order -> RES_* (the ini / enum order predates the menu order)
+    static const char *res[] = {"Match display", "Dynamic resolution", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x",
+                                "0.75x", "0.50x", "0.25x"};
+    static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, 5, 6, 7, 8, RES_Q75, RES_Q50, RES_Q25};
+    {
+        int ri = 0;
+        for (int i = 0; i < 13; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
+        if (choice("Internal resolution", &ri, res, 13)) g_settings.res_mode = res_mode[ri];
+    }
     {
         float sx, sy;
         renderer_get_scale(&sx, &sy);
@@ -426,15 +437,7 @@ static void tab_display(void) {
 #ifdef __APPLE__
     static const char *ups[] = {"Bilinear", "MetalFX"};
     choice("Upscaler", &g_settings.upscaler, ups, 2);
-    hint("How a lower internal resolution (75% / 67% / 50%, 1x, Dynamic) is scaled up to the window. MetalFX is "
-         "Apple's spatial upscaler: sharper edges and detail than plain bilinear filtering.");
 #endif
-    hint("Match display renders at the window's own size. 75% / 67% / 50% render at that share of it (faster) "
-         "and scale up. 1x-8x render at that many times the Switch's 1080p "
-         "(wide windows keep their shape; very high settings are capped at the GPU's 16384-pixel limit) and are "
-         "scaled to the window - above the display size this is supersampling. Dynamic matches the display and "
-         "lowers the resolution while the GPU can't hold 60 fps (the game slows down when a frame is missed), "
-         "raising it again when it can. Changing it briefly pauses while the render targets are rebuilt.");
     ImGui::Spacing();
     toggle("Show FPS", &g_settings.show_fps);
     ImGui::Spacing();
@@ -443,6 +446,22 @@ static void tab_display(void) {
     hint("Turns off the tilt-shift blur at the top and bottom of the screen.");
     toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
     hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+}
+
+// Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c); never part of a seed
+static void cosmetic(const char *label, int *v, const char *const *names, int n) {
+    float bw = ImGui::CalcTextSize("Random").x + ImGui::GetStyle().FramePadding.x * 2;
+    choice(label, v, names, n, bw + ImGui::GetStyle().ItemSpacing.x);
+    ImGui::SameLine();
+    ImGui::PushID(label);
+    if (ImGui::Button("Random")) *v = (*v + 1 + rand() % (n - 1)) % n;  // (any other colour, Default included)
+    ImGui::PopID();
+}
+
+static void tab_cosmetics(void) {
+    header("Cosmetics");
+    cosmetic("Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS);
+    cosmetic("Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS);
 }
 
 static void tab_audio(void) {
@@ -464,7 +483,6 @@ static void tab_about(void) {
     ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
-    hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
     toggle("360-degree movement", &g_settings.move_360);
     hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
     ImGui::Spacing();
@@ -475,9 +493,6 @@ static void tab_about(void) {
         snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         choice("Button icons", &g_settings.prompts, names, 4);
-        hint("The game's button icons drawn for your controller. Auto follows the controller that's connected "
-             "(Nintendo icons with a keyboard or other pads). The icons follow the controller bindings above; by "
-             "default buttons are matched by position: Switch A is Xbox B / PlayStation circle.");
     }
     ImGui::Spacing();
     header("Menu");
@@ -497,6 +512,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
 RT_ON_RESET(menu_reset) {
     set_open(false);
     g_kbd = 0;
+    osk_cancel();
     pthread_mutex_lock(&q_lock);
     q_events.clear();
     pthread_mutex_unlock(&q_lock);
@@ -512,11 +528,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::PushFont(g_font_big);
     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Enter your name");
     ImGui::PopFont();
-    static bool was_open;
-    bool appearing = !was_open;
-    was_open = true;
-    int len = (int)strlen(g_kbd_text);
-    if (!g_last_pad.load()) {  // keyboard: type straight into the field
+    static bool was_open, was_pad;
+    bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
+    was_open = true, was_pad = pad;
+    if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();
         ImGui::SetNextItemWidth(-1);
         ImGui::PushFont(g_font_big);
@@ -526,33 +541,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::PopFont();
         if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
         ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
-    } else {  // controller: on-screen keyboard
-        static bool upper = true;
-        ImGui::PushFont(g_font_big);
-        ImGui::Text("%s_", g_kbd_text);
-        ImGui::PopFont();
-        static const char *rows_u[] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-.'!", "0123456789"};
-        static const char *rows_l[] = {"abcdefghij", "klmnopqrst", "uvwxyz-.'!", "0123456789"};
-        const char **rows = upper ? rows_u : rows_l;
-        float k = 70 * scale;
-        for (int r = 0; r < 4; r++) {
-            for (int i = 0; rows[r][i]; i++) {
-                if (i) ImGui::SameLine();
-                char lbl[8] = {rows[r][i], 0};
-                if (appearing && r == 0 && i == 0) ImGui::SetKeyboardFocusHere();
-                if (ImGui::Button(lbl, ImVec2(k, k)) && len < g_kbd_max) { g_kbd_text[len] = rows[r][i]; g_kbd_text[len + 1] = 0; }
-            }
-        }
-        if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(k * 2, k))) upper = !upper;
-        ImGui::SameLine();
-        if (ImGui::Button("Space", ImVec2(k * 3, k)) && len < g_kbd_max && len > 0) { g_kbd_text[len] = ' '; g_kbd_text[len + 1] = 0; }
-        ImGui::SameLine();
-        if (ImGui::Button("Delete", ImVec2(k * 2.5f, k)) && len > 0) g_kbd_text[len - 1] = 0;
-        ImGui::SameLine();
-        if (ImGui::Button("OK", ImVec2(k * 2.5f, k))) g_kbd = 2;
-        // B deletes (Start / + confirms, see menu_handle_event)
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) && (len = (int)strlen(g_kbd_text)) > 0) g_kbd_text[len - 1] = 0;
-        ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+    } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields)
+        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
+        if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
     }
     ImGui::End();
     if (g_kbd.load() != 1) was_open = false;
@@ -685,11 +676,14 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         // L/R (or Q/E) switch tabs; B / Esc with nothing to back out of closes the menu
         if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
         static const char *tabs[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
-                                     "Controls"};
-        const int ntabs = 8;
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
-        bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+                                     "Cosmetics", "Controls"};
+        const int ntabs = 9;
+        // (not while typing: Q / E are letters then, and the on-screen keyboard has the controller)
+        bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
+        if (!any_popup && !typing) {
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
+        }
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
             for (int i = 0; i < ntabs; i++) {
                 ImGuiTabItemFlags f = g_tab_request == i ? ImGuiTabItemFlags_SetSelected : 0;
@@ -711,8 +705,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
                     case 4: if (warp_tab_draw(scale)) set_open(false); break;
                     case 5: cheats_draw(scale); break;
                     case 6: difficulty_draw(scale); break;
-                    case 7: tab_about(); break;
+                    case 7: tab_cosmetics(); break;
+                    case 8: tab_about(); break;
                     }
+                    static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
+                    if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }
@@ -721,15 +718,18 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui::EndTabBar();
         }
         ImGui::TextDisabled("L / R  switch tabs      A  select      B  back      Minus + Plus / F1  close");
-        // B with nothing focused-deeper closes the menu
-        if (!any_popup && !io.WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
+        // before, so it's still true the frame a field lets go)
+        if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
         ImGui::End();
+        osk_draw(g_font_big, scale);  // (a text field activated with the controller)
     }
 
     if (kbd) keyboard_draw(io, scale);
     ImGui::Render();
+    g_text_busy = open && ui_text_busy();
 #ifdef __APPLE__
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);

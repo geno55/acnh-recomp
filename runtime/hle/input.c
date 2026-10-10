@@ -4,6 +4,7 @@
 // d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
 // controller by position, Switch A = east).
 #include <SDL3/SDL.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -76,6 +77,17 @@ void input_reset(void) {
 
 volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
 
+// Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad:) carry this device id: they go the whole way, menu first.
+#define TEST_DEVICE 0x7E57u
+static bool test_event(const SDL_Event *e) {
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
+    case SDL_EVENT_TEXT_INPUT: return e->text.windowID == TEST_DEVICE;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
+    default: return false;
+    }
+}
+
 // Scripted test runs ignore the user's own input (a key or stick touched while a test drives Link spoils it):
 // LARECOMP_NO_USER_INPUT=1, on by default whenever LARECOMP_INPUT / LARECOMP_DOORJUMP_TEST / LARECOMP_PLACE is set
 // (or LARECOMP_HOST_INPUT / LARECOMP_BIND_TEST; LARECOMP_NO_USER_INPUT=0 lets it through again).
@@ -88,6 +100,7 @@ bool input_user_blocked(const SDL_Event *e) {
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
     if (!on) return false;
+    if (test_event(e)) return false;  // (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: - the test's own presses)
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_TEXT_EDITING:
     case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -161,9 +174,68 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
 //   button (names as in larecomp.ini's bind_* lines: "Z", "Keypad 0", "south", "ltrigger"...);
 //   "frame:lstick:<x>/<y>:frames" holds the controller's left stick there (raw SDL units, y up: a drifting stick).
+// "frame:type:<text>" types <text> as real key events (down, text, up per character), through the overlay menu / name
+//   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
+// "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
+//   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
+// "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
 //   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
+static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    e.key.which = TEST_DEVICE, e.key.scancode = sc, e.key.mod = mod, e.key.down = down;
+    e.key.key = SDL_GetKeyFromScancode(sc, mod, false);
+    SDL_PushEvent(&e);
+}
+static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
+    SDL_Event e;
+    memset(&e, 0, sizeof e);
+    if (!strcmp(dev, "shot")) {
+        extern char g_window_shot_request[256];  // runtime/hle/hookshot.c
+        if (frame == start) snprintf(g_window_shot_request, sizeof g_window_shot_request, "build/%s.png", arg);
+        return;
+    }
+    if (!strcmp(dev, "sdlkey")) {
+        if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        return;
+    }
+    if (!strcmp(dev, "sdlpad")) {
+        int b = bind_pad_from_name(arg);
+        if (b < 0 || b >= SDL_GAMEPAD_BUTTON_COUNT || (frame != start && frame != start + len)) return;
+        e.type = frame == start ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+        e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)b, e.gbutton.down = frame == start;
+        SDL_PushEvent(&e);
+        return;
+    }
+    if (frame != start) return;
+    LOG("[input] test: typing \"%s\"\n", arg);
+    static char ascii[128][2];  // (a text event keeps a pointer to its text: these live on)
+    for (const char *p = arg; *p; p++) {
+        if (*p == '{' && strchr(p, '}')) {  // a named key
+            char nm[32];
+            size_t n = (size_t)(strchr(p, '}') - p - 1);
+            snprintf(nm, sizeof nm, "%.*s", (int)(n < sizeof nm ? n : sizeof nm - 1), p + 1);
+            SDL_Scancode sc = SDL_GetScancodeFromName(nm);
+            push_key(sc, SDL_KMOD_NONE, true), push_key(sc, SDL_KMOD_NONE, false);
+            p += n + 1;
+            continue;
+        }
+        SDL_Keymod mod = SDL_KMOD_NONE;
+        SDL_Scancode sc = SDL_GetScancodeFromKey((SDL_Keycode)tolower((unsigned char)*p), &mod);
+        if (isupper((unsigned char)*p)) mod |= SDL_KMOD_LSHIFT;
+        push_key(sc, mod, true);
+        int c = *p & 0x7f;
+        ascii[c][0] = (char)c;
+        memset(&e, 0, sizeof e);
+        e.type = SDL_EVENT_TEXT_INPUT, e.text.windowID = TEST_DEVICE, e.text.text = ascii[c];
+        SDL_PushEvent(&e);
+        push_key(sc, mod, false);
+    }
+}
+
 static void host_test_frame(uint64_t frame) {
     static const char *hspec, *bspec;
     static int init;
@@ -177,8 +249,12 @@ static void host_test_frame(uint64_t frame) {
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0, len = 10;
-            char dev[8] = "", name[40] = "";
-            if (sscanf(tok, "%lu:%7[a-z]:%39[^:]:%lu", &start, dev, name, &len) < 3) continue;
+            char dev[8] = "", name[400] = "";
+            if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
+                test_push(frame, start, len, dev, name);
+                continue;
+            }
             if (frame < start || frame >= start + len) continue;
             if (!strcmp(dev, "key")) { SDL_Scancode sc = SDL_GetScancodeFromName(name); if (sc) keys[sc] = 1; }
             else if (!strcmp(dev, "lstick")) sscanf(name, "%d/%d", &sx, &sy);
@@ -288,8 +364,10 @@ void input_frame(uint64_t frame) {
     script_ry = ry;
 }
 
+extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
+
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return key_buttons | pad_buttons | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -312,7 +390,9 @@ static void fill_state(Cpu *c) {
       extern void digs_game_tick(Cpu *c, uint64_t frame);
       digs_game_tick(c, renderer_present_count());
       extern void qol_tick(void);
-      qol_tick(); }
+      qol_tick();
+      extern void pets_game_tick(Cpu *c);
+      pets_game_tick(c); }
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
@@ -322,8 +402,7 @@ static void fill_state(Cpu *c) {
         g_watch_hi = c->x[1] - 8 - 0x98 + hi;
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
-    extern bool menu_is_open(void);
-    bool menu = menu_is_open();  // the overlay menu has the controls
+    bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
     uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
@@ -361,6 +440,12 @@ static void fill_state(Cpu *c) {
     if (ry > 16000) b |= 1ull << 21;
     if (rx > 16000) b |= 1ull << 22;
     if (ry < -16000) b |= 1ull << 23;
+    {   // the pause menu's companion slot (runtime/hle/pets.c) takes the d-pad / sticks / A while the cursor is on it
+        extern uint64_t pets_menu_input(uint64_t b, int32_t st[4]);
+        int32_t st[4] = {lx, ly, rx, ry};
+        b = pets_menu_input(b, st);
+        lx = st[0], ly = st[1], rx = st[2], ry = st[3];
+    }
     *(uint64_t *)(s + 8) = b;
     static uint64_t last_b;
     if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);

@@ -1,4 +1,5 @@
 #include <sys/mman.h>
+#include "paths.h"
 #include "settings.h"
 #include "ui/menu.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
@@ -485,7 +486,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
-            if (b->tp > 0 && lv == 0 && layer == 0) texpatch_apply(b->tp - 1, lin, l.w, l.h, row);
+            if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, lin, l.w, l.h, row);
             uint8_t *data = lin;
             uint32_t out_row = row;
             static int bc5log;  // LARECOMP_LOG_BC5: endpoint bytes of BC5 (0x4B/0x4C) textures (unorm ~128 vs snorm ~0)
@@ -981,6 +982,7 @@ void ui_window_init(void) {
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     window = SDL_CreateWindow("Link's Awakening (LAS Recomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
+    rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     SDL_MetalView view = SDL_Metal_CreateView(window);

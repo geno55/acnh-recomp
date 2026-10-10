@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -31,6 +32,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include "platform.h"
+#include "paths.h"
 #include "ui/ui_scale.h"
 #include "settings.h"
 #include "input_bind.h"
@@ -100,6 +102,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_dump, g_keys;  // picked files
 static std::string g_job;           // current extraction step / result for the status line
 static bool g_busy, g_job_failed;
+static bool g_confirm_delete;       // game-files page: "Delete the extracted game files?" shown
 
 static void set_job(const std::string &s, bool failed = false) {
     pthread_mutex_lock(&g_lock);
@@ -137,8 +140,12 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     dump = g_dump, keys = g_keys;
     pthread_mutex_unlock(&g_lock);
-    std::string hactool = "tools/hactool/hactool" PLAT_EXE_SUFFIX, tmp = g_root + "/.extract", log = g_root + "/extract.log";
+    char hpath[1024];
+    std::string hactool = rt_resource("hactool" PLAT_EXE_SUFFIX, "tools/hactool/hactool" PLAT_EXE_SUFFIX, hpath, sizeof hpath)
+                              ? hpath : "tools/hactool/hactool" PLAT_EXE_SUFFIX;
+    std::string tmp = g_root + "/.extract", log = g_root + "/extract.log";
     mkdir(g_root.c_str(), 0755);
+    rt_remove_game_file(g_root.c_str(), ".extract");  // (an interrupted run's)
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
     set_job("Reading the game dump...");
@@ -177,7 +184,7 @@ static void *extract_thread(void *) {
         set_job(why.empty() ? "Game files ready." : why, !why.empty());
     }
 done:
-    plat_remove_tree(tmp.c_str());
+    rt_remove_game_file(g_root.c_str(), ".extract");  // the dump's secure partition (~6 GB): only the NCA was needed
     pthread_mutex_lock(&g_lock);
     g_busy = false;
     pthread_mutex_unlock(&g_lock);
@@ -326,7 +333,7 @@ static std::vector<std::string> list_seeds() {
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP, CONTROLS };
+enum Page { MAIN, SETTINGS, SETUP, CONTROLS, COSMETICS };
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
@@ -468,7 +475,7 @@ extern "C" void launcher_run(const char *root) {
         if (seeds[i] == g_settings.rando_seed) choice = (int)i + 1;
     Page page = status.empty() ? MAIN : SETUP;
     bool play = false;
-    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup
+    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup / controls / cosmetics
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
 #ifdef __APPLE__
@@ -478,6 +485,8 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
         if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
+        if (pg && !strcmp(pg + 1, "cosmetics")) page = COSMETICS;
+        if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -491,6 +500,13 @@ extern "C" void launcher_run(const char *root) {
             fprintf(stderr, "[launcher] extract: %s -> %s\n", g_job.c_str(), check_game_files(g_root).empty() ? "READY" : "NOT READY");
             exit(0);
         }
+    }
+    if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
+        double gb = rt_game_files_size(g_root.c_str()) / 1e9;
+        bool ok = rt_remove_game_files(g_root.c_str());
+        status = check_game_files(g_root);
+        fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
+        if (!status.empty()) { g_bg = 0; page = SETUP; }
     }
     while (!play) {
         SDL_Event e;
@@ -563,6 +579,10 @@ extern "C" void launcher_run(const char *root) {
             ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Link's Awakening");
             ImGui::PopFont();
             ImGui::SetCursorPos(ImVec2(x0, 330 * s));
+            // typing in a text field / the on-screen keyboard (osk.h): B / Esc are for it, not "back" (from the frame
+            // before too, so the Esc that ends the typing doesn't also leave the page)
+            static bool typed_before;
+            bool typing = typed_before || ui_text_busy();
 
             if (page == MAIN) {
                 bool hov = false;
@@ -622,6 +642,8 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PopFont();
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("CONTROLS", true)) page = CONTROLS;
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("COSMETICS", true)) page = COSMETICS;
                 ImGui::PushFont(g_font_small);
                 ImGui::Dummy(ImVec2(0, 12 * s));
                 import_fonts();
@@ -647,8 +669,34 @@ extern "C" void launcher_run(const char *root) {
                     if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                    ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = MAIN; }  // (B / Esc: back)
+                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    settings_save();  // (B / Esc: back)
+                    page = MAIN;
+                }
+                } else if (page == COSMETICS) {  // tunic / heart colours (also the in-game menu's Cosmetics tab)
+                ImGui::PushFont(g_font_small);
+                const struct { const char *label; int *v; const char *const *names; int n; } rows[] = {
+                    {"Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS},
+                    {"Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS}};
+                for (const auto &r : rows) {
+                    ImGui::PushID(r.label);
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::SetNextItemWidth(300 * s);
+                    ImGui::Combo("##c", r.v, r.names, r.n);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Random")) *r.v = (*r.v + 1 + rand() % (r.n - 1)) % r.n;  // (Default included)
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(r.label);
+                    ImGui::PopID();
+                }
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    settings_save();
+                    page = SETTINGS;
+                }
                 } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
                 ImGui::PushFont(g_font_small);
                 controls_bindings_draw(s);
@@ -656,7 +704,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
-                if (menu_item("BACK", true) || (cap_dev < 0 && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                if (menu_item("BACK", true) || (cap_dev < 0 && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                                                 ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
                     bind_capture_cancel();
                     settings_save();
@@ -672,6 +720,8 @@ extern "C" void launcher_run(const char *root) {
                     std::string def = std::string(home ? home : "") + "/.switch/prod.keys";
                     if (file_exists(def)) { keys = def; pthread_mutex_lock(&g_lock); g_keys = def; pthread_mutex_unlock(&g_lock); }
                 }
+                bool ready = status.empty() && !busy;  // set up: this page only offers to delete them
+                if (!ready) {
                 ImGui::PushFont(g_font_small);
                 ImGui::SetCursorPosX(x0);
                 ImGui::PushTextWrapPos(0);
@@ -698,15 +748,54 @@ extern "C" void launcher_run(const char *root) {
                     pthread_create(&t, NULL, extract_thread, NULL);
                     pthread_detach(t);
                 }
+                }
                 if (!job.empty()) {
                     ImGui::PushFont(g_font_small);
                     ImGui::SetCursorPosX(x0);
                     ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : ImVec4(0.9f, 0.9f, 0.8f, 1), "%s", job.c_str());
                     ImGui::PopFont();
                 }
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", !busy) || (!busy && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                // DELETE GAME FILES: frees the extracted copy (runtime/paths.c removes only what the extraction made,
+                // only inside the data root). Saves, seeds, settings and the user's dump / keys stay.
+                static double files_gb = -1;
+                if (ready) {
+                    if (files_gb < 0) files_gb = rt_game_files_size(g_root.c_str()) / 1e9;
+                    ImGui::PushFont(g_font_small);
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::PushTextWrapPos(0);
+                    if (!g_confirm_delete)
+                        ImGui::TextWrapped("Game files are set up (%.1f GB, extracted from your dump). Delete them to free "
+                                           "the space; saves, seeds and settings are kept.", files_gb);
+                    else
+                        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete the extracted game files (%.1f GB)? Saves, seeds "
+                                           "and settings are kept, and your dump and keys aren't touched: you can set "
+                                           "the game files up again from them.", files_gb);
+                    ImGui::PopTextWrapPos();
+                    ImGui::PopFont();
+                    ImGui::SetCursorPosX(x0);
+                    if (!g_confirm_delete) {
+                        if (menu_item("DELETE GAME FILES", true)) g_confirm_delete = true;
+                    } else {
+                        if (menu_item("DELETE", true)) {
+                            bool ok = rt_remove_game_files(g_root.c_str());
+                            status = check_game_files(g_root);
+                            set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's "
+                                         "data folder?).", !ok);
+                            if (!status.empty()) g_bg = 0;
+                            g_confirm_delete = false, files_gb = -1;
+                        }
+                        ImGui::SetCursorPosX(x0);
+                        if (menu_item("CANCEL", true)) g_confirm_delete = false;
+                    }
+                } else files_gb = -1;  // (re-measured after an extraction)
+                if (g_confirm_delete) {  // (B / Esc: back out of the question first)
+                    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                        g_confirm_delete = false;
+                } else {
+                    ImGui::SetCursorPosX(x0);
+                    if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                }
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
@@ -738,6 +827,8 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PopFont();
             ImGui::End();
             ImGui::PopStyleColor();
+            osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
+            typed_before = ui_text_busy();
 
             ImGui::Render();
 #ifdef __APPLE__
@@ -757,13 +848,13 @@ extern "C" void launcher_run(const char *root) {
             [cb commit];
             if (shot) {
                 [cb waitUntilCompleted];
-                save_png(shot, "build/launcher.png");
+                save_png(shot, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png");
                 exit(0);
             }
 #else
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
             bool shot = shot_at && ++frame == shot_at;
-            vk_frame_end(shot ? "build/launcher.png" : NULL);
+            vk_frame_end(shot ? getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png" : NULL);
             if (shot) exit(0);
 #endif
         }
