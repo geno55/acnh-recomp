@@ -640,7 +640,7 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::BeginTable("##opts", 2)) {
         struct { const char *n; bool *v; } o[] = {
             {"Shuffle instruments", &g_opts.shuffle_instruments}, {"Shuffle dungeons", &g_opts.shuffle_dungeons},
-            {"Randomize enemies", &g_opts.randomize_enemies}, {"Randomize music", &g_opts.randomize_music},
+            {"Randomize music", &g_opts.randomize_music},
             {"Open Mabe Village", &g_opts.open_mabe}, {"Fast songs", &g_opts.fast_songs},
             {"Boss cutscenes", &g_opts.boss_cutscenes}, {"Spoiler log", &g_opts.spoiler},
         };
@@ -660,6 +660,8 @@ extern "C" void rando_tab_draw(float scale) {
         }
         ImGui::EndTable();
     }
+    // enemy randomizer, with its mini-boss option right under it (off = no mini-bosses among the enemies)
+    ImGui::Checkbox("Randomize enemies", &g_opts.randomize_enemies);
     ImGui::BeginDisabled(!g_opts.randomize_enemies);  // enemy-minibosses (LAS enemies.py, runtime/hle/miniboss.c)
     ImGui::Indent();
     ImGui::Checkbox("Include mini-bosses", &g_opts.enemy_minibosses);
