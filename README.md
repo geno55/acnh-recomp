@@ -22,7 +22,7 @@ native Windows and macOS application.
 > **No game files are included.** LAS Recomp needs your own legally obtained copy of the game: a dump of
 > *Link's Awakening* **v1.0.0** (XCI or NSP) from your console and your console's `prod.keys`.
 > Instructions on how to obtain these files from your Switch and game copy will **NOT** be provided.
-> On first launch the start screen extracts what it needs. Nothing owned by Nintendo is part of this repository.
+> On first launch the start screen extracts what it needs. No game files, assets, keys or fonts are included.
 > The screenshot shows the start screen after extraction; no Nintendo artwork is included until provided by the user.
 
 ![The start screen: choose vanilla or a randomizer seed, set up your game files, settings](docs/start_screen.jpg)
@@ -142,8 +142,9 @@ none of their files are used):
 ## Legal
 
 LAS Recomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
-and *Link's Awakening* are trademarks of Nintendo. No Nintendo code or assets are distributed in this repository;
-you must provide your own legally obtained copy of the game to play. 
+and *Link's Awakening* are trademarks of Nintendo. No game files, assets, keys or fonts are included - not in this
+repository and not in release builds. Release builds contain the recompiled game program only; you must provide your
+own legally obtained copy of the game (and your own keys) to play, and everything else is loaded from it.
 
 ## License
 
