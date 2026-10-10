@@ -632,9 +632,29 @@ extern "C" void launcher_run(const char *root) {
                 snprintf(label, sizeof label, "PLAY    \xe2\x80\xb9 %s%s \xe2\x80\xba", choice ? "Randomizer Seed: " : "",
                          choices[choice].c_str());  // (choice 0 = Vanilla)
                 ImGui::SetCursorPosX(x0);
+                // the ‹ › arrows are clickable with the mouse: they cycle Vanilla / seeds instead of starting the game
+                int arrow = 0;
+                {
+                    ImGui::PushFont(g_font_menu);
+                    ImVec2 at = ImGui::GetCursorScreenPos();
+                    const char *lt = strstr(label, "\xe2\x80\xb9"), *rt = strstr(label, "\xe2\x80\xba");
+                    float h = ImGui::CalcTextSize(label).y, pad = h * 0.35f;
+                    float lx = at.x + ImGui::CalcTextSize(label, lt).x, rx = at.x + ImGui::CalcTextSize(label, rt).x;
+                    float aw = ImGui::CalcTextSize("\xe2\x80\xb9").x;
+                    ImVec2 m = ImGui::GetIO().MousePos;
+                    bool in_y = m.y >= at.y - pad && m.y <= at.y + h + pad;
+                    if (in_y && m.x >= lx - pad && m.x <= lx + aw + pad) arrow = -1;
+                    if (in_y && m.x >= rx - pad && m.x <= rx + aw + pad) arrow = 1;
+                    ImGui::PopFont();
+                }
                 static bool focused_once;
                 if (!focused_once) { ImGui::SetKeyboardFocusHere(); focused_once = true; }
-                if (menu_item(label, status.empty(), &hov)) {
+                bool pressed = menu_item(label, status.empty(), &hov);
+                if (pressed && arrow && ImGui::IsMouseReleased(0)) {  // (a mouse click on an arrow: cycle)
+                    choice = (choice + arrow + (int)choices.size()) % (int)choices.size();
+                    pressed = false;
+                }
+                if (pressed) {
                     if (g_settings.menu_tip_seen) play = true;
                     else ImGui::OpenPopup("##menutip");  // first PLAY ever: how to reach our menu, then the game
                 }
