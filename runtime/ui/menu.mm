@@ -478,9 +478,6 @@ static void tab_audio(void) {
 }
 
 static void tab_about(void) {
-    header("Controls");
-    controls_bindings_draw(ImGui::GetFontSize() / 34);
-    ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
     toggle("360-degree movement", &g_settings.move_360);
@@ -494,6 +491,9 @@ static void tab_about(void) {
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         choice("Button icons", &g_settings.prompts, names, 4);
     }
+    ImGui::Spacing();
+    header("Controls");
+    controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
     header("Menu");
     ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");
