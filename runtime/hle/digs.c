@@ -49,6 +49,7 @@
 #define T_SINKING_SWORD 0x194
 #define T_LAWN 0xb5   // ObjLawn: tall grass
 #define T_GRASS 0xb6  // ObjGrass: bush
+#define T_HOLE 0x1cd   // ObjHolesDug
 
 bool flags_ext_get(int idx);
 void flags_ext_set(int idx);
@@ -67,6 +68,8 @@ static uint32_t g_zone = 1;       // zone id the shovel passes (1 on the Field; 
 static int g_queue[64], g_nq;     // dug checks whose item is to be spawned
 static FILE *g_test_out;          // (dig test: LARECOMP_DIG_TEST)
 static uint8_t g_spawns[NTILES];  // holes reopened per tile since the Field loaded (3 that didn't stay: give up)
+static uint64_t g_quiet[NTILES];  // reopened hole: until this frame nothing else may appear on the tile (its dig drop)
+static uint64_t g_frame;
 static int g_field_was;           // (the tick: on the Field / which scene, last frame)
 static uint64_t g_scene_was;
 static uint64_t g_scratch;        // guest memory for the spawn arguments
@@ -86,7 +89,8 @@ RT_ON_RESET(digs_reset) {
     memset(g_alive, 0, sizeof g_alive);
     memset(g_item, 0, sizeof g_item);
     memset(g_spawns, 0, sizeof g_spawns);
-    g_zone = 1, g_nq = 0;
+    memset(g_quiet, 0, sizeof g_quiet);
+    g_zone = 1, g_nq = 0, g_frame = 0;
     g_field_was = 0, g_scene_was = 0, g_scratch = 0, g_pool = 0;
     for (int i = 0; i < g_nstr; i++) free(g_strtab[i]);
     g_nstr = 0;
@@ -150,11 +154,20 @@ static void tile_xz(int g, float *x, float *z) {
 }
 
 // the factory asks for every actor's create function (runtime/hle/souls.c): no grass / bush on a dug Field tile
+// ... and no dig drop out of a reopened hole: a reopened ObjHolesDug rolls the shovel's drop (rupees, hearts) like a
+// fresh dig, whatever it is passed - anything but the hole and our item appearing on its tile right after is dropped
 bool rt_digs_skip_plant(uint32_t type, uint64_t info) {
-    if ((type != T_LAWN && type != T_GRASS) || !enabled() || !on_field()) return false;
+    if (!enabled() || !on_field()) return false;
     const float *pos = (const float *)(uintptr_t)(info + 0x180);  // (spawn info +0x180: position)
     int g = tile_at(pos[0], pos[2]);
-    return g >= 0 && g_tiles[g].dig && flags_ext_get(DIG_FLAG_BASE + g);
+    if (g < 0 || !g_tiles[g].dig) return false;
+    if (type == T_LAWN || type == T_GRASS) return flags_ext_get(DIG_FLAG_BASE + g);
+    if (type != T_SINKING_SWORD && type != T_HOLE && g_frame < g_quiet[g]) {
+        LOG("[digs] no drop out of the reopened hole on %02d%c tile %d (actor type %#x)\n", g / 80 / 16 + 1,
+            'A' + g / 80 % 16, g % 80, type);
+        return true;
+    }
+    return false;
 }
 
 static void hold_weak(uint64_t *slot, uint64_t ctrl) {
@@ -424,6 +437,7 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
     extern int game_in_play(void);
     if (!game_in_play()) return;
     dig_test(frame);
+    g_frame = frame;
     uint64_t saved[31], sp = c->sp, pc = c->pc;
     __uint128_t v0 = c->v[0];
     memcpy(saved, c->x, sizeof saved);
@@ -463,6 +477,7 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
                         if (!g_tiles[g].dig || !flags_ext_get(DIG_FLAG_BASE + g)) continue;
                         if (g_spawns[g] < 3 && !hole_alive(g)) {
                             drop(c, &g_alive[g]);
+                            g_quiet[g] = frame + 240;
                             spawn_hole(c, g);
                             g_spawns[g]++;
                             holes++;
