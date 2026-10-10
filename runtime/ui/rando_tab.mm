@@ -251,6 +251,23 @@ static std::string clean_name(const char *in) {  // a seed name as a folder name
     return n;
 }
 
+// The seed generator: the standalone helper (tools/rando/rando_gen.spec, `make rando-helper`; no Python needed) next to
+// the executable or in the .app's Resources (LARECOMP_RANDO_GEN=<path>: that one), else (source tree) the LAS venv
+// running tools/rando/las_headless.py. Either takes <romfs> <seed dir> <request.json> and prints
+// `stage <fraction> <label>` lines.
+static std::vector<std::string> generator_cmd(void) {
+    if (const char *g = getenv("LARECOMP_RANDO_GEN")) return {g};
+    char exe[4096];
+    struct stat st;
+    if (plat_exe_path(exe, sizeof exe)) {
+        std::string d = exe;
+        d.erase(d.find_last_of("/\\") + 1);
+        for (const char *rel : {"rando-gen/rando-gen" PLAT_EXE_SUFFIX, "../Resources/rando-gen/rando-gen"})
+            if (stat((d + rel).c_str(), &st) == 0) return {d + rel};
+    }
+    return {"third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, "tools/rando/las_headless.py"};
+}
+
 static void start_generation(void) {
     if (!g_opts.seed[0]) random_seed_name(g_opts.seed, sizeof g_opts.seed);
     std::string name = clean_name(g_opts.seed);
@@ -314,15 +331,17 @@ static void start_generation(void) {
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
     std::string log = dir + "/generate.log";
-    std::string py = "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON;
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
-    const char *argv[] = {py.c_str(), "tools/rando/las_headless.py", romfs.c_str(), dir.c_str(), req.c_str(), NULL};
+    std::vector<std::string> cmd = generator_cmd();
+    std::vector<const char *> argv;
+    for (auto &a : cmd) argv.push_back(a.c_str());
+    for (const char *a : {romfs.c_str(), dir.c_str(), req.c_str(), (const char *)NULL}) argv.push_back(a);
     setenv("PYTHONHASHSEED", "0", 1);  // (set iteration order must not differ between runs: same ID, same seed)
-    g_gen_pid = plat_spawn(argv, log.c_str(), false);
+    g_gen_pid = plat_spawn(argv.data(), log.c_str(), false);
     int rc = !g_gen_pid;
     g_gen_seed = g_opts.seed;
     g_gen_failed = g_gen_done = rc != 0;
-    g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Starting...";
+    g_gen_status = rc ? "Could not start the seed generator (rando-gen missing?)" : "Starting...";
     g_gen_frac = 0;
     g_gen_start = ImGui::GetTime();
     if (rc) g_gen_pid = 0;
