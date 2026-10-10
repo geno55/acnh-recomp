@@ -22,7 +22,8 @@ merged. Screenshots and short clips of the game in bug reports are fine.
 
 ## Reporting bugs
 
-Use the [Discord](https://discord.gg/DhrgdYqdcY) for discussion, or open a GitHub issue. Please include:
+The preferred place to report bugs is the [Discord](https://discord.gg/DhrgdYqdcY) - it's where bugs get
+discussed and worked on. GitHub issues are fine too if you can't use Discord. Please include:
 
 - your platform (macOS / Windows), hardware (CPU, GPU) and window size / aspect ratio
 - what you did, what happened, and what you expected
