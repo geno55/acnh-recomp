@@ -84,6 +84,8 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
     return di.dli_sname;
 }
 
+void plat_fatal_notice(void) {}  // (the log / terminal shows it)
+
 void plat_print_backtrace(void) {
     void *bt[64];
     int n = backtrace(bt, 64);

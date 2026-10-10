@@ -218,6 +218,7 @@ void rt_fatal_trace(void) {
             fprintf(stderr, "  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, c->x[i], i + 1,
                     c->x[i + 1], i + 2, c->x[i + 2], i + 3, c->x[i + 3]);
     }
+    plat_fatal_notice();
     // our crash handler also catches SIGABRT: without this abort() re-entered it forever (a 5 GB log)
     signal(SIGABRT, SIG_DFL);
     abort();

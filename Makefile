@@ -2,6 +2,7 @@
 # macOS: Homebrew clang/SDL3/FFmpeg, Metal renderer.
 # Windows: MSYS2 UCRT64 shell (see docs/BUILD-windows.md), clang + Vulkan renderer.
 UNAME := $(shell uname -s)
+comma := ,
 ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(UNAME) $(OS)),)
 PLATFORM := windows
 else
@@ -47,12 +48,13 @@ IMGUI_OBJ += $(B)/imgui/imgui_impl_metal.o
 UIFLAGS  := -fobjc-arc
 else
 EXE      := $(B)/lasrecomp.exe
-DEPINC   :=
+DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
-LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan-1 \
-            -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared
+LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+            -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
+            $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> lasrecomp.log)
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
@@ -150,16 +152,28 @@ app:
 dmg: app
 	tools/make_dmg.sh
 
-# Windows (UNTESTED): build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, hactool, the
-# seed generator helper when built, and the MSYS2 DLLs they load (runs without MSYS2). vulkan-1.dll is left out:
-# every Vulkan driver installs the loader in System32. Saves, seeds and game files go next to the exe at run time.
+# Windows: build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, hactool, the seed generator
+# helper (make rando-helper) and the DLLs they load (runs without MSYS2). The exe is a release build in $(WIN_B):
+# linked against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build) and without a console window
+# (RELEASE=1: the log goes to lasrecomp.log next to the exe, fatal errors show a message box). Its DLLs are looked up
+# with build/deps-win/bin first (the FFmpeg DLL names are the same as MSYS2's GPL ones). vulkan-1.dll is left
+# out: every Vulkan driver installs the loader in System32. Saves, seeds and game files go next to the exe at run time.
+# Needs: Windows 10+ x64, a Vulkan 1.3 driver, an AVX2 CPU (GENARCH x86-64-v3; checked at startup).
 DIST     := build/dist/LAS Recomp
-dist: $(EXE) $(HACTOOL)
+WIN_B    := build/win-release
+deps-windows:
+	tools/build_deps_windows.sh
+dist: $(HACTOOL)
+	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
+	@[ -d build/helper/rando-gen ] || { echo "make rando-helper first (the seed generator)"; exit 1; }
+	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/lasrecomp.exe
 	rm -rf build/dist && mkdir -p "$(DIST)"
-	cp $(EXE) $(HACTOOL) "$(DIST)/"
+	cp $(WIN_B)/lasrecomp.exe $(HACTOOL) "$(DIST)/"
 	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
-	[ ! -d build/helper/rando-gen ] || cp -R build/helper/rando-gen "$(DIST)/"  # (make rando-helper)
-	ldd $(EXE) $(HACTOOL) | awk '/ucrt64/ && !/vulkan-1/ {print $$3}' | sort -u | xargs -I{} cp -u {} "$(DIST)/"
+	cp -R build/helper/rando-gen "$(DIST)/"
+	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/lasrecomp.exe $(HACTOOL) | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
+	    xargs -I{} cp -u {} "$(DIST)/"
+	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 	cd build/dist && if command -v zip >/dev/null; then zip -qr "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; \
 	    else /c/Windows/System32/tar.exe -a -cf "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; fi
 	@echo "build/dist/LAS Recomp-$(VERSION)-windows.zip"
@@ -183,6 +197,7 @@ RANDO_VPY := build/rando-venv/Scripts/python.exe
 endif
 
 rando-helper: build/rando-venv/.ok
+	$(if $(filter windows,$(PLATFORM)),USERPROFILE="$$(cygpath -w ~ 2>/dev/null || echo $$HOME)") \
 	$(RANDO_VPY) -m PyInstaller --noconfirm --clean --log-level WARN --distpath build/helper --workpath build/pyinstaller \
 	    tools/rando/rando_gen.spec
 	@du -sh build/helper/rando-gen
@@ -192,7 +207,7 @@ build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
 	$(RANDO_VPY) -m pip install -q -r third_party/LAS-Randomizer/requirements.txt pyinstaller==6.22.3
 	touch $@
 
-.PHONY: dmg all gen gen-objs runtime-objs hactool deps app dist rando-helper
+.PHONY: dmg all gen gen-objs runtime-objs hactool deps deps-windows app dist rando-helper
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c

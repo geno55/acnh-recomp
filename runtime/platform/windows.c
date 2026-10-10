@@ -6,6 +6,7 @@
 #include <string.h>
 #include <shellapi.h>
 #include <timeapi.h>
+#include <io.h>
 
 #include "../platform.h"
 
@@ -101,7 +102,72 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
+// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
+// exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
+// (the start screen re-executing itself for the game) append to the same log.
+static char g_log_path[MAX_PATH];
+
+static void log_to_file_without_console(void) {
+    if (GetStdHandle(STD_ERROR_HANDLE) && GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE) return;  // console / pipe
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+    if (!n || n >= sizeof exe) return;
+    char *slash = strrchr(exe, '\\');
+    if (slash) slash[1] = 0;
+    snprintf(g_log_path, sizeof g_log_path, "%slasrecomp.log", exe);
+    bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
+    if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
+    setvbuf(stderr, NULL, _IONBF, 0);
+    _dup2(_fileno(stderr), _fileno(stdout));
+    _putenv("LASRECOMP_LOG_APPEND=1");
+}
+
+// The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
+// with an illegal instruction on an older CPU.
+static void require_cpu(void) {
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
+    MessageBoxA(NULL, "LAS Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
+                "LAS Recomp", MB_ICONERROR | MB_OK);
+    ExitProcess(1);
+}
+
+// Fatal error (rt_fatal_trace): the last FATAL / exception line of the log in a message box, when there is no console.
+void plat_fatal_notice(void) {
+    if (!g_log_path[0]) return;
+    fflush(stderr);
+    char text[1024] = "LAS Recomp stopped because of an error.";
+    FILE *f = fopen(g_log_path, "rb");
+    if (f) {
+        static char tail[16384];
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
+        fseek(f, from, SEEK_SET);
+        size_t got = fread(tail, 1, sizeof tail - 1, f);
+        tail[got] = 0;
+        fclose(f);
+        char *line = NULL;
+        for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
+        if (!line) for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) line = p;
+        if (line) {
+            char *end = strchr(line, '\n');
+            if (end) *end = 0;
+            snprintf(text, sizeof text, "LAS Recomp stopped because of an error:\n\n%.600s", line);
+            if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nLAS Recomp needs a graphics driver with Vulkan 1.3: install the "
+                         "latest driver for your GPU (NVIDIA, AMD or Intel).");
+            }
+        }
+    }
+    size_t l = strlen(text);
+    snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
+    MessageBoxA(NULL, text, "LAS Recomp", MB_ICONERROR | MB_OK);
+}
+
 void plat_init(void) {
+    log_to_file_without_console();
+    require_cpu();
     _fmode = _O_BINARY;  // fopen/open default to binary (the runtime's "r"/"w" files are binary or LF text)
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
