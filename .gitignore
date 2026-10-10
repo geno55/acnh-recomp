@@ -1,25 +1,19 @@
+# your own game files and what's made from them (building from source puts them here)
 input/
 extracted/
-build/
 generated/
-tools/venv/
-tools/hactool/
-__pycache__/
-.DS_Store
-save/
-tools/envytools/
-save_backup_*/
 /rando/
-/cache/
 # Nintendo fonts (users import their own; only the README ships)
 /fonts/*
 !/fonts/README.md
-# local settings / reference clones
+# build output, caches, saves and settings
+build/
+/cache/
+save/
 /larecomp.ini
-/third_party/LAS-Randomizer-dev/
-# Python virtual environments (machine-specific)
+# tools and Python environments (machine-specific)
+tools/venv/
+tools/hactool/
 venv/
-
-notes/
-CLAUDE.md
-.claude/
+__pycache__/
+.DS_Store

@@ -17,8 +17,7 @@ Nothing owned by Nintendo may ever be committed or attached to an issue or pull 
 - no game assets of any kind: textures, models, music, text, level files - also not "just one file for testing"
 - no randomizer seed folders (`rando/`) - they contain modified game files; share the **seed ID** instead
 
-These paths are in `.gitignore`; please don't force-add them. Pull requests that include Nintendo files can't be
-merged. Screenshots and short clips of the game in bug reports are fine.
+Pull requests that include Nintendo files can't be merged. Screenshots and short clips of the game in bug reports are fine.
 
 ## Reporting bugs
 
