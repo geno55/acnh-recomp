@@ -293,6 +293,15 @@ static void place_tick(uint64_t frame) {
 void doorjump_tick(uint64_t frame) {
     place_tick(frame);
     if (g_njumps < 0) load();
+    {   // LARECOMP_LOG_LINK=<every N frames>: Link's position (movement tests)
+        static int every = -1;
+        if (every < 0) { const char *e = getenv("LARECOMP_LOG_LINK"); every = e ? atoi(e) : 0; }
+        uint64_t pc0 = every > 0 && frame % (uint64_t)every == 0 ? find_player(frame) : 0;
+        if (pc0) {
+            float *p0 = (float *)(uintptr_t)(pc0 + 0x80);
+            LOG("[link] f%llu (%.2f, %.2f, %.2f)\n", (unsigned long long)frame, p0[0], p0[1], p0[2]);
+        }
+    }
     if ((long)frame <= trace_until && !g_njumps) {  // (trace without a jump table: vanilla tests)
         uint64_t pc0 = find_player(frame);
         if (pc0) {

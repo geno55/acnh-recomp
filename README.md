@@ -62,6 +62,8 @@ This is a 0.1 alpha release. That means bugs are likely, crashes could occur, ra
 - Bombs / Magic Powder shuffle.
 - Hookshot anything - the hookshot latches onto any wall or object, not just hookshot targets (in logic where enabled).
 - Environment Randomizer - randomizes in-game environmental effects.
+- Enemy Randomizer - shuffles overworld enemies, optionally including mini-bosses. Not all mini-bosses are included
+  yet; more will be added as they're made to work outside their dungeons.
 - Music Randomizer.
 - Escape Bottle - every seed gives you this gold bottle from the start (it replaces one bottle in the pool). Use it to
   warp to the dungeon entrance when in a dungeon, or to Marin and Tarin's house anywhere else. Never required by the logic.
@@ -103,15 +105,25 @@ This is a 0.1 alpha release. That means bugs are likely, crashes could occur, ra
 Requirements (macOS on Apple Silicon): Xcode command line tools (clang), [Homebrew](https://brew.sh) `sdl3` and
 `ffmpeg`, Python 3.12.
 
-1. Put your game files in place: run the app once and use the start screen's game-file setup, or extract your
-   v1.0.0 dump yourself into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`) with [hactool](https://github.com/SciresM/hactool).
+1. Put your game files in place: `mkdir extracted` in the checkout, build (step 3) and use the start screen's
+   game-file setup, or extract your v1.0.0 dump yourself into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`)
+   with [hactool](https://github.com/SciresM/hactool) (`make hactool` builds it).
 2. Recompile the game code: `make gen` (writes `generated/`, from your own `extracted/exefs`).
-3. Build: `make -j10` -> `build/larecomp`.
+3. Build: `make -j10` -> `build/lasrecomp`.
 4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`:
    `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`. Release builds instead ship the seed
-   generator as a standalone helper, so players need no Python: `make rando-helper` (needs `brew install keystone`)
-   -> `build/helper/rando-gen/`.
-5. Run: `./build/larecomp extracted` (start screen) or `./build/larecomp extracted --play` (straight into the game).
+   generator as a standalone helper, so players need no Python: `make rando-helper` (after `make deps`, or with
+   `brew install keystone` for this Mac only) -> `build/helper/rando-gen/`.
+5. Run: `./build/lasrecomp extracted` (start screen) or `./build/lasrecomp extracted --play` (straight into the game).
+6. Package: `make deps` (once: SDL3, FFmpeg, hactool, keystone and Python from pinned sources, built for macOS 15),
+   `make rando-helper`, then `make app` -> `build/LAS Recomp.app` (macOS 15+, Apple Silicon);
+   `make dist` -> `build/dist/LAS Recomp-<version>-windows.zip` (Windows, see [docs/BUILD-windows.md](docs/BUILD-windows.md)).
+
+Where files live (game files, saves, seeds, settings, caches, imported fonts):
+- macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
+- Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
+- Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
+- `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 
 ## Credits
 
@@ -160,3 +172,22 @@ Vulkan Memory Allocator (MIT), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamical
 helper's bundled libraries listed under Credits (oead / evfl / Keystone are GPL 2.0+: the helper is a separate program
 the game runs, and its sources are this repository plus those projects' published sources). The license covers LAS Recomp's code only - it grants
 nothing for Nintendo's game, which you must supply yourself.
+
+### Source code of bundled third-party components
+
+Release builds include these components; their source code for the exact versions shipped is available here:
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| Keystone (seed generator) | 0.9.2 | GPL 2.0 | https://github.com/keystone-engine/keystone/releases/tag/0.9.2 |
+| oead (seed generator) | 1.3.0 | GPL 2.0+ | https://github.com/zeldamods/oead/releases/tag/v1.3.0 |
+| evfl (seed generator) | 1.2.0 | GPL 2.0+ | https://github.com/zeldamods/evfl/releases/tag/v1.2.0 |
+| quicktex (seed generator) | 0.2.1 | LGPL 3.0 | https://github.com/drewcassidy/quicktex/releases/tag/v0.2.1 |
+| PyInstaller (packs the seed generator) | 6.22.3 | GPL 2.0+ with bootloader exception | https://github.com/pyinstaller/pyinstaller/releases/tag/v6.22.3 |
+| CPython (seed generator) | 3.12.14 | PSF | https://github.com/python/cpython/releases/tag/v3.12.14 |
+| FFmpeg (macOS build, LGPL configuration) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
+| SDL 3 | 3.4.18 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18 |
+| hactool | 1.4.0 | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0 |
+
+The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`
+and `tools/rando/rando_gen.spec`.

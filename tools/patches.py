@@ -415,3 +415,35 @@ def _snap_dir(gen, a):
 
 
 PATCHES[SNAP_DIR_SITE] = _snap_dir
+
+
+# No Guardian Acorns / Pieces of Power (randomizer no-buff-drops, runtime/hle/qol.c): the drop roll main+0x89b960 reads
+# its ItemDrop row's mAllowBuffReplace (+0x38); set, the kill counters may turn the drop into a Piece of Power / Guardian
+# Acorn. Read as false for such seeds.
+BUFF_REPLACE_SITE = 0x700089ba34
+
+
+def _buff_replace(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3940e308, hex(w)  # ldrb w8, [x24, #0x38]
+    return ('{ extern int rt_buff_replace(int); c->x[8] = (uint32_t)rt_buff_replace(LD8(c->x[24] + 0x38)); }'
+            f'  /* {a:#x}: ldrb w8, [x24, #0x38] (mAllowBuffReplace: no-buff-drops) */')
+
+
+PATCHES[BUFF_REPLACE_SITE] = _buff_replace
+
+
+# Blur removal (runtime/hle/qol.c, setting blur_removal): main+0x1071220 sets up the post-process's tilt-shift object
+# (x0) once, looking its shader parameters up by name; qol.c keeps the object and takes the parameter handle out / puts
+# it back live.
+TILT_INIT_SITE = 0x7001071220
+
+
+def _tilt_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10243ff, hex(w)  # sub sp, sp, #0x90
+    return ('{ extern void rt_tilt_obj(uint64_t); rt_tilt_obj(c->x[0]); c->sp -= 0x90; }'
+            f'  /* {a:#x}: sub sp, sp, #0x90 (tilt-shift set-up: blur removal) */')
+
+
+PATCHES[TILT_INIT_SITE] = _tilt_init

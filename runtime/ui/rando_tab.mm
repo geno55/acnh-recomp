@@ -17,6 +17,7 @@
 
 extern "C" {
 #include "../hle.h"
+#include "../paths.h"
 #include "../rando.h"
 #include "../settings.h"
 extern const char *g_romfs_dir;
@@ -251,14 +252,10 @@ static std::string clean_name(const char *in) {  // a seed name as a folder name
 // `stage <fraction> <label>` lines.
 static std::vector<std::string> generator_cmd(void) {
     if (const char *g = getenv("LARECOMP_RANDO_GEN")) return {g};
-    char exe[4096];
-    struct stat st;
-    if (plat_exe_path(exe, sizeof exe)) {
-        std::string d = exe;
-        d.erase(d.find_last_of("/\\") + 1);
-        for (const char *rel : {"rando-gen/rando-gen" PLAT_EXE_SUFFIX, "../Resources/rando-gen/rando-gen"})
-            if (stat((d + rel).c_str(), &st) == 0) return {d + rel};
-    }
+    char p[1024], s[1024];  // (runtime/paths.h: <exe dir>/rando-gen/, <exe dir>/../Resources/rando-gen/, the source tree)
+    if (rt_resource("rando-gen/rando-gen" PLAT_EXE_SUFFIX, NULL, p, sizeof p)) return {p};
+    if (rt_resource(NULL, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, p, sizeof p) &&
+        rt_resource(NULL, "tools/rando/las_headless.py", s, sizeof s)) return {p, s};
     return {"third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, "tools/rando/las_headless.py"};
 }
 
@@ -326,6 +323,8 @@ static void start_generation(void) {
     fclose(f);
     std::string log = dir + "/generate.log";
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
+    auto abs = [](std::string &p) { if (p[0] != '/' && !(p.size() > 1 && p[1] == ':')) p = std::string(rt_data_root()) + "/" + p; };
+    abs(romfs), abs(dir), abs(req);  // (the helper / script change directory: absolute, in the data root)
     std::vector<std::string> cmd = generator_cmd();
     std::vector<const char *> argv;
     for (auto &a : cmd) argv.push_back(a.c_str());

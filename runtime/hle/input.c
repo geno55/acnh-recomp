@@ -32,6 +32,7 @@ static _Atomic int64_t sampling;
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
 static _Atomic uint32_t test_pad;
+static _Atomic int32_t test_lx, test_ly;  // (a resting stick's drift: "lstick" in LARECOMP_HOST_INPUT)
 static bool host_test;  // (then a real controller is left out: the player's own pad must not spoil the test)
 
 static int held_key(int sc) { return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]); }
@@ -61,7 +62,7 @@ static void recompute_pad(void) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
     pad_buttons = b;
-    if (!pad || host_test) { pad_lx = pad_ly = pad_rx = pad_ry = 0; return; }
+    if (!pad || host_test) { pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0; return; }
     pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
     pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
     pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
@@ -171,7 +172,8 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 
 // Tests of the bindings, through them like a real player:
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
-//   button (names as in larecomp.ini's bind_* lines: "Z", "Keypad 0", "south", "ltrigger"...).
+//   button (names as in larecomp.ini's bind_* lines: "Z", "Keypad 0", "south", "ltrigger"...);
+//   "frame:lstick:<x>/<y>:frames" holds the controller's left stick there (raw SDL units, y up: a drifting stick).
 // "frame:type:<text>" types <text> as real key events (down, text, up per character), through the overlay menu / name
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
@@ -242,6 +244,7 @@ static void host_test_frame(uint64_t frame) {
     if (hspec) {
         uint8_t keys[SDL_SCANCODE_COUNT] = {0};
         uint32_t padm = 0;
+        int32_t sx = 0, sy = 0;
         snprintf(buf, sizeof buf, "%s", hspec);
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
@@ -254,11 +257,13 @@ static void host_test_frame(uint64_t frame) {
             }
             if (frame < start || frame >= start + len) continue;
             if (!strcmp(dev, "key")) { SDL_Scancode sc = SDL_GetScancodeFromName(name); if (sc) keys[sc] = 1; }
+            else if (!strcmp(dev, "lstick")) sscanf(name, "%d/%d", &sx, &sy);
             else { int h = bind_pad_from_name(name); if (h >= 0) padm |= 1u << h; }
         }
-        bool kch = memcmp(keys, test_keys, sizeof keys) != 0, pch = padm != test_pad;
+        bool kch = memcmp(keys, test_keys, sizeof keys) != 0, pch = padm != test_pad || sx != test_lx || sy != test_ly;
         memcpy(test_keys, keys, sizeof keys);
         test_pad = padm;
+        test_lx = sx, test_ly = sy;
         if (kch) recompute_keyboard();
         if (pch) recompute_pad();
     }
@@ -407,12 +412,14 @@ static void fill_state(Cpu *c) {
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
-    if (!menu && g_settings.dpad_move && lx == 0 && ly == 0) {  // d-pad / arrow keys walk (setting), stick left alone
+    // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
+    // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
+    if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
         uint64_t d = key_buttons | pad_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
-        lx = dx * m, ly = dy * m;
+        if (dx || dy) lx = dx * m, ly = dy * m;
     }
     {   // door jumps stop Link for a moment before moving him (runtime/hle/doorjump.c): stick + d-pad released
         extern int32_t g_stick_lx, g_stick_ly;  // (what the player holds, before that: doorjump.c reads it)

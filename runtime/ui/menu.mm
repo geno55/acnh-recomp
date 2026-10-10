@@ -443,7 +443,7 @@ static void tab_display(void) {
     ImGui::Spacing();
     header("Game");
     toggle("Remove blur", &g_settings.blur_removal);
-    hint("Turns off the tilt-shift blur at the top and bottom of the screen. Takes effect the next time the game starts.");
+    hint("Turns off the tilt-shift blur at the top and bottom of the screen.");
     toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
     hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
 }
@@ -496,7 +496,7 @@ static void tab_about(void) {
     }
     ImGui::Spacing();
     header("Menu");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, Back + Start, or Home");
+    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");
     ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
     ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
 }
