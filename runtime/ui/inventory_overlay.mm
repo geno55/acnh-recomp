@@ -1,8 +1,7 @@
 // Inventory overlay for randomizer seeds: while the pause menu's Items page is shown, a panel along its bottom
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
 // game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
-// dungeon's keys.) With boss souls on, a wisp next to each dungeon's label shows whether its boss soul is found;
-// with mini-boss souls on, a strip above the panel lists the mini-boss kinds' souls.
+// dungeon's keys.) With boss / mini-boss souls on, a column right of the item grid shows each dungeon's souls.
 // Pets (runtime/hle/pets.c): the Ghost item sits in the equipment panel's free slot (left of the Secret Medicine),
 // ticked once laid to rest; a companion card left of the panel shows who follows Link and switches it (the page
 // cursor reaches it with LEFT from the grid, pets.c). The Items page is detected by tools/patches.py ITEMS_PAGE_SITE.
@@ -328,6 +327,48 @@ static void soul_icon(ImDrawList *dl, ImVec2 c, float s, bool owned) {
     }
 }
 
+// Souls (boss / mini-boss soul options): a column right of the item grid, one row per dungeon - its label, the
+// boss's wisp, then its mini-bosses' wisps (each mini-boss kind under the dungeon it first appears in), lit = found.
+static const struct { int dn; const char *label; const char *minis[2]; } kSoulRows[] = {
+    {1, "D1", {"Rolling Bones"}}, {2, "D2", {"Hinox"}}, {3, "D3", {"Dodongo Snakes"}}, {4, "D4", {"Cue Ball"}},
+    {5, "D5", {"Master Stalfos", "Gohma"}}, {6, "D6", {"Smasher"}}, {7, "D7", {"Grim Creeper"}}, {8, "D8", {"Blaino"}},
+    {0, "D0", {"Avalaunch", "Giant Buzz Blob"}}};
+
+static int mini_soul(const char *name) {  // -1 not in this seed, 0 missing, 1 found
+    int kind;
+    bool owned;
+    for (int i = 0; const char *nm = souls_at(i, &kind, &owned); i++)
+        if (kind == 1 && !strcmp(nm, name)) return owned;
+    return -1;
+}
+
+static void souls_column(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
+    bool any = false;
+    for (const auto &r : kSoulRows) {
+        any |= souls_owned(r.dn) >= 0;
+        for (const char *m : r.minis) any |= m && mini_soul(m) >= 0;
+    }
+    if (!any) return;
+    ImVec2 a(ox + 1138 * u, oy + 190 * u), b(ox + 1246 * u, oy + 498 * u);
+    dl->AddRectFilled(a, b, IM_COL32(52, 38, 20, 205), 12 * u);
+    dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 12 * u, 0, 2 * u);
+    int n = (int)(sizeof kSoulRows / sizeof kSoulRows[0]);
+    float rh = (b.y - a.y - 8 * u) / n, fs = 19 * u;
+    for (int i = 0; i < n; i++) {
+        float cy = a.y + 4 * u + rh * (i + 0.5f);
+        dl->AddText(font, fs, ImVec2(a.x + 8 * u, cy - fs * 0.5f), IM_COL32(255, 245, 225, 255), kSoulRows[i].label);
+        float x = a.x + 46 * u;
+        int boss = souls_owned(kSoulRows[i].dn);
+        if (boss >= 0) soul_icon(dl, ImVec2(x, cy + 4 * u), 24 * u, boss > 0);
+        x += 22 * u;
+        for (const char *m : kSoulRows[i].minis) {
+            int o = m ? mini_soul(m) : -1;
+            if (o >= 0) soul_icon(dl, ImVec2(x, cy + 5 * u), 17 * u, o > 0);  // (smaller: a mini-boss)
+            x += 17 * u;
+        }
+    }
+}
+
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     // the game's UI is drawn in a centred 16:9 box; place the panel in its free strip above the bottom rule
     float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
@@ -351,8 +392,6 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
         const char *lbl = kDungeons[k].label;
         ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, lbl);
         dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, p0.y + 4 * u), IM_COL32(255, 245, 225, 255), lbl);
-        int dn = k == n - 1 ? 0 : k + 1, soul = souls_owned(dn);
-        if (soul >= 0) soul_icon(dl, ImVec2(cx + ts.x * 0.5f + 16 * u, p0.y + 22 * u), 26 * u, soul > 0);
         // small keys
         key_icon(dl, ImVec2(cx - 16 * u, p0.y + 50 * u), 26 * u, ok && keys ? gold : dim);
         char cnt[8];
@@ -387,24 +426,5 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
             dl->AddPolyline(pts, 3, IM_COL32(140, 210, 110, 255), 0, 1.8f * u);
         }
     }
-    // mini-boss souls (one per kind): a strip above the panel, found ones lit with a wisp
-    const char *mn[16];
-    bool mo[16];
-    int nm = 0, kind;
-    bool owned;
-    for (int i = 0; const char *nmi = souls_at(i, &kind, &owned); i++)
-        if (kind == 1 && nm < 16) mn[nm] = nmi, mo[nm++] = owned;
-    if (nm) {
-        float sy0 = p0.y - 40 * u, sy1 = p0.y - 6 * u, sw = (p1.x - p0.x) / nm, sfs = 15 * u;
-        dl->AddRectFilled(ImVec2(p0.x, sy0), ImVec2(p1.x, sy1), IM_COL32(52, 38, 20, 205), 10 * u);
-        for (int i = 0; i < nm; i++) {
-            float x0 = p0.x + sw * i;
-            soul_icon(dl, ImVec2(x0 + 12 * u, (sy0 + sy1) * 0.5f + 4 * u), 20 * u, mo[i]);
-            // (long names - "Dodongo Snakes" - shrink to their cell instead of running into the next one)
-            float tw = font->CalcTextSizeA(sfs, FLT_MAX, 0, mn[i]).x, room = sw - 26 * u;
-            float fs = tw > room && tw > 0 ? sfs * room / tw : sfs;
-            dl->AddText(font, fs, ImVec2(x0 + 22 * u, (sy0 + sy1 - fs) * 0.5f),
-                        mo[i] ? IM_COL32(255, 240, 200, 255) : IM_COL32(150, 130, 100, 200), mn[i]);
-        }
-    }
+    souls_column(dl, font, ox, oy, u);
 }
