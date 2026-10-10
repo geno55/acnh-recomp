@@ -260,7 +260,7 @@ def main():
     if shopsanity.enabled(settings):
         sanity_inside.update(shopsanity.add_to_logic(logic_defs, item_defs, settings))
     if trendsanity.enabled(settings):
-        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs))
+        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs, settings))
 
     import pets as pets_mod  # companions as items (tools/rando/pets.py)
     pets = pets_mod.add_to_pool(logic_defs, item_defs, settings)
