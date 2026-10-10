@@ -113,6 +113,7 @@ bool pot_glow_active(void) {
 // neighbour, and the mesh check keeps other draws (full-screen passes, Link) out.
 
 bool flags_ext_get(int idx);  // runtime/hle/flags_ext.c (flags 2048+ for bushes)
+void flags_ext_clear(int idx);
 static bool unchecked(const Pot *p) { return !flags_ext_get(p->flag); }
 
 static void track(int pot, float x, float y, float z, uint64_t f, uint64_t mesh) {
@@ -162,10 +163,12 @@ bool pot_tint(const float *m, float tint[8], uint64_t mesh) {
 }
 
 // Bushsanity: the item inside a bush is small so the leaves hide it, which left it near invisible once the bush was
-// cut (players walked past it, and the bush grew back gold over it). Now a bush with an item stays cut (its switch 0 =
-// the cut flag, tools/rando/bushes.py), and once that flag is set its item is shown full size: the item's actor record
-// in the loaded room file (pos xyz, rotation xyz in degrees, scale xyz) gets the full scale. The actor takes its scale
-// from there (also when it's already out), and so does every later spawn in this level load.
+// cut (players walked past it and took the bush's random rupee instead). A bush with an item has a cut flag as its
+// switch 0 (tools/rando/bushes.py: the game sets it when the bush is cut, and keeps such a bush cut); once it's set
+// the item is shown full size: the item's actor record in the loaded room file (pos xyz, rotation xyz in degrees,
+// scale xyz) gets the full scale, used by every spawn in this level load. Bushes still grow back as in the game: once
+// Link is more than a screen away (or in another level) the cut flag is cleared and the record made small again, so
+// the bush is there on his next visit - gold until its item is taken, and cutting it shows the same item again.
 // Room files (.leb) sit whole at a page-aligned address, so the record is at a page starting with the .leb header +
 // the record's offset in the file (bushes.tsv), checked (position, hidden scale) before it's written: a pass over the
 // page starts of guest data, done only when the set of such items around Link changes (a bush cut, another screen).
@@ -194,7 +197,24 @@ void pot_reveal_tick(uint64_t frame) {
     if (!g_rec) g_rec = calloc((size_t)g_npots, sizeof *g_rec);
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     float lx = lp[0], lz = lp[2];
-    int cell = (int)floorf(lx / 15.0f) * 64 + (int)floorf(lz / 12.0f), want[64], nw = 0;
+    int cx = (int)floorf(lx / 15.0f), cz = (int)floorf(lz / 12.0f), cell = cx * 64 + cz, want[64], nw = 0;
+    static char level[40];
+    bool new_level = strncmp(current_level(), level, sizeof level) != 0;
+    if (new_level || cell != g_reveal_cell) {  // bushes regrow (as in the game): Link left their screen
+        strlcpy(level, current_level(), sizeof level);
+        for (int i = 0; i < g_npots; i++) {
+            Pot *p = &g_pots[i];
+            if (p->cut < 0 || !flags_ext_get(p->cut)) continue;
+            if (!new_level && !strcmp(p->level, level) && abs((int)floorf(p->x / 15.0f) - cx) <= 1 &&
+                abs((int)floorf(p->z / 12.0f) - cz) <= 1) continue;  // (its room may still be loaded: next time)
+            flags_ext_clear(p->cut);
+            if (rec_is(p, g_rec[i], p->full)) {  // hidden in the bush again
+                float *t = (float *)(uintptr_t)g_rec[i];
+                t[6] = t[7] = t[8] = p->small;
+            }
+            g_rec[i] = 0;
+        }
+    }
     uint64_t sig = 1469598103934665603ull;
     for (int k = 0; k < g_nlv && nw < 64; k++) {  // cut, unchecked items within a screen of Link
         const Pot *p = &g_pots[g_lv_idx[k]];

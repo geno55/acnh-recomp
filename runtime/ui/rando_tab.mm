@@ -619,7 +619,7 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Every bush on the island hides an item from the pool (about 310 more checks; bushes over a hole and tall\n"
                           "grass stay as they are).\n"
-                          "Unchecked bushes are golden. Cut a bush to reveal its item: the bush stays cut, its item waits there.");
+                          "Unchecked bushes are golden. Cut a bush to reveal its item.");
     ImGui::SameLine();
     ImGui::Checkbox("Digsanity", &g_opts.digs);
     if (ImGui::IsItemHovered())

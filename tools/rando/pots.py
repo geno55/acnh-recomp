@@ -171,9 +171,9 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     """Writes the item actors, event entry points and flags for every pot location (after LAS's ModsProcess).
     Also used for bushes (bushes.py): their own flag names / range (2048+: runtime/hle/flags_ext.c) and actor keys.
     cut_flag (bushes): a second flag per location, <prefix>Cut<n>, as the bush's switch 0: the game sets it when the
-    bush is cut, and a bush with it set stays cut (as the Pothole Field's hole bushes do) - its item lies in the open
-    until picked up (shown full size by the runtime: write_tsv) instead of a bush growing back over it on every visit.
-    The bush drops nothing else (a random rupee beside the small item was what players picked up)."""
+    bush is cut (and keeps a bush with it set cut), so the runtime knows to show the item full size (write_tsv;
+    runtime/hle/pot_glow.c clears it again once Link has left, and the bush grows back). The bush drops nothing else
+    (a random rupee beside the small item was what players picked up)."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
