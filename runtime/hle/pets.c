@@ -1,9 +1,9 @@
 // Pets (tools/rando/pets.py): the Flying Rooster, Marin and the Ghost found as items. A pet item reaches the game's
 // AddItem (keysanity.c rt_add_item) with index PET_INDEX + n; the Rooster / Marin become the companion following
-// Link (live save +0x555D: 0 none, 1 BowWow, 2 Marin, 3 Ghost, 4 Flying Rooster - the game spawns it at the next
-// screen / room load) and are remembered in an event flag so the pause menu's companion slot (runtime/ui/
-// inventory_overlay.mm) and the in-game menu can call any found pet back (Link has one companion at a time). A
-// companion a pet sends away (also BowWow, or a rooster revived the vanilla way) is marked found too.
+// Link (live save +0x555D: 0 none, 1 BowWow, 2 Marin, 3 Ghost, 4 Flying Rooster - swapped in at once where the
+// level allows companions, pets_game_tick) and are remembered in an event flag so the pause menu's companion slot
+// (runtime/ui/inventory_overlay.mm) and the in-game menu can call any found pet back (Link has one companion at a
+// time). A companion a pet sends away (also BowWow, or a rooster revived the vanilla way) is marked found too.
 // The Ghost is an Items-page item, not a follower (seeds with settings.json "ghost-item"; older seeds: he follows):
 // found, he skips his house visit (Ghost2/3 flags) and the grave takes him without the companion slot (its trigger
 // reads his found flag, pets.py); laid to rest (Ghost4_Clear) his Owl gives the ghost-reward check (EighthClear).
@@ -115,10 +115,11 @@ void pets_call(int c) {
 // (f_700085d980: the level's allow_companions config, then COMPANION_SPAWN); Link.LeaveCompanion (event action)
 // is COMPANION_LEAVE. The Player keeps the follower's shared_ptr at +0x1b98 / +0x1ba0.
 #define GAME_SCENE (MAIN_BASE + 0x1c97188)  // -> +0x4b8 Player*
-#define COMPANION_SPAWN (MAIN_BASE + 0xd53c20)  // (x0 = shared_ptr out, x1 = Player): spawns the save's companion by Link
+#define COMPANION_SPAWN (MAIN_BASE + 0xd53c20)  // (x0 = shared_ptr out, x1 = Player): the save's companion by Link
 #define COMPANION_LEAVE (MAIN_BASE + 0xd53ed0)  // (x0 = Player): companion byte 0, the follower sent away
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0 (+0x9d = COMPANION)
-#define ACTOR_KILL (MAIN_BASE + 0xfabf70)  // (x0 = actor): actor vtable +0x58 (0) - the base actor's vtable +0xa0 and a follower's own leave use it
+// (x0 = actor): actor vtable +0x58 (0); the base actor's vtable +0xa0 and a follower's own leave use it
+#define ACTOR_KILL (MAIN_BASE + 0xfabf70)
 
 // Levels whose config (.lvb allow_companions) keeps companions out; dungeons only with settings.json "bad-pets"
 // (LAS: every dungeon but the Egg). The game's own exceptions too: BowWow stays out of Madam MeowMeow's house, Marin
@@ -182,7 +183,8 @@ void pets_game_tick(Cpu *c) {
         c->sp = sp;
     }
     memcpy(c->x, saved, sizeof saved);
-    LOG("[pets] follower swapped in %s: %d%s (actor %llx)\n", lv, want, spawn || !want ? "" : " (not allowed here: from the next level that allows it)",
+    LOG("[pets] follower swapped in %s: %d%s (actor %llx)\n", lv, want,
+        spawn || !want ? "" : " (not allowed here: from the next level that allows it)",
         (unsigned long long)LD64(player + 0x1b98));
 }
 
@@ -255,4 +257,5 @@ int rt_pet_item(int n) {
     return 1;
 }
 
-RT_ON_RESET(pets_reset) { g_nflags = -1, g_ghost_item = -1, g_bad_pets = -1, g_swap = 0, g_slot = -1; }  // (seed switch: the next seed's flags.tsv)
+// (seed switch: the next seed's flags.tsv and settings)
+RT_ON_RESET(pets_reset) { g_nflags = -1, g_ghost_item = -1, g_bad_pets = -1, g_swap = 0, g_slot = -1; }

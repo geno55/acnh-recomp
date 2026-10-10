@@ -1,4 +1,5 @@
-// Pets row of the in-game Randomizer tab: call any found pet (runtime/hle/pets.c) or send the companion away.
+// Pets row of the in-game Randomizer tab: call any found pet (runtime/hle/pets.c) or send the companion away (the
+// same choice as the Items page's companion slot, runtime/ui/inventory_overlay.mm; the swap happens at once).
 // Shown once a pet has been found on a seed with pets (tools/rando/pets.py).
 #include "imgui.h"
 
@@ -26,5 +27,5 @@ extern "C" void pets_ui_draw(void) {
         ImGui::PopID();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("(joins at the next screen)");
+    ImGui::TextDisabled("(also on the pause menu's Items page: LEFT from the item grid)");
 }
