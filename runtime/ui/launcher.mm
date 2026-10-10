@@ -338,6 +338,45 @@ enum Page { MAIN, SETTINGS, SETUP, CONTROLS, COSMETICS };
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
 
+// The first PLAY ever (settings.menu_tip_seen): a note on opening the LAS Recomp menu in game (it isn't obvious),
+// OK starts the game. Returns true once OK is pressed.
+static bool g_tip_test;  // (LARECOMP_LAUNCHER_SHOT=<frame>:tip)
+static bool menu_tip(float s) {
+    bool go = false;
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(fminf(ds.x * 0.8f, 760 * s), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(36 * s, 28 * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16 * s);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.03f, 0.04f, 0.05f, 0.94f));
+    bool open = ImGui::BeginPopupModal("##menutip", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (open) {
+        ImGui::SetWindowFontScale(1.25f);
+        static const char *const pad[] = {"Minus + Plus", "View + Menu", "Create + Options"};  // (bind_label_family)
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted("LAS Recomp has its own menu for settings, the randomizer, cosmetics and more.");
+        ImGui::Spacing();
+        ImGui::Text("Open it in game with F1 or Esc, or on a controller with %s together (or the Home button).",
+                    pad[bind_label_family() % 3]);
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14 * s));
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 180 * s) * 0.5f);
+        ImGui::SetItemDefaultFocus();
+        if (ImGui::Button("OK", ImVec2(180 * s, 44 * s)) || ImGui::IsKeyPressed(ImGuiKey_Enter) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown)) {
+            g_settings.menu_tip_seen = true;
+            settings_save();
+            ImGui::CloseCurrentPopup();
+            go = true;
+        }
+        ImGui::EndPopup();
+    }
+    return go;
+}
+
 static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
     ImGui::PushFont(g_menu_small ? g_font_small : g_font_menu);
     ImGui::BeginDisabled(!enabled);
@@ -487,6 +526,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
         if (pg && !strcmp(pg + 1, "cosmetics")) page = COSMETICS;
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
+        if (pg && !strcmp(pg + 1, "tip")) g_settings.menu_tip_seen = false, g_tip_test = true;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -591,7 +631,12 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 static bool focused_once;
                 if (!focused_once) { ImGui::SetKeyboardFocusHere(); focused_once = true; }
-                if (menu_item(label, status.empty(), &hov)) play = true;
+                if (menu_item(label, status.empty(), &hov)) {
+                    if (g_settings.menu_tip_seen) play = true;
+                    else ImGui::OpenPopup("##menutip");  // first PLAY ever: how to reach our menu, then the game
+                }
+                if (g_tip_test) ImGui::OpenPopup("##menutip"), g_tip_test = false;
+                if (menu_tip(s)) play = true;
                 if (hov && status.empty()) {
                     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft))
                         choice = (choice + (int)choices.size() - 1) % (int)choices.size();

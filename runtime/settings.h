@@ -26,6 +26,7 @@ typedef struct {
     bool inv_keys;       // randomizer: show every dungeon's keys on the pause menu's Items page
     bool tracker;        // randomizer: check tracker on the pause menu's Map page
     int chaos_letters;   // CHAOS_LETTERS_*: room-shuffle doorway letters on the dungeon map
+    bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
     // cheats (runtime/ui/cheats.mm), applied every frame while a save is loaded
     bool cheat_hearts;   // health kept full
     bool cheat_ammo;     // bombs / arrows / magic powder kept full (for the bags Link owns)
