@@ -62,6 +62,8 @@ This is a 0.1 alpha release. That means bugs are likely, crashes could occur, ra
 - Bombs / Magic Powder shuffle.
 - Hookshot anything - the hookshot latches onto any wall or object, not just hookshot targets (in logic where enabled).
 - Environment Randomizer - randomizes in-game environmental effects.
+- Enemy Randomizer - shuffles overworld enemies, optionally including mini-bosses. Not all mini-bosses are included
+  yet; more will be added as they're made to work outside their dungeons.
 - Music Randomizer.
 - Escape Bottle - every seed gives you this gold bottle from the start (it replaces one bottle in the pool). Use it to
   warp to the dungeon entrance when in a dungeon, or to Marin and Tarin's house anywhere else. Never required by the logic.
