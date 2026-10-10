@@ -734,6 +734,7 @@ void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     LOG("[metal] saved alpha %s (%lux%lu, max %u)\n", path, (unsigned long)w, (unsigned long)h, amax);
 }
 static float g_shot_crop[4] = {0, 0, 1, 1};  // presented crop of the current frame (screenshots match it)
+static bool g_save_upright;  // (set around saves of the window image: test shots under any name)
 void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     NSUInteger w = tex.width, h = tex.height;
     float shot_crop[4] = {0, 0, 1, 1};
@@ -763,7 +764,7 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
     [e setRenderPipelineState:pipe];
-    if (strstr(path, "window")) flip = 0;  // the window image is already upright
+    if (g_save_upright || strstr(path, "window")) flip = 0;  // the window image is already upright
     float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
     [e setVertexBytes:pv length:sizeof pv atIndex:0];
     [e setFragmentTexture:raw_view(tex) atIndex:0];
@@ -900,6 +901,7 @@ void backend_present(NvnTexture *t) {
         if (shot_tex) {
             [cb waitUntilCompleted];
             // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
+            g_save_upright = true;
             if (g_window_shot_request[0]) {
                 renderer_save_texture(shot_tex, g_window_shot_request);
                 g_window_shot_request[0] = 0;
@@ -907,6 +909,7 @@ void backend_present(NvnTexture *t) {
                 renderer_save_texture(shot_tex, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/window.png");
                 if (getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
             }
+            g_save_upright = false;
         }
     }
     frames++;
