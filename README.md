@@ -170,3 +170,22 @@ Vulkan Memory Allocator (MIT), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamical
 helper's bundled libraries listed under Credits (oead / evfl / Keystone are GPL 2.0+: the helper is a separate program
 the game runs, and its sources are this repository plus those projects' published sources). The license covers LAS Recomp's code only - it grants
 nothing for Nintendo's game, which you must supply yourself.
+
+### Source code of bundled third-party components
+
+Release builds include these components; their source code for the exact versions shipped is available here:
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| Keystone (seed generator) | 0.9.2 | GPL 2.0 | https://github.com/keystone-engine/keystone/releases/tag/0.9.2 |
+| oead (seed generator) | 1.3.0 | GPL 2.0+ | https://github.com/zeldamods/oead/releases/tag/v1.3.0 |
+| evfl (seed generator) | 1.2.0 | GPL 2.0+ | https://github.com/zeldamods/evfl/releases/tag/v1.2.0 |
+| quicktex (seed generator) | 0.2.1 | LGPL 3.0 | https://github.com/drewcassidy/quicktex/releases/tag/v0.2.1 |
+| PyInstaller (packs the seed generator) | 6.22.3 | GPL 2.0+ with bootloader exception | https://github.com/pyinstaller/pyinstaller/releases/tag/v6.22.3 |
+| CPython (seed generator) | 3.12.14 | PSF | https://github.com/python/cpython/releases/tag/v3.12.14 |
+| FFmpeg (macOS build, LGPL configuration) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
+| SDL 3 | 3.4.18 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18 |
+| hactool | 1.4.0 | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0 |
+
+The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`
+and `tools/rando/rando_gen.spec`.
