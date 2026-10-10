@@ -20,11 +20,11 @@ extern "C" {
 #include "../settings.h"
 uint64_t renderer_present_count(void);
 int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in this seed
-const char *souls_at(int i, int *kind, bool *owned);
 int pets_ghost_state(void);    // runtime/hle/pets.c: -1 no Ghost item, 0 found, 1 laid to rest
 int pets_menu_options(int out[6]);
 int pets_current(void);
 int pets_menu_slot(void);      // highlighted choice while the cursor is on the companion slot, else -1
+const char *souls_at(int i, int *kind, bool *owned);
 }
 #include "../input_bind.h"
 

@@ -35,7 +35,7 @@
 #include "../../third_party/imgui/imstb_truetype.h"
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8 };
-enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL };
+enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_ITEM_CURSOR };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -79,6 +79,8 @@ static int role_of(const char *name) {
         // the empty bottle's item icon and its 3D model's colour map (ItemBottle.bfres): identified only, never edited
         // (the gold Escape Bottle's draws are tinted: runtime/hle/escape.c)
         {"ItemBottle_00^w", R_BOTTLE}, {"MI_bottle_alb", R_BOTTLE_MODEL},
+        // the Items page's cursor brackets: identified only (hidden while the companion card has the cursor, pets.c)
+        {"ItemCursor_", R_ITEM_CURSOR},
     };
     for (unsigned i = 0; i < sizeof m / sizeof *m; i++)
         if (!strncmp(name, m[i].prefix, strlen(m[i].prefix))) return m[i].role;
@@ -165,6 +167,8 @@ int texpatch_bottle_kind(int id) {
     if (id < 0 || id >= g_nrefs) return 0;
     return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : 0;
 }
+
+bool texpatch_is_item_cursor(int id) { return id >= 0 && id < g_nrefs && g_refs[id].role == R_ITEM_CURSOR; }
 
 int texpatch_identify(const NvnTexture *t) {
     pthread_once(&g_once, load_refs);
@@ -741,7 +745,7 @@ void texpatch_apply(int id, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t ro
     if (id < 0 || id >= g_nrefs) return;
     const Ref *r = &g_refs[id];
     if (r->w != w || r->h != h) return;
-    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL) return;
+    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_ITEM_CURSOR) return;
     if (r->role == R_HERO) {  // fully transparent (BC5 blocks of zeros)
         if (hide_hero()) for (uint32_t y = 0; y < (h + 3) / 4; y++) memset(blocks + y * row, 0, (w + 3) / 4 * 16);
         return;

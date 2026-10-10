@@ -120,6 +120,9 @@ void pets_call(int c) {
 #define PLAYER_STATUS_PTR (MAIN_BASE + 0x1CC1368)  // PlayerStatus*: current level name at +0 (+0x9d = COMPANION)
 // (x0 = actor): actor vtable +0x58 (0); the base actor's vtable +0xa0 and a follower's own leave use it
 #define ACTOR_KILL (MAIN_BASE + 0xfabf70)
+// the level's placed actors by key (the actor factory looks them up): unordered_map, first node at +0x10; node +0 next,
+// +0x10 key, +0x18 shared_ptr<Actor>
+#define ACTOR_REGISTRY (MAIN_BASE + 0x1cb2d00)
 
 // Levels whose config (.lvb allow_companions) keeps companions out; dungeons only with settings.json "bad-pets"
 // (LAS: every dungeon but the Egg). The game's own exceptions too: BowWow stays out of Madam MeowMeow's house, Marin
@@ -181,9 +184,22 @@ void pets_game_tick(Cpu *c) {
         uint64_t ctrl = LD64(out + 8);  // (drop the copy it hands back: the Player keeps its own reference)
         if (ctrl) ST64(ctrl + 8, LD64(ctrl + 8) - 1);
         c->sp = sp;
+        // its idle copy placed by the level (BowWow chained at home, Marin wherever she stands): the level's layout
+        // only leaves it out while it is the companion, so it goes now (the next area load places it again)
+        uint64_t me = LD64(player + 0x1b98) ? LD64(player + 0x1b98) - 0x2a8 : 0, map = LD64(ACTOR_REGISTRY);
+        int n = 0, killed = 0;
+        for (uint64_t node = me && map ? LD64(map + 0x10) : 0; node && n < 8192; node = LD64(node), n++) {
+            uint64_t a = LD64(node + 0x18);
+            if (!a || a == me || LD64(a) != LD64(me)) continue;
+            c->x[0] = a;
+            guest_call(c, ACTOR_KILL);
+            killed++;
+        }
+        if (killed) LOG("[pets] %d idle copies of the new companion removed (%d level actors)\n", killed, n);
     }
     memcpy(c->x, saved, sizeof saved);
-    LOG("[pets] follower swapped in %s: %d%s (actor %llx)\n", lv, want,
+    extern uint64_t renderer_present_count(void);
+    LOG("[pets] f%llu follower swapped in %s: %d%s (actor %llx)\n", (unsigned long long)renderer_present_count(), lv, want,
         spawn || !want ? "" : " (not allowed here: from the next level that allows it)",
         (unsigned long long)LD64(player + 0x1b98));
 }
@@ -203,6 +219,7 @@ int pets_menu_options(int out[6]) {
 // take it as a fresh press). B (close) and L / R (other pages) reach the game and leave the slot.
 static int g_slot = -1;  // highlighted choice while the cursor is on the slot, -1 = on the game's grid
 int pets_menu_slot(void) { return g_slot; }
+bool pets_hide_item_cursor(void) { return g_slot >= 0; }  // (renderer: the game's grid brackets go while on the card)
 
 uint64_t pets_menu_input(uint64_t b, int32_t st[4]) {
     extern int inventory_items_cursor(void);
@@ -253,7 +270,8 @@ int rt_pet_item(int n) {
     }
     if (c != C_GHOST || !ghost_item()) pets_call(c);  // (the Ghost item leaves the follower alone)
     // (no custom pop-up: the user wants item text in the game's own message box - a pet message is still open)
-    LOG("[pets] found pet %d (companion %d: %s)\n", n, c, kComp[c].name);
+    extern uint64_t renderer_present_count(void);
+    LOG("[pets] f%llu found pet %d (companion %d: %s)\n", (unsigned long long)renderer_present_count(), n, c, kComp[c].name);
     return 1;
 }
 
