@@ -472,10 +472,16 @@ extern "C" void rando_tab_draw(float scale) {
         if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
         return;
     }
-    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1|<name>: generate a seed as soon as the tab is shown (test hook)
-    if (const char *t = getenv("LARECOMP_RANDO_GEN_TEST"); !test_once && t) {
+    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1|<name>[:<seed ID>]: generate a seed (with that ID's options)
+    if (const char *t = getenv("LARECOMP_RANDO_GEN_TEST"); !test_once && t) {  // as soon as the tab is shown (test hook)
         test_once = true;
-        strlcpy(g_opts.seed, strlen(t) > 1 ? t : "MenuTest", sizeof g_opts.seed);
+        std::string nm = t;
+        if (size_t c = nm.find(':'); c != std::string::npos) {
+            std::string err = seed_id_decode(nm.c_str() + c + 1, g_opts);
+            if (!err.empty()) LOG("[rando] test seed ID: %s\n", err.c_str());
+            nm.resize(c);
+        }
+        strlcpy(g_opts.seed, nm.size() > 1 ? nm.c_str() : "MenuTest", sizeof g_opts.seed);
         start_generation();
     }
     poll_generation();
