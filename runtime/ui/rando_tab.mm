@@ -646,9 +646,7 @@ extern "C" void rando_tab_draw(float scale) {
                           "Buy it, or steal it (the shopkeeper remembers a thief, as in the original game).");
     ImGui::Checkbox("Trendy Game prizes", &g_opts.trendsanity);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Every Trendy Game prize is a check: the Yoshi doll, the pieces of heart, the seashells, the\n"
-                          "chamber stone and the ten figures (they need the same instruments as in the original game).\n"
-                          "The prizes on the crane floor show the items you can win.");
+        ImGui::SetTooltip("Each of the 5 crane prize spots holds a check; won spots then hold ordinary prizes.");
     ImGui::Checkbox("Hookshot anything", &g_opts.hookshot_any);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The Hookshot latches onto any wall or object it hits (walls, plants, chests, statues...), not only\n"
