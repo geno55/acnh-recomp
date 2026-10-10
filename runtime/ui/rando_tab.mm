@@ -16,6 +16,7 @@
 
 extern "C" {
 #include "../hle.h"
+#include "../paths.h"
 #include "../rando.h"
 #include "../settings.h"
 extern const char *g_romfs_dir;
@@ -314,9 +315,17 @@ static void start_generation(void) {
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
     std::string log = dir + "/generate.log";
-    std::string py = "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON;
+    // generator: the packaged helper (shipped next to the executable / in the .app, runtime/paths.h; same arguments as
+    // las_headless.py), else the source tree's Python venv
+    char gen[1024], py[1024], script[1024];
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
-    const char *argv[] = {py.c_str(), "tools/rando/las_headless.py", romfs.c_str(), dir.c_str(), req.c_str(), NULL};
+    const char *argv_helper[] = {gen, romfs.c_str(), dir.c_str(), req.c_str(), NULL};
+    const char *argv_py[] = {py, script, romfs.c_str(), dir.c_str(), req.c_str(), NULL};
+    bool helper = rt_resource("lasrecomp-seedgen" PLAT_EXE_SUFFIX, NULL, gen, sizeof gen);
+    if (!helper && (!rt_resource(NULL, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, py, sizeof py) ||
+                    !rt_resource(NULL, "tools/rando/las_headless.py", script, sizeof script)))
+        strlcpy(py, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, sizeof py), strlcpy(script, "tools/rando/las_headless.py", sizeof script);
+    const char **argv = helper ? argv_helper : argv_py;
     setenv("PYTHONHASHSEED", "0", 1);  // (set iteration order must not differ between runs: same ID, same seed)
     g_gen_pid = plat_spawn(argv, log.c_str(), false);
     int rc = !g_gen_pid;

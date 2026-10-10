@@ -31,6 +31,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 #include "platform.h"
+#include "paths.h"
 #include "ui/ui_scale.h"
 #include "settings.h"
 #include "input_bind.h"
@@ -100,6 +101,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_dump, g_keys;  // picked files
 static std::string g_job;           // current extraction step / result for the status line
 static bool g_busy, g_job_failed;
+static bool g_confirm_delete;       // game-files page: "Delete the extracted game files?" shown
 
 static void set_job(const std::string &s, bool failed = false) {
     pthread_mutex_lock(&g_lock);
@@ -137,8 +139,12 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     dump = g_dump, keys = g_keys;
     pthread_mutex_unlock(&g_lock);
-    std::string hactool = "tools/hactool/hactool" PLAT_EXE_SUFFIX, tmp = g_root + "/.extract", log = g_root + "/extract.log";
+    char hpath[1024];
+    std::string hactool = rt_resource("hactool" PLAT_EXE_SUFFIX, "tools/hactool/hactool" PLAT_EXE_SUFFIX, hpath, sizeof hpath)
+                              ? hpath : "tools/hactool/hactool" PLAT_EXE_SUFFIX;
+    std::string tmp = g_root + "/.extract", log = g_root + "/extract.log";
     mkdir(g_root.c_str(), 0755);
+    rt_remove_game_file(g_root.c_str(), ".extract");  // (an interrupted run's)
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
     set_job("Reading the game dump...");
@@ -177,7 +183,7 @@ static void *extract_thread(void *) {
         set_job(why.empty() ? "Game files ready." : why, !why.empty());
     }
 done:
-    plat_remove_tree(tmp.c_str());
+    rt_remove_game_file(g_root.c_str(), ".extract");  // the dump's secure partition (~6 GB): only the NCA was needed
     pthread_mutex_lock(&g_lock);
     g_busy = false;
     pthread_mutex_unlock(&g_lock);
@@ -478,6 +484,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
         if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
+        if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -491,6 +498,13 @@ extern "C" void launcher_run(const char *root) {
             fprintf(stderr, "[launcher] extract: %s -> %s\n", g_job.c_str(), check_game_files(g_root).empty() ? "READY" : "NOT READY");
             exit(0);
         }
+    }
+    if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
+        double gb = rt_game_files_size(g_root.c_str()) / 1e9;
+        bool ok = rt_remove_game_files(g_root.c_str());
+        status = check_game_files(g_root);
+        fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
+        if (!status.empty()) { g_bg = 0; page = SETUP; }
     }
     while (!play) {
         SDL_Event e;
@@ -672,6 +686,8 @@ extern "C" void launcher_run(const char *root) {
                     std::string def = std::string(home ? home : "") + "/.switch/prod.keys";
                     if (file_exists(def)) { keys = def; pthread_mutex_lock(&g_lock); g_keys = def; pthread_mutex_unlock(&g_lock); }
                 }
+                bool ready = status.empty() && !busy;  // set up: this page only offers to delete them
+                if (!ready) {
                 ImGui::PushFont(g_font_small);
                 ImGui::SetCursorPosX(x0);
                 ImGui::PushTextWrapPos(0);
@@ -698,15 +714,54 @@ extern "C" void launcher_run(const char *root) {
                     pthread_create(&t, NULL, extract_thread, NULL);
                     pthread_detach(t);
                 }
+                }
                 if (!job.empty()) {
                     ImGui::PushFont(g_font_small);
                     ImGui::SetCursorPosX(x0);
                     ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : ImVec4(0.9f, 0.9f, 0.8f, 1), "%s", job.c_str());
                     ImGui::PopFont();
                 }
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", !busy) || (!busy && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                // DELETE GAME FILES: frees the extracted copy (runtime/paths.c removes only what the extraction made,
+                // only inside the data root). Saves, seeds, settings and the user's dump / keys stay.
+                static double files_gb = -1;
+                if (ready) {
+                    if (files_gb < 0) files_gb = rt_game_files_size(g_root.c_str()) / 1e9;
+                    ImGui::PushFont(g_font_small);
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::PushTextWrapPos(0);
+                    if (!g_confirm_delete)
+                        ImGui::TextWrapped("Game files are set up (%.1f GB, extracted from your dump). Delete them to free "
+                                           "the space; saves, seeds and settings are kept.", files_gb);
+                    else
+                        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete the extracted game files (%.1f GB)? Saves, seeds "
+                                           "and settings are kept, and your dump and keys aren't touched: you can set "
+                                           "the game files up again from them.", files_gb);
+                    ImGui::PopTextWrapPos();
+                    ImGui::PopFont();
+                    ImGui::SetCursorPosX(x0);
+                    if (!g_confirm_delete) {
+                        if (menu_item("DELETE GAME FILES", true)) g_confirm_delete = true;
+                    } else {
+                        if (menu_item("DELETE", true)) {
+                            bool ok = rt_remove_game_files(g_root.c_str());
+                            status = check_game_files(g_root);
+                            set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's "
+                                         "data folder?).", !ok);
+                            if (!status.empty()) g_bg = 0;
+                            g_confirm_delete = false, files_gb = -1;
+                        }
+                        ImGui::SetCursorPosX(x0);
+                        if (menu_item("CANCEL", true)) g_confirm_delete = false;
+                    }
+                } else files_gb = -1;  // (re-measured after an extraction)
+                if (g_confirm_delete) {  // (B / Esc: back out of the question first)
+                    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                        g_confirm_delete = false;
+                } else {
+                    ImGui::SetCursorPosX(x0);
+                    if (menu_item("BACK", !busy) || (!busy && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                               ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                }
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
@@ -757,13 +812,13 @@ extern "C" void launcher_run(const char *root) {
             [cb commit];
             if (shot) {
                 [cb waitUntilCompleted];
-                save_png(shot, "build/launcher.png");
+                save_png(shot, getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png");
                 exit(0);
             }
 #else
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
             bool shot = shot_at && ++frame == shot_at;
-            vk_frame_end(shot ? "build/launcher.png" : NULL);
+            vk_frame_end(shot ? getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png" : NULL);
             if (shot) exit(0);
 #endif
         }

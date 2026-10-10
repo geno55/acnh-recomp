@@ -31,7 +31,7 @@ IMGUI_OBJ := build/imgui/imgui.o build/imgui/imgui_draw.o build/imgui/imgui_tabl
 ifeq ($(PLATFORM),macos)
 SDL      := /opt/homebrew/opt/sdl3
 FFMPEG   := /opt/homebrew/opt/ffmpeg
-EXE      := build/larecomp
+EXE      := build/lasrecomp
 DEPINC   := -I$(SDL)/include -I$(FFMPEG)/include
 LDFLAGS  := -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -L$(FFMPEG)/lib -lavformat -lavcodec -lavutil -lswscale -Wl,-rpath,$(FFMPEG)/lib \
             -framework CoreFoundation -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore -framework AppKit -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
@@ -40,7 +40,7 @@ BACKEND_OBJ := $(patsubst runtime/%.m,build/rt/%.o,$(BACKEND_SRC))
 IMGUI_OBJ += build/imgui/imgui_impl_metal.o
 UIFLAGS  := -fobjc-arc
 else
-EXE      := build/larecomp.exe
+EXE      := build/lasrecomp.exe
 DEPINC   :=
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
@@ -49,6 +49,8 @@ LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 -lSDL3 -lavformat -lavcodec -lavut
             -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,build/rt/%.o,$(patsubst runtime/%.c,build/rt/%.o,$(BACKEND_SRC)))
+BACKEND_OBJ += build/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
+WINDRES  ?= windres
 IMGUI_OBJ += build/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
 endif
@@ -113,13 +115,38 @@ gen-objs: $(GEN_OBJ)
 # Runtime objects only (no generated code, no link): quick compile check
 runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
 
-# Windows: build/dist = the exe + the MSYS2 DLLs it loads (runs without MSYS2 on PATH). Game files are not included.
-dist: $(EXE)
-	@mkdir -p build/dist
-	cp $(EXE) build/dist/
-	ldd $(EXE) | awk '/ucrt64/ {print $$3}' | sort -u | xargs -I{} cp -u {} build/dist/
+build/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico
+	@mkdir -p $(dir $@)
+	$(WINDRES) -I docs/icon -O coff $< -o $@
 
-.PHONY: all gen gen-objs runtime-objs dist
+# hactool (ISC): the start screen extracts the user's dump with it; shipped next to the executable
+HACTOOL  := tools/hactool/hactool$(if $(filter windows,$(PLATFORM)),.exe)
+$(HACTOOL):
+	[ -d tools/hactool ] || git clone -q https://github.com/SciresM/hactool tools/hactool
+	cd tools/hactool && cp -n config.mk.template config.mk; $(MAKE) CC=clang
+hactool: $(HACTOOL)
+
+VERSION  := $(shell sed -n 's/^\#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
+
+# macOS: build/LAS Recomp.app (tools/bundle_macos.sh). Game files, keys and fonts are never included.
+app: $(EXE) $(HACTOOL)
+	tools/bundle_macos.sh
+
+# Windows (UNTESTED): build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, hactool, the
+# seed generator helper when built, and the MSYS2 DLLs they load (runs without MSYS2). vulkan-1.dll is left out:
+# every Vulkan driver installs the loader in System32. Saves, seeds and game files go next to the exe at run time.
+DIST     := build/dist/LAS Recomp
+dist: $(EXE) $(HACTOOL)
+	rm -rf build/dist && mkdir -p "$(DIST)"
+	cp $(EXE) $(HACTOOL) "$(DIST)/"
+	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
+	[ ! -e build/lasrecomp-seedgen.exe ] || cp -R build/lasrecomp-seedgen.exe "$(DIST)/"
+	ldd $(EXE) $(HACTOOL) | awk '/ucrt64/ && !/vulkan-1/ {print $$3}' | sort -u | xargs -I{} cp -u {} "$(DIST)/"
+	cd build/dist && if command -v zip >/dev/null; then zip -qr "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; \
+	    else /c/Windows/System32/tar.exe -a -cf "LAS Recomp-$(VERSION)-windows.zip" "LAS Recomp"; fi
+	@echo "build/dist/LAS Recomp-$(VERSION)-windows.zip"
+
+.PHONY: all gen gen-objs runtime-objs hactool app dist
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c

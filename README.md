@@ -106,10 +106,10 @@ Requirements (macOS on Apple Silicon): Xcode command line tools (clang), [Homebr
 1. Put your game files in place: run the app once and use the start screen's game-file setup, or extract your
    v1.0.0 dump yourself into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`) with [hactool](https://github.com/SciresM/hactool).
 2. Recompile the game code: `make gen` (writes `generated/`, from your own `extracted/exefs`).
-3. Build: `make -j10` -> `build/larecomp`.
+3. Build: `make -j10` -> `build/lasrecomp`.
 4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`:
    `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`.
-5. Run: `./build/larecomp extracted` (start screen) or `./build/larecomp extracted --play` (straight into the game).
+5. Run: `./build/lasrecomp extracted` (start screen) or `./build/lasrecomp extracted --play` (straight into the game).
 
 ## Credits
 

@@ -17,7 +17,7 @@ From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
 
     export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
     make gen        # once: recompile the game from extracted/exefs (your own dump; see the start screen)
-    make -j         # -> build/larecomp.exe
+    make -j         # -> build/lasrecomp.exe
 
 Without `generated/` the build links a stub (tools/nogen_stub.c): the start screen works, the game doesn't boot.
 `make runtime-objs` compiles the runtime only (quick check).

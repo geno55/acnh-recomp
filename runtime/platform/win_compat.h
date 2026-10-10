@@ -64,3 +64,12 @@ static inline char *strsep(char **sp, const char *delim) {
 // POSIX mkdir(path, mode); mingw's takes only the path.
 static inline int plat_mkdir(const char *p, int mode) { (void)mode; return _mkdir(p); }
 #define mkdir(p, m) plat_mkdir(p, m)
+
+// realpath(path, out[PATH_MAX]): absolute form of an existing path (links not resolved; callers check them).
+#ifndef PATH_MAX
+#define PATH_MAX 260
+#endif
+static inline char *realpath(const char *p, char *out) {
+    struct stat st;
+    return stat(p, &st) == 0 ? _fullpath(out, p, PATH_MAX) : NULL;
+}
