@@ -38,6 +38,9 @@ This is a 0.1 alpha release. That means bugs are likely, crashes could occur, ra
 
 - The Mysterious Woods look wrong when viewed from outside the woods.
 - Some lighting effects show horizontal lines in dungeons, caves and houses.
+- Controller doesn’t work on the start screen.
+- Shadow bugs in big dungeon rooms at ultrawide
+- Black boxes sometimes appear in dungeon rooms.
 
 ## Features
 
