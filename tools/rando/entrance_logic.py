@@ -12,7 +12,7 @@ outside door c, so region outer_region(c) also becomes reachable from inside-I.
 Pool (v1): `single` doors that are land doors, recommended for shuffling, not reached through a pocket, and not
 Marin & Tarin's house (the game starts inside it). Dungeons use LAS's own `shuffle-dungeons`.
 
-Connector caves (tier 3, own pool: cave doors lead into cave doors): see connector_pool() / apply_connector_logic().
+Connector caves (part of tier 2, own pool: cave doors lead into cave doors): see connector_pool() / apply_connector_logic().
 """
 import os
 import random
@@ -106,7 +106,7 @@ def apply_logic(logic, doors, entry, exit_, extra_inside=None):
     return moved
 
 
-# ---- Connector caves (tier 3). A connector is one interior with 2-3 doors (entrance_data.yml `connectors`: nodes
+# ---- Connector caves (part of tier 2). A connector is one interior with 2-3 doors (entrance_data.yml `connectors`: nodes
 # inside, directed edges between them with conditions, items at nodes). Every cave door is shuffled among the cave
 # doors: entering door d leads into the cave spot of door entry[d] (node of that door), and the cave's zone near
 # door t leads outside door exit_[t]. Logic nodes: conn-<cave>-<node> = OR of the doors leading into a door of that

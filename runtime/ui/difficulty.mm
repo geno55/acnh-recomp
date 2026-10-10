@@ -45,44 +45,19 @@ extern "C" void difficulty_frame(void) {
     if (g_settings.diff_hero && *(uint8_t *)(uintptr_t)HERO_FLAG != 1) *(uint8_t *)(uintptr_t)HERO_FLAG = 1;
 }
 
-static void preset(const char *name, float dmg, bool ohko, bool hero, const char *desc) {
-    bool on = fabsf(g_settings.diff_damage - dmg) < 0.01f && g_settings.diff_ohko == ohko && g_settings.diff_hero == hero;
-    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-    if (ImGui::Button(name, ImVec2(160, 0))) {
-        g_settings.diff_damage = dmg;
-        g_settings.diff_ohko = ohko;
-        g_settings.diff_hero = hero;
-        settings_save();
-    }
-    if (on) ImGui::PopStyleColor();
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", desc);
-}
-
+// Plain levers, each at the game's own value by default (1x, off, off).
 extern "C" void difficulty_draw(float scale) {
     (void)scale;
-    ImGui::SeparatorText("Presets");
-    preset("Easy", 0.5f, false, false, "half damage");
-    preset("Normal", 1.0f, false, false, "the game as designed");
-    preset("Hard", 2.0f, false, false, "double damage, recovery hearts still drop");
-    preset("Hero", 1.0f, false, true, "the game's Hero Mode: double damage, no recovery hearts");
-    preset("Brutal", 2.0f, false, true, "Hero Mode + double damage (4x)");
-    preset("One hit", 1.0f, true, false, "any hit is fatal");
-    ImGui::Spacing();
-    ImGui::SeparatorText("Custom");
     float d = g_settings.diff_damage;
     ImGui::SetNextItemWidth(320);
     if (ImGui::SliderFloat("Damage taken", &d, 0.25f, 4.0f, "%.2fx")) {
-        g_settings.diff_damage = roundf(d * 4) / 4;
+        g_settings.diff_damage = roundf(d * 4) / 4;  // quarter hearts
         settings_save();
     }
     if (ImGui::Checkbox("One-hit KO", &g_settings.diff_ohko)) settings_save();
     if (ImGui::Checkbox("Hero Mode", &g_settings.diff_hero)) settings_save();
-    ImGui::SameLine();
-    ImGui::TextDisabled("(sets the loaded save's Hero Mode flag; turning this off leaves the save as it is)");
+    // (turning the lever off leaves the save's own flag alone: a Hero Mode file stays one)
     if (game_in_play() && !g_settings.diff_hero && rt_hero_mode()) {
         if (ImGui::Button("Turn Hero Mode off for this save")) *(uint8_t *)(uintptr_t)HERO_FLAG = 0;
     }
-    ImGui::Spacing();
-    ImGui::TextDisabled("Damage is rounded to quarter hearts (at least 1/4 heart per hit).");
 }
