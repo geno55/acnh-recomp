@@ -1920,6 +1920,16 @@ static void draw_(CmdRec *r, bool indexed) {
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+    {   // the Items page's cursor brackets while the cursor is on the companion card (runtime/hle/pets.c)
+        extern bool pets_hide_item_cursor(void);
+        extern bool texpatch_is_item_cursor(int id);
+        if (pets_hide_item_cursor())
+            for (int i = 0; i < pr->fi->ntex; i++) {
+                NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+                const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { stat_skipped++; return; }
+            }
+    }
     float tint[8] = {0};
     if (pr->fi->uses_tint) {
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);

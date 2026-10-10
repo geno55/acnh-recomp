@@ -145,6 +145,7 @@ static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
 static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 static int draw_bottle;                 // a fragment texture is the bottle's item icon (1) / model map (2): Escape Bottle
+static bool draw_item_cursor;           // a fragment texture is the Items page's cursor brackets
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
@@ -1171,7 +1172,7 @@ static void resolve_feedback(Prog *pr) {
 }
 
 static void bind_textures(int stage, ShaderInfo *si) {
-    if (stage == 1) draw_bottle = 0;
+    if (stage == 1) draw_bottle = 0, draw_item_cursor = false;
     for (int i = 0; i < si->ntex; i++) {
         ShaderTexture *st_ = &si->tex[i];
         int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -1187,7 +1188,10 @@ static void bind_textures(int stage, ShaderInfo *si) {
             if (e->tex && stage == 1) {
                 extern int renderer_texpatch_of(NvnTexture *t);
                 extern int texpatch_bottle_kind(int id);
-                if (!draw_bottle) draw_bottle = texpatch_bottle_kind(renderer_texpatch_of(e->tex));
+                extern bool texpatch_is_item_cursor(int id);
+                int id = renderer_texpatch_of(e->tex);
+                if (!draw_bottle) draw_bottle = texpatch_bottle_kind(id);
+                draw_item_cursor |= texpatch_is_item_cursor(id);
             }
             if (e->tex && i < 64) {
                 renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
@@ -1874,6 +1878,8 @@ static void draw(CmdRec *r, bool indexed) {
     if (pr->fi->uses_gmem) [enc setFragmentBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     bind_textures(0, pr->vi);
     bind_textures(1, pr->fi);
+    extern bool pets_hide_item_cursor(void);  // (the cursor is on the companion card: runtime/hle/pets.c)
+    if (draw_item_cursor && pets_hide_item_cursor()) { stat_skipped++; return; }
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image: draws that sample the full-size reshaped scene (the final
