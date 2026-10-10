@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "osk.h"
 #include "warp_data.h"
 
 extern "C" {
@@ -98,7 +99,7 @@ extern "C" bool warp_tab_draw(float scale) {
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##warpfilter", "Search places...", g_filter, sizeof g_filter);
+    ui_input_text("##warpfilter", g_filter, sizeof g_filter, 0, "Search places...", "Search places");
     ImGui::Spacing();
 
     bool started = false;

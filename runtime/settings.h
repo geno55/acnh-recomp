@@ -35,8 +35,15 @@ typedef struct {
     float diff_damage;   // damage taken multiplier (1 = normal)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
+    // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
+    int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
+    int hearts;          // index into g_heart_colours (0 = Default red)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
+
+enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
+extern const char *const g_tunic_colours[N_TUNIC_COLOURS];
+extern const char *const g_heart_colours[N_HEART_COLOURS];
 
 extern Settings g_settings;
 

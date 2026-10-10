@@ -10,6 +10,9 @@ original shading; everything else (skin, belt, boots) is untouched.
     python3 cosmetics.py <romfs> <out.png> <colour>   preview the recoloured texture
 
 Runs in the LAS venv (bntx_editor, quicktex, Pillow).
+
+No longer offered by the start screen (seeds are made with 'default'): the in-game Cosmetics tab recolours the tunic
+live with the same recolour (runtime/nvn/texpatch.c), over a seed's own colour too. Kept for older seeds' requests.
 """
 import os
 import random

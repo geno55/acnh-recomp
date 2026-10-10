@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "osk.h"
 
 extern "C" {
 #include "../hle.h"
@@ -90,8 +91,6 @@ static double g_gen_start;
 static bool g_gen_failed;
 static bool g_gen_done;  // finished (or failed to start): the overlay shows the result until Play Now / Close
 
-static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "Yellow", "Pink", "Teal", "Sky",
-                                      "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
 
 struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
@@ -103,7 +102,7 @@ struct GenOpts {
     bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets
     bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk): always on
     bool enemy_minibosses = false;  // enemy-minibosses (needs Randomize enemies)
-    int tunic = 0;            // tunic-color: index into kTunics (tools/rando/cosmetics.py COLOURS)
+    int tunic = 0;            // retired tunic-color (always 0 = default): the tunic is a live cosmetic now
     bool inc_fishing = false, inc_rapids = false, inc_dampe = false, inc_trade = false, inc_blue = false;
     int traps = 1;            // none few several many trapsanity
     int seashells = 2;        // max reward included: none 5 15 30 40 50
@@ -127,12 +126,6 @@ struct GenOpts {
 };
 static GenOpts g_opts;
 
-// Tunic colour of the next seed (still part of the seed ID / request), for the Cosmetics tab: names + the choice.
-extern "C" int *rando_tunic_choice(const char *const **names, int *n) {
-    if (names) *names = kTunics;
-    if (n) *n = (int)(sizeof kTunics / sizeof *kTunics);
-    return &g_opts.tunic;
-}
 
 // ---- Seed IDs: a 25-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and
 // every generation option, with a checksum in the last 5 bits. Same ID + same LAS Recomp version = the same seed, so
@@ -227,6 +220,7 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     // (+ connector caves) is part of tier 2 now
     t.logic = 0;
     t.skip_story = true;
+    t.tunic = 0;  // (the tunic colour is the Cosmetics tab's, live: new seeds stay green; placement never used it)
     if (t.entrances > 2) t.entrances = 2;
     o = t;
     return "";
@@ -250,6 +244,19 @@ static std::string clean_name(const char *in) {  // a seed name as a folder name
     while (!n.empty() && n.back() == ' ') n.pop_back();
     while (!n.empty() && (n[0] == ' ' || n[0] == '.')) n.erase(0, 1);
     return n;
+}
+
+// The seed generator: the standalone helper (tools/rando/rando_gen.spec, `make rando-helper`; no Python needed) next to
+// the executable or in the .app's Resources (LARECOMP_RANDO_GEN=<path>: that one), else (source tree) the LAS venv
+// running tools/rando/las_headless.py. Either takes <romfs> <seed dir> <request.json> and prints
+// `stage <fraction> <label>` lines.
+static std::vector<std::string> generator_cmd(void) {
+    if (const char *g = getenv("LARECOMP_RANDO_GEN")) return {g};
+    char p[1024], s[1024];  // (runtime/paths.h: <exe dir>/rando-gen/, <exe dir>/../Resources/rando-gen/, the source tree)
+    if (rt_resource("rando-gen/rando-gen" PLAT_EXE_SUFFIX, NULL, p, sizeof p)) return {p};
+    if (rt_resource(NULL, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, p, sizeof p) &&
+        rt_resource(NULL, "tools/rando/las_headless.py", s, sizeof s)) return {p, s};
+    return {"third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, "tools/rando/las_headless.py"};
 }
 
 static void start_generation(void) {
@@ -297,7 +304,7 @@ static void start_generation(void) {
             g_opts.bomb_bag ? "false" : "true", g_opts.powder_bag ? "true" : "false");
     fprintf(f, " \"randomize-environments\": %s, \"bad-pets\": %s,\n", g_opts.environments ? "true" : "false",
             g_opts.pets_in_dungeons ? "true" : "false");
-    fprintf(f, " \"skip-story-events\": true, \"tunic-color\": \"%s\", \"enemy-minibosses\": %s,\n", kTunics[g_opts.tunic],
+    fprintf(f, " \"skip-story-events\": true, \"tunic-color\": \"default\", \"enemy-minibosses\": %s,\n",
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
@@ -315,23 +322,19 @@ static void start_generation(void) {
     fprintf(f, " \"exclude\": [%s]}\n", shell_excl[g_opts.seashells]);
     fclose(f);
     std::string log = dir + "/generate.log";
-    // generator: the packaged helper (shipped next to the executable / in the .app, runtime/paths.h; same arguments as
-    // las_headless.py), else the source tree's Python venv
-    char gen[1024], py[1024], script[1024];
     std::string romfs = g_romfs_dir ? g_romfs_dir : "extracted/romfs";
-    const char *argv_helper[] = {gen, romfs.c_str(), dir.c_str(), req.c_str(), NULL};
-    const char *argv_py[] = {py, script, romfs.c_str(), dir.c_str(), req.c_str(), NULL};
-    bool helper = rt_resource("lasrecomp-seedgen" PLAT_EXE_SUFFIX, NULL, gen, sizeof gen);
-    if (!helper && (!rt_resource(NULL, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, py, sizeof py) ||
-                    !rt_resource(NULL, "tools/rando/las_headless.py", script, sizeof script)))
-        strlcpy(py, "third_party/LAS-Randomizer/" PLAT_VENV_PYTHON, sizeof py), strlcpy(script, "tools/rando/las_headless.py", sizeof script);
-    const char **argv = helper ? argv_helper : argv_py;
+    auto abs = [](std::string &p) { if (p[0] != '/' && !(p.size() > 1 && p[1] == ':')) p = std::string(rt_data_root()) + "/" + p; };
+    abs(romfs), abs(dir), abs(req);  // (the helper / script change directory: absolute, in the data root)
+    std::vector<std::string> cmd = generator_cmd();
+    std::vector<const char *> argv;
+    for (auto &a : cmd) argv.push_back(a.c_str());
+    for (const char *a : {romfs.c_str(), dir.c_str(), req.c_str(), (const char *)NULL}) argv.push_back(a);
     setenv("PYTHONHASHSEED", "0", 1);  // (set iteration order must not differ between runs: same ID, same seed)
-    g_gen_pid = plat_spawn(argv, log.c_str(), false);
+    g_gen_pid = plat_spawn(argv.data(), log.c_str(), false);
     int rc = !g_gen_pid;
     g_gen_seed = g_opts.seed;
     g_gen_failed = g_gen_done = rc != 0;
-    g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Starting...";
+    g_gen_status = rc ? "Could not start the seed generator (rando-gen missing?)" : "Starting...";
     g_gen_frac = 0;
     g_gen_start = ImGui::GetTime();
     if (rc) g_gen_pid = 0;
@@ -522,11 +525,11 @@ extern "C" void rando_tab_draw(float scale) {
             bool is_active = active && s.name == active;
             if (renaming == s.name) {
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
-                if (ImGui::InputText("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (!osk_is_open() && (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive())) ImGui::SetKeyboardFocusHere();
+                if (ui_input_text("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue, NULL, "Rename seed")) {
                     rename_from = s.name, rename_to = clean_name(rename_buf);
                 }
-                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renaming.clear();
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ui_input_text_cancelled()) renaming.clear();
             } else if (is_active) ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s  (playing)", s.name.c_str());
             else ImGui::TextUnformatted(s.name.c_str());
             if (!s.id.empty()) {
@@ -593,7 +596,7 @@ extern "C" void rando_tab_draw(float scale) {
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
     label("Seed name");
-    ImGui::InputTextWithHint("##seed", "random name (yours to choose)", g_opts.seed, sizeof g_opts.seed);
+    ui_input_text("##seed", g_opts.seed, sizeof g_opts.seed, 0, "random name (yours to choose)", "Seed name");
     // Seed ID: shows the ID of the options below (+ this seed's random part); paste one to load a shared seed
     static char idbuf[48];
     static std::string id_msg;
@@ -601,8 +604,8 @@ extern "C" void rando_tab_draw(float scale) {
     label("Seed ID");
     float bw = 150 * scale;
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2 * bw - 2 * ImGui::GetStyle().ItemSpacing.x);
-    bool editing = ImGui::InputTextWithHint("##seedid", "paste a shared seed ID", idbuf, sizeof idbuf,
-                                            ImGuiInputTextFlags_CharsUppercase);
+    bool editing = ui_input_text("##seedid", idbuf, sizeof idbuf, ImGuiInputTextFlags_CharsUppercase, "paste a shared seed ID",
+                                 "Seed ID");
     bool active_id = ImGui::IsItemActive();
     if (editing) {
         GenOpts t = g_opts;
@@ -613,7 +616,8 @@ extern "C" void rando_tab_draw(float scale) {
     if (!active_id) {  // follow the options
         char cur[48];
         seed_id_encode(g_opts, cur, sizeof cur);
-        if (strcmp(cur, idbuf)) { strlcpy(idbuf, cur, sizeof idbuf); if (id_msg.rfind("Loaded", 0)) id_msg.clear(); }
+        // (an ID from the on-screen keyboard arrives with the field inactive: keep its error to read)
+        if (strcmp(cur, idbuf)) { strlcpy(idbuf, cur, sizeof idbuf); if (id_msg.rfind("Loaded", 0) && !editing) id_msg.clear(); }
     }
     ImGui::SameLine();
     if (ImGui::Button("Copy##id", ImVec2(bw, 0))) ImGui::SetClipboardText(idbuf);

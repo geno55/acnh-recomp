@@ -145,6 +145,7 @@ static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
 static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 static int draw_bottle;                 // a fragment texture is the bottle's item icon (1) / model map (2): Escape Bottle
+static int draw_heart;                  // ... a HUD / file select heart's: heart colour (Cosmetics tab)
 static bool draw_item_cursor;           // a fragment texture is the Items page's cursor brackets
 #define RSCALE_BUFFER_INDEX 18
 
@@ -1172,7 +1173,7 @@ static void resolve_feedback(Prog *pr) {
 }
 
 static void bind_textures(int stage, ShaderInfo *si) {
-    if (stage == 1) draw_bottle = 0, draw_item_cursor = false;
+    if (stage == 1) draw_bottle = draw_heart = 0, draw_item_cursor = false;
     for (int i = 0; i < si->ntex; i++) {
         ShaderTexture *st_ = &si->tex[i];
         int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -1188,9 +1189,11 @@ static void bind_textures(int stage, ShaderInfo *si) {
             if (e->tex && stage == 1) {
                 extern int renderer_texpatch_of(NvnTexture *t);
                 extern int texpatch_bottle_kind(int id);
+                extern int texpatch_heart_kind(int id);
                 extern bool texpatch_is_item_cursor(int id);
                 int id = renderer_texpatch_of(e->tex);
                 if (!draw_bottle) draw_bottle = texpatch_bottle_kind(id);
+                if (!draw_heart) draw_heart = texpatch_heart_kind(id);
                 draw_item_cursor |= texpatch_is_item_cursor(id);
             }
             if (e->tex && i < 64) {
@@ -1999,6 +2002,7 @@ static void draw(CmdRec *r, bool indexed) {
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
             escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);
         }
+        if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
     for (int s = 0; s < 12; s++) {
@@ -2557,9 +2561,8 @@ static void exec_list(uint64_t handle, int depth) {
                     seen[nseen++] = cs;
                     char path[64];
                     snprintf(path, sizeof path, "build/cs_%d.bin", nseen - 1);
-                    FILE *f = fopen(path, "wb");
-                    fwrite((void *)(uintptr_t)cs, 1, 0x4000, f);
-                    fclose(f);
+                    FILE *f = fopen(path, "wb");  // (no build/ outside a source checkout: the app's data root)
+                    if (f) fwrite((void *)(uintptr_t)cs, 1, 0x4000, f), fclose(f);
                     LOG("[dispatch] new compute program %d: cs %llx groups %llu %llu %llu images:", nseen - 1, cs, r->x[0], r->x[1], r->x[2]);
                     for (int i = 0; i < 8; i++) if (st.img[5][i]) LOG(" %d=%llx", i, st.img[5][i]);
                     LOG(" tex:");
@@ -2574,11 +2577,9 @@ static void exec_list(uint64_t handle, int depth) {
             if (g_debug_frame && st.program) {
                 LOG("[dispatch] %llu %llu %llu prog %p cs %llx\n", r->x[0], r->x[1], r->x[2], st.program, st.program->stages[5].code_addr);
                 FILE *f = fopen("build/cs_code.bin", "wb");
-                fwrite((void *)(uintptr_t)st.program->stages[5].code_addr, 1, 0x4000, f);
-                fclose(f);
+                if (f) fwrite((void *)(uintptr_t)st.program->stages[5].code_addr, 1, 0x4000, f), fclose(f);
                 f = fopen("build/cs_ctrl.bin", "wb");
-                fwrite(st.program->stages[5].control, 1, 0x900, f);
-                fclose(f);
+                if (f) fwrite(st.program->stages[5].control, 1, 0x900, f), fclose(f);
                 LOG("[dispatch] images:");
                 for (int i = 0; i < 8; i++) if (st.img[5][i]) LOG(" %d=%llx", i, st.img[5][i]);
                 LOG(" tex:");
