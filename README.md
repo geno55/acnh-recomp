@@ -3,8 +3,8 @@
 > [!IMPORTANT]
 > **This project was made almost exclusively with AI.** Nearly all of the code, tooling, reverse engineering and
 > documentation in this repository was written by and will be maintained by an AI (Anthropic's Claude, through Claude Code),
-> directed, tested and reviewed by a human. As a huge fan of this game, I made this for myself. Sharing it is a curtesy,
-> if you don't agree with the usage of AI, do not trust code written by AI, that is your right but I'm not interested
+> directed, tested and reviewed by a human. As a huge fan of this game, I made this for myself. Sharing it is a courtesy.
+> If you don't agree with the use of AI or don't trust code written by AI, that is your right, but I'm not interested
 > in the controversy in relation to this project. You may simply ignore this project and its code.
 > As with anything on the internet, you run the code at your own discretion.
 
@@ -12,18 +12,18 @@
 native Windows and macOS application.
 
 > [!NOTE]
-> Currently supported Platforms:
-> macOS - Apple Silicon Only, Metal Graphics Backend + MetalFX
-> Windows - x86 Only, Vulkan Graphics Backend
+> Currently supported platforms:
+> - macOS - Apple Silicon only, Metal graphics backend + MetalFX
+> - Windows - x86-64 only, Vulkan graphics backend
 
 ![Mabe Village in a 21:9 window: the unlocked aspect ratio shows more of the island](docs/ultrawide.jpg)
 
 > [!NOTE]
 > **No game files are included.** LAS Recomp needs your own legally obtained copy of the game: a dump of
-> *Link's Awakening* **v1.0.0** (XCI or NSP) from your console and your console's `prod.keys`. 
+> *Link's Awakening* **v1.0.0** (XCI or NSP) from your console and your console's `prod.keys`.
 > Instructions on how to obtain these files from your Switch and game copy will **NOT** be provided.
 > On first launch the start screen extracts what it needs. Nothing owned by Nintendo is part of this repository.
-> Screenshot shows the start screen after extraction, no Nintendo Artwork is included until provided by the user.
+> The screenshot shows the start screen after extraction; no Nintendo artwork is included until provided by the user.
 
 ![The start screen: choose vanilla or a randomizer seed, set up your game files, settings](docs/start_screen.jpg)
 
@@ -32,50 +32,71 @@ https://discord.gg/DhrgdYqdcY
 
 ## Status
 
-This is a 0.1 alpha release. That means bug are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point), some graphics issue remain (especially in wide and ultrawide aspect ratios), this is a work in progress thus the alpha designation. Please use the Discord for discussing possible randomizer logic issues and submitting bug reports.
+This is a 0.1 alpha release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the alpha designation. Please use the Discord for discussing possible randomizer logic issues and submitting bug reports.
 
 ## Features
 
 **Runs natively**
-- **This is not emulation.** Runs native on Windows and macOS using static recompilation of the switch code. 
+- **This is not emulation.** Runs natively on Windows and macOS using static recompilation of the Switch code.
 - Unlocked aspect ratio: wider (or taller) windows show more of the island, up to ultrawide; houses and dungeons
   keep their framing. The original 16:9 framing is one option away.
 - Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts.
-  - Switch games use fonts built into the Switch operating system for some text. Some sensible replacements were picked but optionally you may setup the Switch fonts for an authentic look. Switch fonts are Nintendo IP, you must provide them from your own hardware.
-- In-game overlay menu (F1, or Minus + Plus on a controller)
+  - Switch games use fonts built into the Switch operating system for some text. Sensible replacements are used by default, but you may optionally set up the Switch fonts for an authentic look. Switch fonts are Nintendo IP; you must provide them from your own hardware.
+- In-game overlay menu (F1, or Minus + Plus on a controller).
+- Switch between vanilla and any randomizer seed without restarting the app.
 - Keyboard and controller support, with every button and key remappable (Controls tab / start screen Settings >
-  Controls; menus keep a fixed layout, so a remap can never lock you out)
+  Controls; menus keep a fixed layout, so a remap can never lock you out).
 - Button prompts for your controller: Xbox or PlayStation icons in the game's own UI and text when SDL reports
   that controller (or pick Nintendo / Xbox / PlayStation yourself); the icons follow your controller remapping.
 - Optional 360-degree movement, blur removal and a hidden Hero Mode icon.
-- Apple MetalFX upscaler for macOS builds. Default.
-- Internal resolution adjustments. Pick how high you want the resolution to be or cut it down, match the display and dynamic resolution options. When combined with the MetalFX upscaler on Macs even a Macbook Air should be able to handle this easily with the right settings. Bilenear upscaling is the only option on Windows currently.
+- Apple MetalFX upscaler on macOS (the default there).
+- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. Bilinear upscaling is the only option on Windows currently.
 
 **Randomizer**
-- In game seed generator.
-- Seed system for sharing or reproducing exact seeds.
-- Per seed save games
+- In-game seed generator.
+- Seed IDs for sharing or reproducing exact seeds.
+- Per-seed save games.
 - Full item shuffle.
 - Trade Quest shuffle.
-- Disable Acorn/Piece of Power drops.
+- Disable Acorn / Piece of Power drops.
 - Bombs / Magic Powder shuffle.
-- Environment Randomizer - Randomizes in game environmental effects.
-- Music Randomizer
-- Potsanity - Every pot is a check. Pots are golden until checks so you visibly know what pots you've checked.
-- Bushsanity - Every single cuttable bush (not the grass) is a check. Like pots bushes are golden until checked for the first time.
-- Digsanity - A truly insane setting which makes every diggable tile on the overworld a check, holes stay dug permanently so you know where you've dug. Made for shovel enthusiasts. 
-- Keysanity - Keys can be found anywhere for any dungeon.
-- Shopsanity - Every item in the shop shuffled. Random prices, or just steal it.
-- Trendsantiy - Full Trendy Game randomization
-- Pets - Ghost, Marin (unlocks Dessert, open dessert an option and Marin not in the pool), Rooster (In Logic for Feather checks, including in dungeons if enabled), Ghost (Find the Ghost drop to unlock grave check)
-- Entrance Randomizer - Shuffles all entrances. Includes a decoupled option.
-- Dungeon Room Shuffler - Shuffles all dungeon rooms creating unique custom dungeons every seed. Three modes:
-  - Coherent: Dungeon rooms are shuffled but connecting rooms are lined up, to make this work in logic dungeons use duplicate rooms sometimes (as little as possible) to maintain a workable logical dungeon.
-  - Chaos: Dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to door from another direction.
-  - Madness: Dungeon rooms are shuffled in a way that doesn't need to make sense AND are uncoupled creating nightmares to navigate.
-  - Optionally the map can show what's connected to what as you explore or in full when you find the in game map.
-- Inventory screen tracks keys and trade items for individual dungeons so you can see at a glance what you have keys for or what trade items you have. 
-- Built in check tracker on overworld map (optional)
+- Hookshot anything - the hookshot latches onto any wall or object, not just hookshot targets (in logic where enabled).
+- Environment Randomizer - randomizes in-game environmental effects.
+- Music Randomizer.
+- Escape Bottle - every seed gives you this gold bottle from the start (it replaces one bottle in the pool). Use it to
+  warp to the dungeon entrance when in a dungeon, or to Marin and Tarin's house anywhere else. Never required by the logic.
+- Pickup text in the game's own message box: dungeon items name the dungeon they belong to ("You got a small key for
+  Tail Cave!").
+- Potsanity - every pot is a check. Pots are golden until checked, so you can see at a glance which pots you've checked.
+- Bushsanity - every cuttable bush (not the grass) is a check. Like pots, bushes are golden until checked for the first
+  time. Bushes over a hole or staircase stay normal, so items can't fall in.
+- Digsanity - a truly insane setting that makes every diggable tile on the overworld a check (about 5,000). Holes stay
+  dug permanently so you know where you've dug. Made for shovel enthusiasts.
+- Keysanity - keys can be found anywhere for any dungeon.
+- Shopsanity - the shop's 6 items are checks, at vanilla or random prices, or just steal them. A bought or stolen slot
+  shows a sold-out sign.
+- Trendsanity - full Trendy Game randomization: every prize, including the figures, is a check.
+- Pets - companions as items in the pool:
+  - Rooster - in logic for Feather checks (including in dungeons if companions are allowed there).
+  - Marin - you need to find Marin to get into the desert; choosing open desert removes Marin from the item pool.
+  - Ghost - find the Ghost to unlock his grave check.
+  - Switch companions from the pause menu, or send yours away.
+- Boss souls - a boss doesn't appear, can't be beaten and its reward stays locked until you find its soul.
+- Mini-boss souls - the same for dungeon mini-bosses (a separate option).
+- Entrance Randomizer - shuffles dungeon entrances, houses and caves, and connector caves. Includes a decoupled option.
+- Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Three modes:
+  - Coherent: dungeon rooms are shuffled but connecting rooms are lined up. To keep this workable in logic, dungeons
+    sometimes use duplicate rooms (as few as possible).
+  - Chaos: dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to a door from another
+    direction.
+  - Madness: dungeon rooms are shuffled in a way that doesn't need to make sense AND the doors are decoupled, creating
+    nightmares to navigate.
+  - Labyrinth (planned): an option for all dungeon room shuffles where doors in dungeons can lead into other dungeons,
+    essentially making one giant dungeon with numerous wings.
+  - Optionally the map shows what's connected to what as you explore, or in full once you find the dungeon's map.
+- The inventory screen tracks keys, dungeon items, trade items and souls for each dungeon, so you can see at a glance
+  what you have keys for and which trade items you still hold.
+- Built-in check tracker on the overworld map (optional).
 
 ## Building from source
 
