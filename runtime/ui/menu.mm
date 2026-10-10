@@ -404,16 +404,20 @@ static void tab_display(void) {
     header("Video");
     const char *aspects[] = {"Unlocked (fill the window)", "Original 16:9"};
     choice("Aspect ratio", &g_settings.aspect, aspects, 2);
-    hint("Unlocked widens (or heightens) the camera to match the window: ultrawide shows more of the island. "
-         "Houses and dungeons stay 16:9. Original keeps the Switch framing with black bars.");
     ImGui::Spacing();
     bool fs = g_settings.fullscreen;
     if (toggle("Fullscreen", &fs)) { g_settings.fullscreen = fs; g_want_fullscreen_apply.store(true); }
     hint("Also: F11, Alt+Enter or Cmd+Ctrl+F.");
     ImGui::Spacing();
-    static const char *res[] = {"Match display", "1x (1080p)", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Dynamic",
-                                "75% of display", "67% of display", "50% of display"};
-    choice("Internal resolution", &g_settings.res_mode, res, 13);
+    // display order -> RES_* (the ini / enum order predates the menu order)
+    static const char *res[] = {"Match display", "Dynamic resolution", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x",
+                                "0.75x", "0.50x", "0.25x"};
+    static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, 5, 6, 7, 8, RES_Q75, RES_Q50, RES_Q25};
+    {
+        int ri = 0;
+        for (int i = 0; i < 13; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
+        if (choice("Internal resolution", &ri, res, 13)) g_settings.res_mode = res_mode[ri];
+    }
     {
         float sx, sy;
         renderer_get_scale(&sx, &sy);
@@ -426,15 +430,7 @@ static void tab_display(void) {
 #ifdef __APPLE__
     static const char *ups[] = {"Bilinear", "MetalFX"};
     choice("Upscaler", &g_settings.upscaler, ups, 2);
-    hint("How a lower internal resolution (75% / 67% / 50%, 1x, Dynamic) is scaled up to the window. MetalFX is "
-         "Apple's spatial upscaler: sharper edges and detail than plain bilinear filtering.");
 #endif
-    hint("Match display renders at the window's own size. 75% / 67% / 50% render at that share of it (faster) "
-         "and scale up. 1x-8x render at that many times the Switch's 1080p "
-         "(wide windows keep their shape; very high settings are capped at the GPU's 16384-pixel limit) and are "
-         "scaled to the window - above the display size this is supersampling. Dynamic matches the display and "
-         "lowers the resolution while the GPU can't hold 60 fps (the game slows down when a frame is missed), "
-         "raising it again when it can. Changing it briefly pauses while the render targets are rebuilt.");
     ImGui::Spacing();
     toggle("Show FPS", &g_settings.show_fps);
     ImGui::Spacing();
@@ -464,7 +460,6 @@ static void tab_about(void) {
     ImGui::Spacing();
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
-    hint("The controller's d-pad (and the keyboard's arrow keys) walk like the stick, in 8 directions. The stick still works.");
     toggle("360-degree movement", &g_settings.move_360);
     hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
     ImGui::Spacing();
@@ -475,9 +470,6 @@ static void tab_about(void) {
         snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         choice("Button icons", &g_settings.prompts, names, 4);
-        hint("The game's button icons drawn for your controller. Auto follows the controller that's connected "
-             "(Nintendo icons with a keyboard or other pads). The icons follow the controller bindings above; by "
-             "default buttons are matched by position: Switch A is Xbox B / PlayStation circle.");
     }
     ImGui::Spacing();
     header("Menu");
@@ -713,6 +705,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
                     case 6: difficulty_draw(scale); break;
                     case 7: tab_about(); break;
                     }
+                    static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
+                    if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
                     ImGui::EndChild();
                     ImGui::EndTabItem();
                 }

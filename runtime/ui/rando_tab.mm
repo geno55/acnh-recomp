@@ -19,6 +19,7 @@ extern "C" {
 #include "../rando.h"
 #include "../settings.h"
 extern const char *g_romfs_dir;
+extern char g_window_shot_request[256];  // runtime/hle/hookshot.c (test shots)
 }
 
 struct Seed { std::string name, logic, spoiler, id; long mtime; };
@@ -86,6 +87,7 @@ static std::string g_gen_seed, g_gen_status;
 static float g_gen_frac;
 static double g_gen_start;
 static bool g_gen_failed;
+static bool g_gen_done;  // finished (or failed to start): the overlay shows the result until Play Now / Close
 
 static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "Yellow", "Pink", "Teal", "Sky",
                                       "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
@@ -93,12 +95,12 @@ static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "
 struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
     uint64_t rng = 0;         // 36-bit random part of the seed ID
-    int logic = 0;            // basic advanced glitched hell none
+    int logic = 0;            // basic advanced glitched hell none (always basic for now: no UI choice)
     int dungeon_items = 3;    // none stone-beak mc mcb
     int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
     bool bomb_bag = false, powder_bag = false;  // shuffle-bombs / shuffle-powder
     bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets
-    bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk)
+    bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk): always on
     bool enemy_minibosses = false;  // enemy-minibosses (needs Randomize enemies)
     int tunic = 0;            // tunic-color: index into kTunics (tools/rando/cosmetics.py COLOURS)
     bool inc_fishing = false, inc_rapids = false, inc_dampe = false, inc_trade = false, inc_blue = false;
@@ -108,7 +110,7 @@ struct GenOpts {
     bool open_mabe = false, fast_songs = false, ohko = false, boss_cutscenes = true, spoiler = true;
     int start_rupees = 0;
     // planned (LAS Recomp additions, not implemented yet)
-    int entrances = 0;        // off / dungeons / ...
+    int entrances = 0;        // off / dungeons / + houses, caves & connector caves (3 = old "+ connectors": now 2)
     bool decoupled = false, pots = false, grass = false;
     bool no_buffs = false;    // no-buff-drops: enemies never drop Guardian Acorns / Pieces of Power
     bool bushes = false;      // bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
@@ -124,11 +126,19 @@ struct GenOpts {
 };
 static GenOpts g_opts;
 
+// Tunic colour of the next seed (still part of the seed ID / request), for the Cosmetics tab: names + the choice.
+extern "C" int *rando_tunic_choice(const char *const **names, int *n) {
+    if (names) *names = kTunics;
+    if (n) *n = (int)(sizeof kTunics / sizeof *kTunics);
+    return &g_opts.tunic;
+}
+
 // ---- Seed IDs: a 25-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and
 // every generation option, with a checksum in the last 5 bits. Same ID + same LAS Recomp version = the same seed, so
 // IDs can be shared. The generator gets the ID itself as its seed string. Bump SEED_ID_VERSION when the bit layout
 // changes. v2: 36-bit random part; v3: + dungeon room shuffle; v4: 25 characters, + shopsanity, pets, Trendy Game
-// prizes (v2 / v3 IDs had 20: they still load, the options they don't hold are off).
+// prizes (v2 / v3 IDs had 20: they still load, the options they don't hold are off). The logic, skip-story and
+// entrance tier 3 fields stay in the layout but are fixed now (basic, on, tier 2 includes the connector caves).
 enum { SEED_ID_VERSION = 4, SEED_ID_BITS = 125, SEED_ID_BITS_V3 = 100, SEED_ID_FLAGS_V3 = 23 };
 static const char kB32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -212,6 +222,11 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
         t.entrances > 3 || t.start_rupees > 999)
         return "not a valid seed ID";
     t.ohko = false;
+    // retired choices (older IDs still load): logic is always basic, story scenes always skipped, and tier 3
+    // (+ connector caves) is part of tier 2 now
+    t.logic = 0;
+    t.skip_story = true;
+    if (t.entrances > 2) t.entrances = 2;
     o = t;
     return "";
 }
@@ -253,7 +268,6 @@ static void start_generation(void) {
     mkdir("rando", 0755);
     mkdir(dir.c_str(), 0755);
     if (FILE *idf = fopen((dir + "/seed_id.txt").c_str(), "w")) { fprintf(idf, "%s\n", id); fclose(idf); }
-    static const char *logic[] = {"basic", "advanced", "glitched", "hell", "none"};
     static const char *ditems[] = {"none", "stone-beak", "mc", "mcb"};
     static const char *traps[] = {"none", "few", "several", "many", "trapsanity"};
     static const char *shell_excl[] = {
@@ -263,9 +277,9 @@ static void start_generation(void) {
         "\"50-seashell-reward\"", ""};
     std::string req = dir + "/request.json";
     FILE *f = fopen(req.c_str(), "w");
-    if (!f) { g_gen_status = "Cannot write " + req; g_gen_failed = true; return; }
-    fprintf(f, "{\"seed\": \"%s\", \"logic\": \"%s\", \"dungeon-items\": \"%s\", \"traps\": \"%s\",\n", id,
-            logic[g_opts.logic], ditems[g_opts.dungeon_items], traps[g_opts.traps]);
+    if (!f) { g_gen_status = "Cannot write " + req; g_gen_failed = g_gen_done = true; return; }
+    fprintf(f, "{\"seed\": \"%s\", \"logic\": \"basic\", \"dungeon-items\": \"%s\", \"traps\": \"%s\",\n", id,
+            ditems[g_opts.dungeon_items], traps[g_opts.traps]);
     fprintf(f, " \"shuffle-instruments\": %s, \"shuffle-dungeons\": %s, \"randomize-enemies\": %s, \"randomize-music\": %s,\n",
             g_opts.shuffle_instruments ? "true" : "false", g_opts.shuffle_dungeons ? "true" : "false",
             g_opts.randomize_enemies ? "true" : "false", g_opts.randomize_music ? "true" : "false");
@@ -282,8 +296,7 @@ static void start_generation(void) {
             g_opts.bomb_bag ? "false" : "true", g_opts.powder_bag ? "true" : "false");
     fprintf(f, " \"randomize-environments\": %s, \"bad-pets\": %s,\n", g_opts.environments ? "true" : "false",
             g_opts.pets_in_dungeons ? "true" : "false");
-    fprintf(f, " \"skip-story-events\": %s, \"tunic-color\": \"%s\", \"enemy-minibosses\": %s,\n",
-            g_opts.skip_story ? "true" : "false", kTunics[g_opts.tunic],
+    fprintf(f, " \"skip-story-events\": true, \"tunic-color\": \"%s\", \"enemy-minibosses\": %s,\n", kTunics[g_opts.tunic],
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
@@ -308,7 +321,7 @@ static void start_generation(void) {
     g_gen_pid = plat_spawn(argv, log.c_str(), false);
     int rc = !g_gen_pid;
     g_gen_seed = g_opts.seed;
-    g_gen_failed = rc != 0;
+    g_gen_failed = g_gen_done = rc != 0;
     g_gen_status = rc ? "Could not start the generator (is the Python venv set up?)" : "Starting...";
     g_gen_frac = 0;
     g_gen_start = ImGui::GetTime();
@@ -330,6 +343,7 @@ static void poll_generation(void) {
     if (st >= 0) {
         g_gen_pid = 0;
         g_gen_failed = st != 0;
+        g_gen_done = true;
         g_gen_status = g_gen_failed ? "Generation failed: see rando/" + g_gen_seed + "/generate.log" : "Seed \"" + g_gen_seed + "\" ready.";
         g_scanned = false;
         g_opts.seed[0] = 0;
@@ -367,6 +381,72 @@ static void section(const char *t) {
     ImGui::Separator();
 }
 
+// Generation overlay over the greyed-out panel: progress while the generator runs, then Play Now / Close (or the
+// error + Close). Play Now is focused; B / Esc = Close.
+static void gen_overlay(float scale) {
+    if (!g_gen_pid && !g_gen_done) return;
+    if (!ImGui::IsPopupOpen("##gen")) ImGui::OpenPopup("##gen");
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(760 * scale, 0));
+    if (!ImGui::BeginPopupModal("##gen", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                                                   ImGuiWindowFlags_NoSavedSettings))
+        return;
+    // test hook: LARECOMP_RANDO_GEN_SHOTS=<prefix> saves <prefix>_gen.png (past 30%) and <prefix>_done.png, then
+    // presses Play Now (with LARECOMP_RANDO_GEN_TEST)
+    static const char *shots = getenv("LARECOMP_RANDO_GEN_SHOTS");
+    static int shot_state, done_frames;
+    bool test_play = false;
+    if (shots) {
+        if (shot_state == 0 && g_gen_pid && g_gen_frac >= 0.3f) {
+            snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s_gen.png", shots);
+            shot_state = 1;
+        }
+        if (g_gen_done && ++done_frames == 30) snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s_done.png", shots);
+        test_play = done_frames == 60;
+    }
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", g_gen_seed.c_str());
+    ImGui::Separator();
+    ImGui::Spacing();
+    if (g_gen_pid) {  // progress bar with the current step and elapsed time
+        char over[32];
+        int secs = (int)(ImGui::GetTime() - g_gen_start);
+        snprintf(over, sizeof over, "%d:%02d", secs / 60, secs % 60);
+        ImGui::TextUnformatted(g_gen_status.c_str());
+        ImGui::ProgressBar(g_gen_frac > 0.005f ? g_gen_frac : -0.3f * (float)ImGui::GetTime(), ImVec2(-1, 0), over);
+    } else {
+        float bw = 230 * scale;
+        bool close = false;
+        if (g_gen_failed) {
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+            if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
+            ImGui::SetItemDefaultFocus();
+        } else {
+            ImGui::TextUnformatted("Seed ready.");
+            ImGui::ProgressBar(1, ImVec2(-1, 0), "Done");
+            ImGui::Spacing();
+            if (ImGui::Button("Play Now", ImVec2(bw, 0)) || test_play) {  // (switches in place: the game reboots on the new seed)
+                g_gen_done = false;
+                g_gen_status.clear();
+                ImGui::CloseCurrentPopup();
+                rando_select(g_gen_seed.c_str());
+                rt_request_reboot(RT_REBOOT_GAME);
+            }
+            ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+            if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
+        }
+        if (close || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            g_gen_done = false;
+            g_gen_status.clear();
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::EndPopup();
+}
+
 bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.mm
 extern "C" void pets_ui_draw(void);  // pets_ui.mm: call a found pet
 static std::string g_spoiler_seed;  // seed whose spoiler page is open
@@ -380,9 +460,15 @@ extern "C" void rando_tab_draw(float scale) {
         if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
         return;
     }
-    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1: generate a seed as soon as the tab is shown (test hook)
-    if (!test_once && getenv("LARECOMP_RANDO_GEN_TEST")) { test_once = true; strlcpy(g_opts.seed, "MenuTest", sizeof g_opts.seed); start_generation(); }
+    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1|<name>: generate a seed as soon as the tab is shown (test hook)
+    if (const char *t = getenv("LARECOMP_RANDO_GEN_TEST"); !test_once && t) {
+        test_once = true;
+        strlcpy(g_opts.seed, strlen(t) > 1 ? t : "MenuTest", sizeof g_opts.seed);
+        start_generation();
+    }
     poll_generation();
+    bool busy = g_gen_pid || g_gen_done;  // the generation overlay is up: the whole panel is greyed out under it
+    ImGui::BeginDisabled(busy);
     g_col = ImGui::GetContentRegionAvail().x * 0.4f;
     const char *active = rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
 
@@ -406,18 +492,6 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::SameLine();
     ImGui::Checkbox("Check tracker on the Map screen", &g_settings.tracker);
     if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
-    {  // room shuffle doorway letters on the dungeon map (runtime/ui/chaos_overlay.mm)
-        static const char *letters[] = {"Off", "As you explore", "As you explore, all with the Map"};
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Dungeon map doorway letters");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(360 * scale);
-        if (ImGui::Combo("##chaos_letters", &g_settings.chaos_letters, letters, 3)) settings_save();
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Chaos room shuffle: matching letters (A-A, B-B...) on the dungeon map show which doorways\n"
-                              "connect. As you explore: a pair appears once you've walked through either end. All with the\n"
-                              "Map: every pair of the dungeon once you have its Map.");
-    }
 
     section("Seeds");
     if (g_seeds.empty()) ImGui::TextDisabled("No seeds yet: make one below.");
@@ -506,7 +580,6 @@ extern "C" void rando_tab_draw(float scale) {
     }
 
     section("New seed");
-    static const char *logic[] = {"Basic (no tricks)", "Advanced (skews, bomb arrows)", "Glitched", "Hell", "None (may be unbeatable)"};
     static const char *ditems[] = {"Shuffled", "Start with stone beaks", "Start with maps + compasses", "Start with maps, compasses, beaks"};
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
@@ -522,9 +595,6 @@ extern "C" void rando_tab_draw(float scale) {
     bool editing = ImGui::InputTextWithHint("##seedid", "paste a shared seed ID", idbuf, sizeof idbuf,
                                             ImGuiInputTextFlags_CharsUppercase);
     bool active_id = ImGui::IsItemActive();
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Share this ID: with the same LAS Recomp version it makes exactly the same seed (items, options).\n"
-                          "Paste someone's ID here to load their options, then Generate. The name is only your label.");
     if (editing) {
         GenOpts t = g_opts;
         id_msg = seed_id_decode(idbuf, t);
@@ -540,13 +610,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::Button("Copy##id", ImVec2(bw, 0))) ImGui::SetClipboardText(idbuf);
     ImGui::SameLine();
     if (ImGui::Button("New ID", ImVec2(bw, 0))) { g_opts.rng = new_rng(); id_msg.clear(); }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Same options, a different random seed.");
     if (!id_msg.empty()) {
         ImGui::SetCursorPosX(g_col);
         if (id_msg.rfind("Loaded", 0)) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", id_msg.c_str());
         else ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s", id_msg.c_str());
     }
-    combo("Logic", &g_opts.logic, logic, 5);
     combo("Dungeon items", &g_opts.dungeon_items, ditems, 4);
     static const char *ksn[] = {"Off (in their own dungeon)", "Small keys anywhere", "Small + Nightmare keys anywhere",
                                 "All dungeon items anywhere"};
@@ -564,6 +632,19 @@ extern "C" void rando_tab_draw(float scale) {
             {"Boss cutscenes", &g_opts.boss_cutscenes}, {"Spoiler log", &g_opts.spoiler},
         };
         for (auto &x : o) { ImGui::TableNextColumn(); ImGui::Checkbox(x.n, x.v); }
+        // location groups: off = those spots give junk
+        struct { const char *n; bool *v; const char *tip; } inc[] = {
+            {"Fishing prizes", &g_opts.inc_fishing, "Prizes of the fishing pond"},
+            {"Rapids race prizes", &g_opts.inc_rapids, "Prizes of the Rapids Ride race"},
+            {"Dampe's rewards", &g_opts.inc_dampe, "Chamber Dungeon challenge rewards"},
+            {"Trade quest gifts", &g_opts.inc_trade, "Gifts from the trade quest NPCs"},
+            {"Blue rupees", &g_opts.inc_blue, "Every hidden blue rupee holds an item"},
+        };
+        for (auto &x : inc) {
+            ImGui::TableNextColumn();
+            ImGui::Checkbox(x.n, x.v);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", x.tip);
+        }
         ImGui::EndTable();
     }
     // "Mini-bosses among overworld enemies" (enemy-minibosses): wired in LAS enemies.py, hidden until a mini-boss
@@ -583,30 +664,6 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::Checkbox("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
-    ImGui::Checkbox("Skip story scenes", &g_opts.skip_story);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("No Owl talks and no kids running up about BowWow; their flags are set as if you'd seen them.");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(220);
-    ImGui::Combo("Tunic colour", &g_opts.tunic, kTunics, IM_ARRAYSIZE(kTunics));
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Recolours Link's green tunic and cap (cosmetic). The red and blue tunics keep their colours.");
-    ImGui::TextDisabled("Extra checks (off = those spots give junk):");
-    if (ImGui::BeginTable("##incl", 3)) {
-        struct { const char *n; bool *v; const char *tip; } o[] = {
-            {"Fishing prizes", &g_opts.inc_fishing, "Prizes of the fishing pond"},
-            {"Rapids race prizes", &g_opts.inc_rapids, "Prizes of the Rapids Ride race"},
-            {"Dampe's rewards", &g_opts.inc_dampe, "Chamber Dungeon challenge rewards"},
-            {"Trade quest gifts", &g_opts.inc_trade, "Gifts from the trade quest NPCs"},
-            {"Blue rupees", &g_opts.inc_blue, "Every hidden blue rupee holds an item"},
-        };
-        for (auto &x : o) {
-            ImGui::TableNextColumn();
-            ImGui::Checkbox(x.n, x.v);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", x.tip);
-        }
-        ImGui::EndTable();
-    }
     label("Starting rupees");
     ImGui::SliderInt("##rup", &g_opts.start_rupees, 0, 999, "%d", ImGuiSliderFlags_AlwaysClamp);
 
@@ -651,14 +708,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The Hookshot latches onto any wall or object it hits (walls, plants, chests, statues...), not only\n"
                           "hookshot targets, and pulls Link to it. The logic counts the gaps this crosses (checked in game).");
-    static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves", "+ connector caves"};
-    combo("Entrance randomizer", &g_opts.entrances, ent, 4);
+    static const char *ent[] = {"Off", "Dungeon entrances", "Dungeons + houses & caves"};
+    combo("Entrance randomizer", &g_opts.entrances, ent, 3);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Houses & caves: the 43 single-entrance interiors are shuffled among themselves (with logic).\n"
-                          "Marin & Tarin's house, water entrances and caves only reached through other caves stay vanilla.\n"
-                          "Connector caves: also the 12 caves / houses with two or three doors linking two areas (Goponga,\n"
-                          "graveyard, Kanalet tunnel, river crossing, Tal Tal caves, Face Shrine cave, Richard's villa...):\n"
-                          "every cave door leads to another cave door, and the logic follows where each cave comes out.");
+        ImGui::SetTooltip("Houses & caves: single-entrance interiors and connector caves (two or three doors) are shuffled,\n"
+                          "with logic. Marin & Tarin's house and water entrances stay vanilla.");
     ImGui::BeginDisabled(g_opts.entrances < 2);
     ImGui::Checkbox("Decoupled entrances", &g_opts.decoupled);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Leaving a house puts you outside a different door than the one you came in by.");
@@ -675,11 +729,9 @@ extern "C" void rando_tab_draw(float scale) {
         ImGui::SetTooltip("The Ghost is an item (shown on the Items page; he doesn't take the Rooster's or Marin's place):\n"
                           "found, walk to his grave for its check (the Owl). He no longer appears by himself after the Surf Harp.");
     ImGui::SameLine();
-    ImGui::Checkbox("Marin (desert closed)", &g_opts.pet_marin);
+    ImGui::Checkbox("Marin", &g_opts.pet_marin);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The Walrus sleeps in front of Yarna Desert until Marin sings to him: Marin is an item, and the\n"
-                          "desert needs her. Off: the desert is open from the start and Marin isn't in the pool.\n"
-                          "Found pets can be called back any time from this tab while playing (one follows you at a time).");
+        ImGui::SetTooltip("Desert closed until you find Marin companion, no Marin companion in pool if off");
     static const char *rshuf[] = {"Off", "Coherent", "Chaos", "Madness"};
     combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 4);
     if (ImGui::IsItemHovered())
@@ -694,30 +746,22 @@ extern "C" void rando_tab_draw(float scale) {
                           "The item logic follows the new layout (keys, locks, boss doors, one-way doors). Without keysanity\n"
                           "a dungeon's keys are inside that dungeon. Experimental: what a room needs to cross it (pits, water\n"
                           "inside the room) and what opens each shutter are approximated.");
+    {  // room shuffle doorway letters on the dungeon map (runtime/ui/chaos_overlay.mm): a player setting
+        static const char *letters[] = {"Off", "As you explore", "As you explore, all with the Map"};
+        int v = g_settings.chaos_letters;
+        combo("Dungeon map doorway letters", &v, letters, 3, g_opts.room_shuffle != 0);
+        if (v != g_settings.chaos_letters) { g_settings.chaos_letters = v; settings_save(); }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Chaos / Madness: matching letters (A-A, B-B...) show which doorways connect. As you explore:\n"
+                              "a pair appears once you've been through either end. With the Map: every pair of the dungeon.");
+    }
     ImGui::Spacing();
-    ImGui::TextDisabled("Experimental:");
-    ImGui::BeginDisabled(!g_opts.randomize_enemies);
-    ImGui::Checkbox("Mini-bosses among overworld enemies", &g_opts.enemy_minibosses);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Needs Randomize enemies. Some overworld enemies become mini-bosses (Hinox, Cue Ball, ...).\n"
-                          "Known issue: they appear but don't fight yet (they wait for their dungeon room's start event).");
-    ImGui::EndDisabled();
-    ImGui::Spacing();
-    ImGui::TextDisabled("In development: grass holds items.");
-    ImGui::Spacing();
-    ImGui::BeginDisabled(g_gen_pid != 0);
-    if (ImGui::Button(g_gen_pid ? "Generating..." : "Generate seed", ImVec2(320 * scale, 0))) start_generation();
-    ImGui::EndDisabled();
-    if (g_gen_pid) {  // progress bar with the current step and elapsed time
-        char over[160];
-        int secs = (int)(ImGui::GetTime() - g_gen_start);
-        snprintf(over, sizeof over, "%s  %d:%02d", g_gen_status.c_str(), secs / 60, secs % 60);
-        ImGui::SameLine();
-        ImGui::ProgressBar(g_gen_frac > 0.005f ? g_gen_frac : -0.3f * (float)ImGui::GetTime(), ImVec2(-1, 0), over);
-    } else if (!g_gen_status.empty()) {
+    if (ImGui::Button("Generate seed", ImVec2(320 * scale, 0))) start_generation();
+    if (!g_gen_status.empty() && !busy) {  // (a rename that failed)
         ImGui::SameLine();
         ImGui::AlignTextToFramePadding();
-        if (g_gen_failed) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
-        else ImGui::TextUnformatted(g_gen_status.c_str());
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
     }
+    ImGui::EndDisabled();
+    gen_overlay(scale);
 }
