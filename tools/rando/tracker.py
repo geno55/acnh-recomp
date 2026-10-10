@@ -121,11 +121,11 @@ def build(seed_dir, romfs):
         if name.startswith('pot-') or re.match(r'D\d-pot-', name) or name.startswith('bush-'):
             continue  # pots and bushes come from pots.tsv / bushes.tsv below
         m = re.match(r'dig-(\d\d)([A-P])-(\d\d)$', name)
-        if m:  # digsanity: one badge per screen; dug = flag 4096 + tile id (tools/rando/digs.py)
+        if m:  # digsanity: one badge per screen; collected = flag 24576 + tile id (tools/rando/digs.py)
             row, col, tile = int(m.group(1)), ord(m.group(2)) - 65, int(m.group(3))
             cell = cell_of_field(f'Field_{m.group(1)}{m.group(2)}')
             checks.append({'n': name, 'x': cell[0], 'y': cell[1], 'g': group(f'dig-{row}-{col}', 'Digs', cell),
-                           'flag': 4096 + ((row - 1) * 16 + col) * 80 + tile})
+                           'flag': 24576 + ((row - 1) * 16 + col) * 80 + tile})
             continue
         if level in DUNGEONS or (re.match(r'D(\d)-', name) and not room):
             dk = DUNGEONS.get(level) or name[:2]
@@ -202,7 +202,7 @@ def build(seed_dir, romfs):
             if a:
                 names[(round(a.posX, 2), round(a.posZ, 2))] = bushes_mod.location_name(b)
         for line in open(tsv):
-            lv, x, y, z, fl = line.split()
+            lv, x, y, z, fl = line.split()[:5]  # (bushes.tsv rows may carry more: pots.write_tsv)
             n = names.get((round(float(x), 2), round(float(z), 2)))
             cell = n and cell_of_field('Field_' + n.split('-')[1])
             if n in logic and cell:

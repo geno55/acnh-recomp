@@ -52,7 +52,11 @@ def _pit_tiles(room):
     return {(i % cols, i // cols) for i in range(rows * cols) if raw[0x10 * i] & 1}, origin
 
 
-def scan(romfs, leb, pits=False):
+# bushes LAS's open-mabe setting removes (third_party/LAS-Randomizer mod_generator.openMabe): no check there
+OPEN_MABE_REMOVED = {0x624A97005CD29205, 0x62000A005D15AC9E, 0x620015005D15AC9E}
+
+
+def scan(romfs, leb, pits=False, open_mabe=False):
     """Every bush on the Field: list of dicts with level, room, key, n (index among the room's bushes).
     Bushes over a hole are left out (`pits`: kept) and stay vanilla bushes - a revealed item fell in: the 70 over a pit
     tile (Pothole Field Field_12H-14H, Toronbo 14E; each also has an ObjFieldTip<area> hole model at the bush) and the
@@ -74,7 +78,8 @@ def scan(romfs, leb, pits=False):
                 continue
             pit = (int((a.posX - ox) // 1.5), int((a.posZ - oz) // 1.5)) in holes or \
                 any(abs(x - a.posX) < 0.1 and abs(z - a.posZ) < 0.1 for x, z in tips)
-            if len(out) < limit and (not only or room_name in only.split(',')) and (pits or not pit):
+            gone = open_mabe and a.key in OPEN_MABE_REMOVED
+            if len(out) < limit and (not only or room_name in only.split(',')) and (pits or not pit) and not gone:
                 out.append({'level': 'Field', 'room': room_name, 'key': a.key, 'n': n})
             n += 1
     return out
@@ -157,10 +162,11 @@ def add_to_logic(bushes, logic_defs, item_defs, traps='none', rng=None):
 
 def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
     lines = pots.apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, flag_prefix='LARBush',
-                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B, hide_scale=HIDE_SCALE)
+                       flag_base=FLAG_BASE, flag_limit=FLAG_LIMIT, key_tag=0x7B, hide_scale=HIDE_SCALE,
+                       cut_flag=True)
     open(os.path.join(out_dir, 'flags_ext'), 'w').write('bushsanity: event flags 2048+ (runtime/hle/flags_ext.c)\n')
     return lines
 
 
 def write_tsv(seed_dir, leb):
-    return pots.write_tsv(seed_dir, leb, flag_prefix='LARBush', name='bushes.tsv')
+    return pots.write_tsv(seed_dir, leb, flag_prefix='LARBush', name='bushes.tsv', hide_scale=HIDE_SCALE)

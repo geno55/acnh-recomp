@@ -1,7 +1,8 @@
 // More event flags. The game's GlobalFlags bitfield holds 2048 flags (256 bytes at save +0x5DC0); vanilla uses
 // <= 1118, LAS ~100, potsanity ~415 - bushsanity's ~900 don't fit. The flag object reaches the bitfield through a
 // pointer (main+0x1CC1388) and a byte capacity (main+0x1CC1390, bounds-checked by every flag get / set): we point it
-// at a 3072-byte buffer of ours (24576 flags; digsanity keeps one per overworld tile from 4096 up, runtime/hle/digs.c).
+// at a 5632-byte buffer of ours (45056 flags; digsanity keeps two per overworld tile from 4096 up: dug, item collected -
+// runtime/hle/digs.c).
 //   bits 0-2047     mirrored into the save every frame both ways (whatever writes the save copy directly - loads,
 //                   the save editor, LARECOMP_SET_FLAGS - is taken over; the game saves the save copy as before)
 //   bits 2048+      kept in a sidecar file next to each save slot (savedataN.bin -> savedataN.bin.flagsx; older
@@ -22,7 +23,7 @@
 #define LIVE_SAVE (MAIN_BASE + 0x1CBB220)
 #define LIVE_FLAGS (LIVE_SAVE + 0x5DC0)
 #define BODY_CRC 0x5EC4
-#define NFLAGS 24576
+#define NFLAGS 45056
 #define BUF (NFLAGS / 8)
 #define EXT (BUF - 256)  // sidecar bytes
 
