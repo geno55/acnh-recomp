@@ -156,6 +156,11 @@ RT_ON_RESET(escape_reset) { on = -1; }  // (seed switch: the next seed may diffe
 // PlayerStatus +0xa2 / +0xa3); the model only while Tarin hands it over (Marin & Tarin's house, not owned yet - the
 // get sequence runs before AddItem). Tint (translate.c): rgb = mix(rgb, t0.rgb * lum^t1.w + t1.rgb * lum, t0.w).
 void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]) {
+    if (kind == 3) {  // (the fairy's model map: boss / mini-boss souls, runtime/hle/souls.c)
+        extern void souls_fairy_tint(const float *m, uint32_t m_size, float tint[8]);
+        souls_fairy_tint(ui, ui_size, tint);
+        return;
+    }
     if (!active()) return;
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     if (!ps) return;

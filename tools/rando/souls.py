@@ -15,7 +15,7 @@ appear, so it can't be beaten and what it guards can't be had:
             after the fight) are made always there, or Link would be stuck on the empty roof.
   walls     mini-boss rooms (any doorway can be the way in): souls.c keeps Link inside, off every wall but the one
             toward the cell he came from, until the defeat flag is set or the soul is found (invisible wall).
-  item      an Items.gsheet row per soul (the Secret Medicine's model; gettingFlag = the soul flag), an Item.bfevfl entry
+  item      an Items.gsheet row per soul (the Secret Medicine's row with the fairy's model, drawn red; gettingFlag = flag), an Item.bfevfl entry
             showing the get message, System.msbt "You got Moldorm's Soul!" (English in every language folder). The
             item-get chains set the flag themselves (LAS item_get / chests, patched for 'BossSoul' / 'MinibossSoul').
   logic     the LAS kill condition (kill-moldorm, kill-hinox...) needs the soul, so every check that names it does too,
@@ -61,7 +61,8 @@ DUNGEON_LEVELS = {'Lv10ClothesDungeon': 0, 'Lv01TailCave': 1, 'Lv02BottleGrotto'
 ITEM_IDS = {'boss': list(range(82, 91)), 'mini': list(range(91, 100)) + [103, 107]}
 FAIRY_QUEEN = 0x6D0024005CF48AC2  # the Color Dungeon's Great Fairy (Lv10ClothesDungeon_04C): its tunics are the reward
 JUNK = ('rupee-50', 'rupee-20', 'rupee-100', 'rupee-300')  # pool junk the souls replace
-MODEL = {'model-path': 'ItemSecretMedicine.bfres', 'model-name': 'SecretMedicine', 'npc-key': 'ItemSecretMedicine'}
+# the soul's look: the fairy, drawn evil red by the runtime while a soul is received (souls.c souls_fairy_tint)
+MODEL = {'model-path': 'ItemFairy.bfres', 'model-name': 'Fairy', 'npc-key': 'ItemFairy'}
 
 
 def item_key(name, kind='boss'):
@@ -340,3 +341,32 @@ def apply(out_dir, romfs, leb, oead_tools, event_tools, msbt, kinds, cat):
     return (f'{len(all_souls)} souls (flags {min(flags.values())}-{max(flags.values())}), {len(rewards)} rewards held '
             f'back, onward doors shut until the boss is beaten: {", ".join(f"{r[-3:]} {d}" for r, d in doors)}; '
             f'{len(walls)} rooms walled while their enemy is missing, {n_msg} message files')
+
+
+def write_spots(out_dir, leb, placements):
+    """'spot' lines in souls.tsv: where a soul's fairy model stands in the world (standing items, the hidden items of
+    pots / bushes: LAS-style item actors whose parameters are model file, model, location...). The runtime draws
+    fairies there red (real fairies elsewhere stay pink). Run last: room shuffle moves rooms (and their actors)."""
+    bosses = {las_name(b) for _, b, _, _, _ in BOSSES}
+    spots = []
+    for f in sorted(glob.glob(os.path.join(out_dir, 'romfs', 'region_common', 'level', '*', '*.leb'))):
+        level = os.path.basename(os.path.dirname(f))
+        with open(f, 'rb') as fh:
+            data = fh.read()
+        if MODEL['model-path'].encode() not in data:
+            continue
+        for a in leb.Room(data).actors:
+            p = a.parameters
+            if len(p) > 2 and p[0] == MODEL['model-path'].encode() and isinstance(p[2], bytes):
+                item = placements.get(p[2].decode(errors='ignore'), '')
+                if str(item).startswith('soul-'):
+                    spots.append(f'spot\t{level}\t{a.posX:.2f}\t{a.posY:.2f}\t{a.posZ:.2f}\t{0 if item in bosses else 1}\n')
+    # the Tool Shop's shelf / the Trendy Game's floor show their goods as models of their own (no real fairy there):
+    # every fairy in that level is drawn red, boss red when any of its souls is a boss's
+    for level, prefix in (('Shop', 'shop-slot'), ('CraneGame', 'trendy-prize')):
+        here = [v for k, v in placements.items() if str(k).startswith(prefix) and str(v).startswith('soul-')]
+        if here:
+            spots.append(f'zone\t{level}\t{0 if any(v in bosses for v in here) else 1}\n')
+    with open(os.path.join(out_dir, 'souls.tsv'), 'a') as fh:
+        fh.writelines(spots)
+    return len(spots)

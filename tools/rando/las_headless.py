@@ -567,6 +567,8 @@ def main():
     import keysanity_text  # (after every flow edit) a dungeon item outside its dungeon names it in the get message
     keysanity_text.apply(out_dir, romfs, result['placements'])
 
+    if soul_kinds:  # where the souls' fairy models stand (after the rooms moved): drawn red there (souls.c)
+        print('soul spots:', souls_mod.write_spots(out_dir, leb, result['placements']), flush=True)
     import seed_tables
     from RandomizerCore.Tools import oead_tools as _ot
     if dig_locs:

@@ -284,18 +284,18 @@ def _res_name(gen, a):
 PATCHES[RES_NAME_SITE] = _res_name
 
 
-# Field mini-bosses (enemy randomizer): a mini-boss starts its fight when the dungeon's zone-change signal reaches
-# it (zone manager -> f_7000029520 -> actor vfunc +0x100), which never happens in the Field. f_70003bf2b0 (a type
-# check run on these actors every frame) tells the runtime which actors exist (runtime/hle/miniboss.c), and the
-# runtime sends the start itself.
-MB_SEEN_SITE = 0x70003bf2b0
+# Field mini-bosses (enemy randomizer, runtime/hle/miniboss.c): a mini-boss waits in its idle state until its dungeon
+# room's start event runs, which never happens in the Field. f_70000ec310 (an actor component's per-frame update)
+# asks its actor a type question through vtable +0x68 every frame: the runtime sees each actor there, picks out the
+# mini-boss classes by vtable and moves them into their fight state itself.
+MB_SEEN_SITE = 0x70000ec354
 
 
 def _mb_seen(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xf81e0ff3, hex(w)  # str x19, [sp, #-32]!
-    return ('{ extern void rt_mb_seen(Cpu *); rt_mb_seen(c); uint64_t ea = c->sp - 32; ST64(ea, c->x[19]); c->sp = ea; }'
-            f'  /* {a:#x}: str x19, [sp, #-32]! (mini-boss actor seen) */')
+    assert w == 0xf94002a8, hex(w)  # ldr x8, [x21]
+    return ('{ extern void rt_mb_seen(uint64_t); rt_mb_seen(c->x[21]); c->x[8] = LD64(c->x[21]); }'
+            f'  /* {a:#x}: ldr x8, [x21] (actor seen: field mini-bosses) */')
 
 
 PATCHES[MB_SEEN_SITE] = _mb_seen
@@ -415,3 +415,35 @@ def _snap_dir(gen, a):
 
 
 PATCHES[SNAP_DIR_SITE] = _snap_dir
+
+
+# No Guardian Acorns / Pieces of Power (randomizer no-buff-drops, runtime/hle/qol.c): the drop roll main+0x89b960 reads
+# its ItemDrop row's mAllowBuffReplace (+0x38); set, the kill counters may turn the drop into a Piece of Power / Guardian
+# Acorn. Read as false for such seeds.
+BUFF_REPLACE_SITE = 0x700089ba34
+
+
+def _buff_replace(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3940e308, hex(w)  # ldrb w8, [x24, #0x38]
+    return ('{ extern int rt_buff_replace(int); c->x[8] = (uint32_t)rt_buff_replace(LD8(c->x[24] + 0x38)); }'
+            f'  /* {a:#x}: ldrb w8, [x24, #0x38] (mAllowBuffReplace: no-buff-drops) */')
+
+
+PATCHES[BUFF_REPLACE_SITE] = _buff_replace
+
+
+# Blur removal (runtime/hle/qol.c, setting blur_removal): main+0x1071220 sets up the post-process's tilt-shift object
+# (x0) once, looking its shader parameters up by name; qol.c keeps the object and takes the parameter handle out / puts
+# it back live.
+TILT_INIT_SITE = 0x7001071220
+
+
+def _tilt_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10243ff, hex(w)  # sub sp, sp, #0x90
+    return ('{ extern void rt_tilt_obj(uint64_t); rt_tilt_obj(c->x[0]); c->sp -= 0x90; }'
+            f'  /* {a:#x}: sub sp, sp, #0x90 (tilt-shift set-up: blur removal) */')
+
+
+PATCHES[TILT_INIT_SITE] = _tilt_init

@@ -2000,7 +2000,8 @@ static void draw(CmdRec *r, bool indexed) {
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
         if (draw_bottle) {  // the gold Escape Bottle (runtime/hle/escape.c): its item icon / held-up model
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
-            escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);
+            int u = draw_bottle == 3 ? 3 : 0;  // (the fairy model: its bone matrices, for where it stands - souls.c)
+            escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][u].addr, (uint32_t)st.ubuf[0][u].size, tint);
         }
         if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
@@ -2561,9 +2562,8 @@ static void exec_list(uint64_t handle, int depth) {
                     seen[nseen++] = cs;
                     char path[64];
                     snprintf(path, sizeof path, "build/cs_%d.bin", nseen - 1);
-                    FILE *f = fopen(path, "wb");
-                    fwrite((void *)(uintptr_t)cs, 1, 0x4000, f);
-                    fclose(f);
+                    FILE *f = fopen(path, "wb");  // (no build/ outside a source checkout: the app's data root)
+                    if (f) fwrite((void *)(uintptr_t)cs, 1, 0x4000, f), fclose(f);
                     LOG("[dispatch] new compute program %d: cs %llx groups %llu %llu %llu images:", nseen - 1, cs, r->x[0], r->x[1], r->x[2]);
                     for (int i = 0; i < 8; i++) if (st.img[5][i]) LOG(" %d=%llx", i, st.img[5][i]);
                     LOG(" tex:");
@@ -2578,11 +2578,9 @@ static void exec_list(uint64_t handle, int depth) {
             if (g_debug_frame && st.program) {
                 LOG("[dispatch] %llu %llu %llu prog %p cs %llx\n", r->x[0], r->x[1], r->x[2], st.program, st.program->stages[5].code_addr);
                 FILE *f = fopen("build/cs_code.bin", "wb");
-                fwrite((void *)(uintptr_t)st.program->stages[5].code_addr, 1, 0x4000, f);
-                fclose(f);
+                if (f) fwrite((void *)(uintptr_t)st.program->stages[5].code_addr, 1, 0x4000, f), fclose(f);
                 f = fopen("build/cs_ctrl.bin", "wb");
-                fwrite(st.program->stages[5].control, 1, 0x900, f);
-                fclose(f);
+                if (f) fwrite(st.program->stages[5].control, 1, 0x900, f), fclose(f);
                 LOG("[dispatch] images:");
                 for (int i = 0; i < 8; i++) if (st.img[5][i]) LOG(" %d=%llx", i, st.img[5][i]);
                 LOG(" tex:");

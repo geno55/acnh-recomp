@@ -36,7 +36,7 @@
 #include "../../third_party/imgui/imstb_truetype.h"
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
-enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL,
+enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_FAIRY_MODEL,
        R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_HEART };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
@@ -85,6 +85,8 @@ static int role_of(const char *name) {
         // the empty bottle's item icon and its 3D model's colour map (ItemBottle.bfres): identified only, never edited
         // (the gold Escape Bottle's draws are tinted: runtime/hle/escape.c)
         {"ItemBottle_00^w", R_BOTTLE}, {"MI_bottle_alb", R_BOTTLE_MODEL},
+        // the fairy's colour map (ItemFairy.bfres): boss / mini-boss souls are a fairy drawn evil red (runtime/hle/souls.c)
+        {"MI_fairy_alb", R_FAIRY_MODEL},
         // cosmetics: Link's green tunic (recoloured on upload; the red tunic's map is only its mask, never matched)
         // and the hearts of Cm_HeartGauge (HUD, file select): Hp_00 = an empty heart (its own draw); each quarter of
         // a full one is one draw of Hp_01 (fill) + Hp_02 (frame, coloured by the layout's material) through the
@@ -162,8 +164,9 @@ static void load_refs(void) {
     scan_sarc("regionEU/common/ui/GameRegionCommon.arc");
     size_t len;
     uint8_t *f;
-    static const char *const models[] = {"region_common/actor/ItemBottle.bfres", "region_common/actor/Playerlink.bfres"};
-    for (int m = 0; m < 2; m++)
+    static const char *const models[] = {"region_common/actor/ItemBottle.bfres", "region_common/actor/Playerlink.bfres",
+                                         "region_common/actor/ItemFairy.bfres"};
+    for (int m = 0; m < 3; m++)
         if ((f = read_all(models[m], &len))) {  // (their textures: one BNTX inside)
             for (size_t i = 0; i + 8 < len; i += 4)
                 if (!memcmp(f + i, "BNTX\0\0\0\0", 8)) { scan_bntx(f + i, len - i, false); break; }
@@ -181,7 +184,7 @@ static void load_refs(void) {
 
 int texpatch_bottle_kind(int id) {
     if (id < 0 || id >= g_nrefs) return 0;
-    return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : 0;
+    return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : g_refs[id].role == R_FAIRY_MODEL ? 3 : 0;
 }
 
 int texpatch_heart_kind(int id) {
@@ -237,7 +240,7 @@ int texpatch_identify(const NvnTexture *t) {
         const Ref *r = &g_refs[i];
         // (only the bottle model's and the tunic's maps have mip levels: compared in full, all levels)
         if (r->w != t->width || r->h != t->height || r->role == R_TUNIC_RED ||
-            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_TUNIC)) continue;
+            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_TUNIC)) continue;
         uint64_t n = r->size < total ? r->size : total;
         if (!memcmp((const void *)(uintptr_t)t->addr, r->data, n)) {
             static int nlog;
@@ -999,7 +1002,8 @@ void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h
     const Ref *r = &g_refs[id];
     if (r->role == R_TUNIC) { tunic_apply(lv, blocks, w, h, row); return; }
     if (lv || r->w != w || r->h != h) return;
-    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_ITEM_CURSOR || r->role == R_HEART) return;
+    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_ITEM_CURSOR ||
+        r->role == R_HEART) return;
     if (r->role == R_HERO) {  // fully transparent (BC5 blocks of zeros)
         if (hide_hero()) for (uint32_t y = 0; y < (h + 3) / 4; y++) memset(blocks + y * row, 0, (w + 3) / 4 * 16);
         return;

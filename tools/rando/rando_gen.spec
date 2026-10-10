@@ -24,7 +24,8 @@ datas += [(os.path.join(LAS, 'RandomizerCore', 'Data'), 'RandomizerCore/Data'),
 # the wheel has none and the library comes from the system (Homebrew `keystone`), so take that one along
 binaries = collect_dynamic_libs('keystone', destdir='keystone')
 if not binaries:
-    lib = ctypes.util.find_library('keystone')
+    # KEYSTONE_LIB (Makefile: `make deps`' build for the app's minimum macOS) first, else the system's
+    lib = os.environ.get('KEYSTONE_LIB') or ctypes.util.find_library('keystone')
     if not lib:
         for d in ('/opt/homebrew/lib', '/usr/local/lib'):
             if os.path.exists(os.path.join(d, 'libkeystone.dylib')):

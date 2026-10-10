@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "paths.h"
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
@@ -128,7 +129,7 @@ static void boot(const char *root) {
 
     loader_load(exefs);
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
-    { extern void qol_tick(void), settings_load(void); settings_load(); qol_tick(); }  // (blur removal: before the post-process reads it)
+    { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
 
@@ -160,12 +161,15 @@ int main(int argc, char **argv) {
 #else
     setvbuf(stderr, NULL, _IOLBF, 0);
 #endif
-    const char *root = "extracted";
+    const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
-        else if (argv[i][0] != '-') root = argv[i];
+        else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
+        else if (argv[i][0] != '-') root = arg_root;
     }
+    rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, seed choice, settings
             extern void launcher_run(const char *root);
