@@ -107,22 +107,37 @@ This is a 0.1 alpha release. That means bugs are likely, crashes could occur, ra
 
 ## Building from source
 
-Requirements (macOS on Apple Silicon): Xcode command line tools (clang), [Homebrew](https://brew.sh) `sdl3` and
-`ffmpeg`, Python 3.12.
+Both platforms need your own v1.0.0 dump and keys: build first, then use the start screen's game-file setup to
+extract them into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`), or extract them yourself with
+[hactool](https://github.com/SciresM/hactool) (`make hactool` builds it). `make gen` then recompiles the game code
+from your own `extracted/exefs` into `generated/`; without it the build runs the start screen only.
 
-1. Put your game files in place: `mkdir extracted` in the checkout, build (step 3) and use the start screen's
-   game-file setup, or extract your v1.0.0 dump yourself into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`)
-   with [hactool](https://github.com/SciresM/hactool) (`make hactool` builds it).
-2. Recompile the game code: `make gen` (writes `generated/`, from your own `extracted/exefs`).
-3. Build: `make -j10` -> `build/lasrecomp`.
-4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`:
-   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`. Release builds instead ship the seed
-   generator as a standalone helper, so players need no Python: `make rando-helper` (after `make deps`, or with
-   `brew install keystone` for this Mac only) -> `build/helper/rando-gen/`.
-5. Run: `./build/lasrecomp extracted` (start screen) or `./build/lasrecomp extracted --play` (straight into the game).
-6. Package: `make deps` (once: SDL3, FFmpeg, hactool, keystone and Python from pinned sources, built for macOS 15),
-   `make rando-helper`, then `make app` -> `build/LAS Recomp.app` (macOS 15+, Apple Silicon);
-   `make dist` -> `build/dist/LAS Recomp-<version>-windows.zip` (Windows, see [docs/BUILD-windows.md](docs/BUILD-windows.md)).
+### macOS
+
+Requirements: Apple Silicon, Xcode command line tools (clang), [Homebrew](https://brew.sh) `sdl3` and `ffmpeg`,
+Python 3.12.
+
+1. Build: `make -j10` -> `build/lasrecomp`. Set up your game files (above), then `make gen` and `make -j10` again.
+2. Randomizer: create the Python environment for LAS-Randomizer, from `third_party/LAS-Randomizer`:
+   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`.
+3. Run: `./build/lasrecomp extracted` (start screen) or `./build/lasrecomp extracted --play` (straight into the game).
+4. Package: `make deps` (once: SDL3, FFmpeg, hactool, keystone and Python from pinned sources, built for macOS 15),
+   `make rando-helper` (the seed generator as a standalone helper, so players need no Python), then `make app` ->
+   `build/LAS Recomp.app` (macOS 15+, Apple Silicon) and `make dmg` -> `build/dist/LAS Recomp-<version>-macOS.dmg`.
+
+### Windows
+
+Requirements: Windows 10+ x86-64, a CPU with AVX2 and a GPU with Vulkan 1.3. More detail in
+[docs/BUILD-windows.md](docs/BUILD-windows.md).
+
+1. One-time setup, in PowerShell from the repo root: `powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1`.
+   It installs MSYS2 (UCRT64: clang, make, SDL3, FFmpeg, Vulkan, shaderc), Python 3.12 for the tools and the
+   randomizer (`third_party\LAS-Randomizer\venv`), builds hactool and switches the clone to LF line endings.
+2. Build, from an MSYS2 UCRT64 shell (or Git Bash with `export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"`):
+   `make -j` -> `build/lasrecomp.exe`. Set up your game files (above), then `make gen` and `make -j` again.
+3. Run: `./build/lasrecomp.exe extracted`, from a shell with `C:\msys64\ucrt64\bin` on PATH (for the DLLs).
+4. Package: `make deps-windows` (once: LGPL FFmpeg), `make rando-helper RANDO_PY="<path to python.org Python 3.12>"`
+   (MSYS2's Python has no oead wheel), then `make dist` -> `build/dist/LAS Recomp-<version>-windows.zip`.
 
 Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).

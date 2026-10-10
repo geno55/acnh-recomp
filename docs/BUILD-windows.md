@@ -1,7 +1,7 @@
 # Building LAS Recomp on Windows (x86-64)
 
-Status: part of main. Builds and runs the game on Vulkan (with your own game files); less tested than macOS.
-Packaging (`make dist`) is written but untested.
+Status: part of main. Builds and runs the game on Vulkan (with your own game files); `make dist` packages the
+release zip.
 
 ## One-time setup
 Run in PowerShell from the repo root:
@@ -24,7 +24,7 @@ Without `generated/` the build links a stub (tools/nogen_stub.c): the start scre
 
 Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (SDL3, FFmpeg, Vulkan, shaderc DLLs).
 
-## Package (untested)
+## Package
     make rando-helper   # optional: the seed generator without Python (build/helper/rando-gen)
     make dist           # -> build/dist/LAS Recomp-<version>-windows.zip
 
