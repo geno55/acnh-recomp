@@ -55,8 +55,8 @@ void settings_load(void) {
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {
             int n = atoi(val);
-            g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : !strcmp(val, "75%") ? RES_Q75 :
-                                  !strcmp(val, "67%") ? RES_Q67 : !strcmp(val, "50%") ? RES_Q50 :
+            g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
+                                  !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 8) ? n : RES_MATCH;
         }
         else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "metalfx") ? UPSCALE_METALFX : UPSCALE_BILINEAR;
@@ -100,7 +100,7 @@ void settings_save(void) {
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : "bilinear");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
-    else if (g_settings.res_mode == RES_Q67) fprintf(f, "resolution = 67%%\n");
+    else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");
     else if (g_settings.res_mode == RES_Q50) fprintf(f, "resolution = 50%%\n");
     else if (g_settings.res_mode >= 1 && g_settings.res_mode <= 8) fprintf(f, "resolution = %dx\n", g_settings.res_mode);
     else fprintf(f, "resolution = match\n");

@@ -260,16 +260,16 @@ def main():
     if shopsanity.enabled(settings):
         sanity_inside.update(shopsanity.add_to_logic(logic_defs, item_defs, settings))
     if trendsanity.enabled(settings):
-        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs))
+        sanity_inside.update(trendsanity.add_to_logic(logic_defs, item_defs, settings))
 
     import pets as pets_mod  # companions as items (tools/rando/pets.py)
     pets = pets_mod.add_to_pool(logic_defs, item_defs, settings)
     if pets:
         print('pets:', ', '.join(pets), flush=True)
 
-    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors,
-    # tier 3 = + connector caves
-    tier = int(settings.get('entrance-tier', 0))
+    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors and
+    # connector caves (tier 3 was "+ connector caves" on its own: same as 2 now)
+    tier = settings['entrance-tier'] = min(int(settings.get('entrance-tier', 0)), 2)
     ent = None
     if tier >= 1:
         settings['shuffle-dungeons'] = True
@@ -285,39 +285,36 @@ def main():
         for name, p in pot_locs.items():  # pots inside shuffled interiors follow their interior
             if p['level'] in lv_door:
                 extra.setdefault(lv_door[p['level']], []).append((name, 'break-pot'))
-        cave = ([], {}, {})
-        if tier >= 3:  # connector caves: their own pool, logic first (house exits are ORed into regions it rewrites)
-            cdoors = el.connector_pool(ed)
-            lv_node = el.connector_levels(cdoors)
-            cextra = {}
-            for name, p in pot_locs.items():
-                if p['level'] in lv_node:
-                    cextra.setdefault(lv_node[p['level']], []).append((name, 'break-pot'))
-            pockets = el.pocket_screens(cdoors)
+        # connector caves: their own pool, logic first (house exits are ORed into regions it rewrites)
+        cdoors = el.connector_pool(ed)
+        lv_node = el.connector_levels(cdoors)
+        cextra = {}
+        for name, p in pot_locs.items():
+            if p['level'] in lv_node:
+                cextra.setdefault(lv_node[p['level']], []).append((name, 'break-pot'))
+        pockets = el.pocket_screens(cdoors)
 
-            def with_caves(cv):
-                lg = copy.deepcopy(logic_defs)
-                n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
-                for name, b in bush_locs.items():  # a bush on a pocket's screen may stand in the pocket: needs it
-                    if cv[0] and pockets.get(b['room']) and name in lg:
-                        lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
-                return lg, n + el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
+        def with_caves(cv):
+            lg = copy.deepcopy(logic_defs)
+            n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
+            for name, b in bush_locs.items():  # a bush on a pocket's screen may stand in the pocket: needs it
+                if cv[0] and pockets.get(b['room']) and name in lg:
+                    lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
+            return lg, n + el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
 
-            items = lambda lg: {k for k in el.reach_all(lg, item_defs, settings) if lg[k].get('type') == 'item'}
-            want = items(with_caves(cave)[0])
-            for attempt in range(100):  # re-roll a cave layout that loses a location even with every item
-                rng = _random.Random(f"{settings['seed']}-connectors" + (f'-{attempt}' if attempt else ''))
-                cave = (cdoors,) + el.shuffle(cdoors, decoupled, rng)
-                lg, moved = with_caves(cave)
-                if not want - items(lg):
-                    break
-                print(f'caves: layout {attempt} loses', ', '.join(sorted(want - items(lg))[:6]), flush=True)
-            else:
-                raise RuntimeError('no connector cave layout keeps every location reachable')
-            logic_defs.clear()
-            logic_defs.update(lg)
+        items = lambda lg: {k for k in el.reach_all(lg, item_defs, settings) if lg[k].get('type') == 'item'}
+        want = items(with_caves(([], {}, {}))[0])  # (no caves shuffled)
+        for attempt in range(100):  # re-roll a cave layout that loses a location even with every item
+            rng = _random.Random(f"{settings['seed']}-connectors" + (f'-{attempt}' if attempt else ''))
+            cave = (cdoors,) + el.shuffle(cdoors, decoupled, rng)
+            lg, moved = with_caves(cave)
+            if not want - items(lg):
+                break
+            print(f'caves: layout {attempt} loses', ', '.join(sorted(want - items(lg))[:6]), flush=True)
         else:
-            moved = el.apply_logic(logic_defs, ent_doors, ent_entry, ent_exit, extra)
+            raise RuntimeError('no connector cave layout keeps every location reachable')
+        logic_defs.clear()
+        logic_defs.update(lg)
         ent = (ent_doors + cave[0], {**ent_entry, **cave[1]}, {**ent_exit, **cave[2]})
         print('entrances:', len(ent_entry), 'doors +', len(cave[1]), 'cave doors shuffled,', moved, 'locations moved', flush=True)
 
@@ -583,6 +580,7 @@ def main():
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
+        s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker

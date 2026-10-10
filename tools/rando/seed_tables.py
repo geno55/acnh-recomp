@@ -6,12 +6,15 @@ import sys
 import types
 
 WANT = ('Trade',)
-# set by the trade NPCs' flows when they take the item (= traded away; Items-screen trade row, inventory_overlay.mm)
-WANT_EXACT = {'RibbonDrop', 'DogfoodDrop', 'BananaDrop', 'StickDrop', 'HoneycombDrop', 'PineappleGet', 'HibiscusDrop',
+# set by the trade NPCs' flows when they take the item (= traded away; Items-screen trade row, inventory_overlay.mm).
+# Audited: each is set only by its NPC's flow (all of the seed's + the game's event flows scanned for SetFlag), except
+# StickDrop: with open-bridge LAS sets it at the start (PlayerStart: the bridge) and Kiki sets KikiGone instead - so the
+# Bananas' done flag is the alias TradeBananasDone below, never StickDrop itself.
+WANT_EXACT = {'RibbonDrop', 'DogfoodDrop', 'BananaDrop', 'HoneycombDrop', 'PineappleGet', 'HibiscusDrop',
               'LetterDrop', 'BroomDrop', 'FishhookDrop', 'BrassiereDrop', 'ScaleDrop', 'MarthaStatueOpened'}
 # + the flags runtime/hle/pets.c reads / sets (tools/rando/pets.py RUNTIME_FLAGS)
 EXACT = {'unused0427', 'unused0428', 'unused0429', 'unused0430', 'GhostClear1', 'Ghost2_Clear', 'Ghost3_Clear',
-         'Ghost4_Clear', 'WalrusAwaked'}
+         'Ghost4_Clear', 'WalrusAwaked', 'EighthClear'}
 
 
 def write_flags(seed_dir, oead_tools, romfs=None):
@@ -21,6 +24,14 @@ def write_flags(seed_dir, oead_tools, romfs=None):
     sheet = oead_tools.readSheet(p)
     rows = [f"{v['symbol']}\t{int(v['index'])}\n" for v in sheet['values']
             if str(v['symbol']).startswith(WANT) or v['symbol'] in WANT_EXACT or str(v['symbol']) in EXACT]
+    sp = os.path.join(seed_dir, 'settings.json')
+    if os.path.exists(sp):  # (unknown setting: no alias, the Bananas never show as traded)
+        import json
+        bridge = json.load(open(sp)).get('open-bridge')
+        idx = {str(v['symbol']): int(v['index']) for v in sheet['values']}
+        alias = idx.get('KikiGone' if bridge else 'StickDrop') if bridge is not None else None
+        if alias is not None:
+            rows.append(f"TradeBananasDone\t{alias}\n")
     with open(os.path.join(seed_dir, 'flags.tsv'), 'w') as f:
         f.writelines(rows)
     return len(rows)
