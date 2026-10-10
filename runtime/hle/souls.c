@@ -31,9 +31,12 @@ static Soul g_souls[32];
 static int g_nsouls = -1;
 static Wall g_walls[48];
 static int g_nwalls;
+typedef struct { char level[32]; float x, y, z; int kind; } Spot;  // a soul's item model standing in the world
+static Spot g_spots[32];
+static int g_nspots;
 
 static void load(void) {
-    g_nsouls = g_nwalls = 0;
+    g_nsouls = g_nwalls = g_nspots = 0;
     const char *dir = rando_seed_dir();
     if (!dir) return;
     char p[1024], line[256];
@@ -44,7 +47,16 @@ static void load(void) {
         Soul *s = &g_souls[g_nsouls];
         Wall *w = &g_walls[g_nwalls];
         char cells[160];
-        if (!strncmp(line, "room\t", 5)) {
+        Spot *sp = &g_spots[g_nspots];
+        if (!strncmp(line, "zone\t", 5)) {  // a level whose every fairy is a soul's model (shop shelf, crane floor)
+            if (g_nspots < 32 && sscanf(line + 5, "%31[^\t]\t%d", sp->level, &sp->kind) == 2) {
+                sp->x = NAN;
+                g_nspots++;
+            }
+        } else if (!strncmp(line, "spot\t", 5)) {
+            if (g_nspots < 32 && sscanf(line + 5, "%31[^\t]\t%f\t%f\t%f\t%d", sp->level, &sp->x, &sp->y, &sp->z, &sp->kind) == 5)
+                g_nspots++;
+        } else if (!strncmp(line, "room\t", 5)) {
             if (g_nwalls < 48 && sscanf(line + 5, "%31[^\t]\t%d\t%d\t%159s", w->level, &w->soul_flag, &w->defeat_flag, cells) == 4) {
                 w->ncells = 0;
                 for (char *c = strtok(cells, ";"); c && w->ncells < 8; c = strtok(NULL, ";")) {
@@ -107,8 +119,60 @@ static float g_last[3];
 static int g_last_c = -999, g_last_r = -999;
 static char g_last_level[32];
 
+// ---- the soul's look: a fairy (Items.gsheet npcKey ItemFairy) drawn evil red while one is being received. A soul
+// flag that turns on starts a window (the hold-up and its message); only the fairy model map's draws are tinted
+// (texpatch R_FAIRY_MODEL -> escape_bottle_tint kind 3 -> souls_fairy_tint), so real fairies stay pink outside it.
+static int g_got_kind = -1;      // kind of the soul just received (0 boss, 1 mini-boss), -1 none
+static uint64_t g_got_frame;     // (presented-frame count when it was received)
+static uint8_t g_seen[32];       // soul flags as last seen
+static char g_flag_level[32];    // level they were last read in (a new level / a loaded save: read again, no trigger)
+extern uint64_t renderer_present_count(void);
+
+static void watch_flags(void) {
+    const char *lv = level_name();
+    bool fresh = strncmp(g_flag_level, lv, sizeof g_flag_level - 1) != 0;
+    if (fresh) strlcpy(g_flag_level, lv, sizeof g_flag_level);
+    for (int i = 0; i < g_nsouls && i < 32; i++) {
+        uint8_t now = flags_ext_get(g_souls[i].flag);
+        if (!fresh && *lv && !g_seen[i] && now) {
+            g_got_kind = g_souls[i].kind;
+            g_got_frame = renderer_present_count();
+            LOG("[souls] got %s's soul\n", g_souls[i].name);
+        }
+        g_seen[i] = now;
+    }
+}
+
+// m: the draw's bone matrices (vertex cbuf 3: the first row-major 3x4, translation in m[3], m[7], m[11]) or NULL
+void souls_fairy_tint(const float *m, uint32_t m_size, float tint[8]) {
+    if (g_nsouls < 0) load();
+    int kind = -1;
+    if (ENV("LARECOMP_SOUL_TINT")) kind = atoi(ENV("LARECOMP_SOUL_TINT"));  // (test: 0 / 1 always on, -1 off)
+    else if (g_got_kind >= 0 && renderer_present_count() - g_got_frame <= 600) kind = g_got_kind;  // being received
+    else if (g_nspots) {  // standing in the world at a soul's spot (it bobs and turns), or in a soul zone
+        const char *lv = level_name();
+        for (int i = 0; i < g_nspots && kind < 0; i++)
+            if (isnan(g_spots[i].x) && !strcmp(g_spots[i].level, lv)) kind = g_spots[i].kind;
+    }
+    if (kind < 0 && !ENV("LARECOMP_SOUL_TINT") && m && m_size >= 48 && g_nspots) {
+        const char *lv = level_name();
+        for (int i = 0; i < g_nspots && kind < 0; i++) {
+            const Spot *sp = &g_spots[i];
+            if (fabsf(sp->x - m[3]) < 1.0f && fabsf(sp->z - m[11]) < 1.0f && fabsf(sp->y - m[7]) < 2.5f &&
+                !strcmp(sp->level, lv))
+                kind = sp->kind;
+        }
+    }
+    if (kind < 0) return;
+    // ltint: colour.rgb + mix, glow.rgb + luminance power (translate.c): boss blood red, mini-boss red-orange ember
+    static const float boss[8] = {1.55f, 0.04f, 0.05f, 1.0f, 0.35f, 0.0f, 0.02f, 1.25f};
+    static const float mini[8] = {1.60f, 0.30f, 0.02f, 1.0f, 0.30f, 0.06f, 0.0f, 1.25f};
+    memcpy(tint, kind ? mini : boss, sizeof boss);
+}
+
 void souls_tick(uint64_t frame) {
     if (g_nsouls < 0) load();
+    if (g_nsouls > 0) watch_flags();
     if (!g_nwalls) return;
     const char *lv = level_name();
     if (strncmp(lv, "Lv", 2)) return;
@@ -182,6 +246,9 @@ const char *souls_at(int i, int *kind, bool *owned) {
 }
 
 RT_ON_RESET(souls_reset) {  // (seed switch: reload rando/<seed>/souls.tsv)
+    g_got_kind = -1;
+    g_flag_level[0] = 0;
+    g_nspots = 0;
     g_nsouls = -1;
     g_nwalls = 0;
     g_in.wall = -1;

@@ -312,14 +312,15 @@ static void key_icon(ImDrawList *dl, ImVec2 c, float s, ImU32 col) {
 }
 
 // A boss soul glyph: a wisp (round body, flame tip).
-static void soul_icon(ImDrawList *dl, ImVec2 c, float s, bool owned) {
-    ImU32 col = owned ? IM_COL32(200, 140, 255, 255) : IM_COL32(120, 100, 70, 200);
+static void soul_icon(ImDrawList *dl, ImVec2 c, float s, bool owned, bool mini = false) {
+    // lit: the souls' evil red as drawn in the game (runtime/hle/souls.c souls_fairy_tint): boss blood red, mini-boss ember
+    ImU32 col = owned ? (mini ? IM_COL32(235, 85, 20, 255) : IM_COL32(220, 30, 36, 255)) : IM_COL32(120, 100, 70, 200);
     ImVec2 tip(c.x + s * 0.12f, c.y - s * 0.62f), l(c.x - s * 0.3f, c.y - s * 0.05f), r(c.x + s * 0.3f, c.y - s * 0.05f);
     if (owned) {
         dl->AddCircleFilled(c, s * 0.3f, col, 16);
         dl->AddTriangleFilled(l, tip, r, col);
-        dl->AddCircleFilled(ImVec2(c.x - s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 30, 90, 255), 8);
-        dl->AddCircleFilled(ImVec2(c.x + s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 30, 90, 255), 8);
+        dl->AddCircleFilled(ImVec2(c.x - s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 0, 6, 255), 8);
+        dl->AddCircleFilled(ImVec2(c.x + s * 0.1f, c.y - s * 0.02f), s * 0.07f, IM_COL32(60, 0, 6, 255), 8);
     } else {
         dl->AddCircle(c, s * 0.3f, col, 16, s * 0.07f);
         dl->AddLine(l, tip, col, s * 0.07f);
@@ -363,7 +364,7 @@ static void souls_column(ImDrawList *dl, ImFont *font, float ox, float oy, float
         x += 22 * u;
         for (const char *m : kSoulRows[i].minis) {
             int o = m ? mini_soul(m) : -1;
-            if (o >= 0) soul_icon(dl, ImVec2(x, cy + 5 * u), 17 * u, o > 0);  // (smaller: a mini-boss)
+            if (o >= 0) soul_icon(dl, ImVec2(x, cy + 5 * u), 17 * u, o > 0, true);  // (smaller: a mini-boss)
             x += 17 * u;
         }
     }
