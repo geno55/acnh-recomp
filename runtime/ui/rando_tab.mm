@@ -753,7 +753,7 @@ extern "C" void rando_tab_draw(float scale) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Desert closed until you find Marin companion, no Marin companion in pool if off");
     static const char *rshuf[] = {"Off", "Coherent", "Chaos", "Madness"};
-    combo("Dungeon room shuffle", &g_opts.room_shuffle, rshuf, 4);
+    combo("Dungeon room shuffle (experimental)", &g_opts.room_shuffle, rshuf, 4);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Rebuilds the dungeons (all but Eagle's Tower) from shuffled rooms. Boss, mini-boss, stairs and\n"
                           "other key rooms stay where they are.\n"
