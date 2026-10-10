@@ -94,27 +94,26 @@ bool rt_no_buff_actor(uint32_t type) {
     return true;
 }
 
-// Blur removal: the post-process looks its tilt-shift parameters up in postprocess.bfsha by the name at
-// main+0x16cbd73 ("PFXTiltShiftParam"); renaming it to one the shader doesn't have turns the blur off (LAS-Randomizer
-// 'blur-removal', patch by theboy181). Swapped back and forth here as the setting changes.
-#define TILT_NAME (MAIN_BASE + 0x16cbd73)
-static char g_tilt_orig[18];
+// Blur removal: the post-process's tilt-shift object (post-process manager +0x620, set up once at boot by
+// main+0x1071220) copies the name at main+0x16cbd73 ("PFXTiltShiftParam") into a std::string (+0x58) and makes its
+// uniform buffer (+0x50) with a pointer to that text (buffer +0x60). The buffer is bound to postprocess.bfsha's block
+// of that name each frame; under any other name the shader gets no parameters and draws no blur (LAS-Randomizer
+// 'blur-removal', patch by theboy181, renames the string in the module - which only took effect at the next start,
+// the copy being made once). tools/patches.py TILT_INIT_SITE hands us the object; its copy's first letter is
+// switched P <-> X as the setting changes, live.
+static uint64_t g_tilt_obj;
+static int g_tilt_applied = -1;  // blur removal as last applied (-1: not yet)
+RT_ON_RESET(qol_reset) { g_tilt_obj = 0; g_tilt_applied = -1; }  // (reboot: a new post-process)
 
-static void set_tilt_name(bool removed) {
-    char *p = (char *)(uintptr_t)TILT_NAME;
-    if (!g_tilt_orig[0]) {
-        if (memcmp(p, "PFXTiltShift", 12)) { LOG("[qol] tilt-shift name not found: blur removal off\n"); g_tilt_orig[0] = 1; return; }
-        memcpy(g_tilt_orig, p, sizeof g_tilt_orig);
-    }
-    if (g_tilt_orig[0] == 1) return;
-    uintptr_t page = (uintptr_t)p & ~0x3FFFull;
-    plat_protect(page, ((uintptr_t)p + sizeof g_tilt_orig - page + 0x3FFF) & ~0x3FFFull, PLAT_PROT_RW);
-    if (removed) memcpy(p, "NoTiltShift", 12);
-    else memcpy(p, g_tilt_orig, sizeof g_tilt_orig);
+void rt_tilt_obj(uint64_t obj) { g_tilt_obj = obj; g_tilt_applied = -1; }
+
+static bool apply_tilt(int removed) {  // false: not set up yet (or not the name we know)
+    uint64_t buf = g_tilt_obj ? LD64(g_tilt_obj + 0x50) : 0;
+    char *name = buf ? (char *)(uintptr_t)LD64(buf + 0x60) : NULL;
+    if (!name || memcmp(name + 1, "FXTiltShiftParam", 17) || (name[0] != 'P' && name[0] != 'X')) return false;
+    name[0] = removed ? 'X' : 'P';
+    return true;
 }
-
-static int g_tilt_applied = -1;  // blur removal as last applied to the module (-1: not yet)
-RT_ON_RESET(qol_reset) { g_tilt_applied = -1; }  // (reboot: the module is loaded again with the original name)
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
 // would (move_360, blur_removal, dpad_move).
@@ -141,15 +140,14 @@ static void setting_at_tick(void) {
     last = now;
 }
 
-// Game thread, once per frame (runtime/hle/input.c) and at boot (before the post-process is set up).
+// Game thread, once per frame (runtime/hle/input.c).
 void qol_tick(void) {
     setting_at_tick();
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
     int want = env == 2 ? g_settings.blur_removal : env;
-    if (want != g_tilt_applied) {
-        set_tilt_name(want);
-        if (g_tilt_applied >= 0 || want) LOG("[qol] blur removal %s\n", want ? "on" : "off");
+    if (want != g_tilt_applied && apply_tilt(want)) {
+        LOG("[qol] blur removal %s\n", want ? "on" : "off");
         g_tilt_applied = want;
     }
 }

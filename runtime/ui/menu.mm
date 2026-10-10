@@ -440,7 +440,7 @@ static void tab_display(void) {
     ImGui::Spacing();
     header("Game");
     toggle("Remove blur", &g_settings.blur_removal);
-    hint("Turns off the tilt-shift blur at the top and bottom of the screen. Takes effect the next time the game starts.");
+    hint("Turns off the tilt-shift blur at the top and bottom of the screen.");
     toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
     hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
 }

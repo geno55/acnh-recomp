@@ -431,3 +431,19 @@ def _buff_replace(gen, a):
 
 
 PATCHES[BUFF_REPLACE_SITE] = _buff_replace
+
+
+# Blur removal (runtime/hle/qol.c, setting blur_removal): main+0x1071220 sets up the post-process's tilt-shift object
+# (x0) once, looking its shader parameters up by name; qol.c keeps the object and takes the parameter handle out / puts
+# it back live.
+TILT_INIT_SITE = 0x7001071220
+
+
+def _tilt_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10243ff, hex(w)  # sub sp, sp, #0x90
+    return ('{ extern void rt_tilt_obj(uint64_t); rt_tilt_obj(c->x[0]); c->sp -= 0x90; }'
+            f'  /* {a:#x}: sub sp, sp, #0x90 (tilt-shift set-up: blur removal) */')
+
+
+PATCHES[TILT_INIT_SITE] = _tilt_init
