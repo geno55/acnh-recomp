@@ -362,13 +362,14 @@ static void hint(const char *t) {
 }
 
 // A row with a label on the left and a choice of options on the right (dpad left/right cycles).
-static bool choice(const char *label, int *value, const char *const *names, int n) {
+// reserve: room kept free right of the combo (a button on the same line)
+static bool choice(const char *label, int *value, const char *const *names, int n, float reserve = 0) {
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
     bool changed = false;
-    ImGui::SetNextItemWidth(-1);
+    ImGui::SetNextItemWidth(reserve > 0 ? -reserve : -1);
     if (ImGui::BeginCombo("##c", names[*value])) {
         for (int i = 0; i < n; i++) {
             if (ImGui::Selectable(names[i], i == *value)) { *value = i; changed = true; }
@@ -443,6 +444,22 @@ static void tab_display(void) {
     hint("Turns off the tilt-shift blur at the top and bottom of the screen. Takes effect the next time the game starts.");
     toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
     hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+}
+
+// Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c); never part of a seed
+static void cosmetic(const char *label, int *v, const char *const *names, int n) {
+    float bw = ImGui::CalcTextSize("Random").x + ImGui::GetStyle().FramePadding.x * 2;
+    choice(label, v, names, n, bw + ImGui::GetStyle().ItemSpacing.x);
+    ImGui::SameLine();
+    ImGui::PushID(label);
+    if (ImGui::Button("Random")) *v = (*v + 1 + rand() % (n - 1)) % n;  // (any other colour, Default included)
+    ImGui::PopID();
+}
+
+static void tab_cosmetics(void) {
+    header("Cosmetics");
+    cosmetic("Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS);
+    cosmetic("Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS);
 }
 
 static void tab_audio(void) {
@@ -685,8 +702,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         // L/R (or Q/E) switch tabs; B / Esc with nothing to back out of closes the menu
         if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
         static const char *tabs[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
-                                     "Controls"};
-        const int ntabs = 8;
+                                     "Cosmetics", "Controls"};
+        const int ntabs = 9;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
@@ -711,7 +728,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
                     case 4: if (warp_tab_draw(scale)) set_open(false); break;
                     case 5: cheats_draw(scale); break;
                     case 6: difficulty_draw(scale); break;
-                    case 7: tab_about(); break;
+                    case 7: tab_cosmetics(); break;
+                    case 8: tab_about(); break;
                     }
                     ImGui::EndChild();
                     ImGui::EndTabItem();

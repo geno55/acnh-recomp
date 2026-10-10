@@ -1927,13 +1927,18 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
         // the gold Escape Bottle (runtime/hle/escape.c): draws sampling the bottle's item icon / model map
+        // and the HUD hearts (heart colour, Cosmetics tab)
         extern int texpatch_bottle_kind(int id);
-        int bottle = 0;
-        for (int i = 0; i < pr->fi->ntex && !bottle; i++) {
+        extern int texpatch_heart_kind(int id);
+        extern void texpatch_heart_tint(int kind, float tint[8]);
+        int bottle = 0, heart = 0;
+        for (int i = 0; i < pr->fi->ntex; i++) {
             NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-            if (b && b->tp > 0) bottle = texpatch_bottle_kind(b->tp - 1);
+            if (b && b->tp > 0 && !bottle) bottle = texpatch_bottle_kind(b->tp - 1);
+            if (b && b->tp > 0 && !heart) heart = texpatch_heart_kind(b->tp - 1);
         }
+        if (heart) texpatch_heart_tint(heart, tint);
         if (bottle) {
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
             escape_bottle_tint(bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);

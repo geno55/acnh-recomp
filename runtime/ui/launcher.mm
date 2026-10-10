@@ -326,7 +326,7 @@ static std::vector<std::string> list_seeds() {
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP, CONTROLS };
+enum Page { MAIN, SETTINGS, SETUP, CONTROLS, COSMETICS };
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
@@ -468,7 +468,7 @@ extern "C" void launcher_run(const char *root) {
         if (seeds[i] == g_settings.rando_seed) choice = (int)i + 1;
     Page page = status.empty() ? MAIN : SETUP;
     bool play = false;
-    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup
+    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup / controls / cosmetics
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
 #ifdef __APPLE__
@@ -478,6 +478,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
         if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
+        if (pg && !strcmp(pg + 1, "cosmetics")) page = COSMETICS;
     }
 
     if (getenv("LARECOMP_LAUNCHER_AUTOPLAY") && status.empty()) play = true;  // (test: PLAY at once)
@@ -622,6 +623,8 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PopFont();
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("CONTROLS", true)) page = CONTROLS;
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("COSMETICS", true)) page = COSMETICS;
                 ImGui::PushFont(g_font_small);
                 ImGui::Dummy(ImVec2(0, 12 * s));
                 import_fonts();
@@ -649,6 +652,26 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                     ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = MAIN; }  // (B / Esc: back)
+                } else if (page == COSMETICS) {  // tunic / heart colours (also the in-game menu's Cosmetics tab)
+                ImGui::PushFont(g_font_small);
+                const struct { const char *label; int *v; const char *const *names; int n; } rows[] = {
+                    {"Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS},
+                    {"Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS}};
+                for (const auto &r : rows) {
+                    ImGui::PushID(r.label);
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::SetNextItemWidth(300 * s);
+                    ImGui::Combo("##c", r.v, r.names, r.n);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Random")) *r.v = (*r.v + 1 + rand() % (r.n - 1)) % r.n;  // (Default included)
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(r.label);
+                    ImGui::PopID();
+                }
+                ImGui::PopFont();
+                ImGui::SetCursorPosX(x0);
+                if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                    ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = SETTINGS; }
                 } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
                 ImGui::PushFont(g_font_small);
                 controls_bindings_draw(s);

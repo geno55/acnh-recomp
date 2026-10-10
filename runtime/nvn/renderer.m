@@ -145,6 +145,7 @@ static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];          // per bound texture slot: allocation scale (for shaders' texel math)
 static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 static int draw_bottle;                 // a fragment texture is the bottle's item icon (1) / model map (2): Escape Bottle
+static int draw_heart;                  // ... a HUD / file select heart's: heart colour (Cosmetics tab)
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
@@ -1171,7 +1172,7 @@ static void resolve_feedback(Prog *pr) {
 }
 
 static void bind_textures(int stage, ShaderInfo *si) {
-    if (stage == 1) draw_bottle = 0;
+    if (stage == 1) draw_bottle = draw_heart = 0;
     for (int i = 0; i < si->ntex; i++) {
         ShaderTexture *st_ = &si->tex[i];
         int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -1187,7 +1188,10 @@ static void bind_textures(int stage, ShaderInfo *si) {
             if (e->tex && stage == 1) {
                 extern int renderer_texpatch_of(NvnTexture *t);
                 extern int texpatch_bottle_kind(int id);
-                if (!draw_bottle) draw_bottle = texpatch_bottle_kind(renderer_texpatch_of(e->tex));
+                extern int texpatch_heart_kind(int id);
+                int tp = renderer_texpatch_of(e->tex);
+                if (!draw_bottle) draw_bottle = texpatch_bottle_kind(tp);
+                if (!draw_heart) draw_heart = texpatch_heart_kind(tp);
             }
             if (e->tex && i < 64) {
                 renderer_texture_scale(e->tex, &tex_sc[stage][i][0], &tex_sc[stage][i][1]);
@@ -1993,6 +1997,7 @@ static void draw(CmdRec *r, bool indexed) {
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
             escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][0].addr, (uint32_t)st.ubuf[0][0].size, tint);
         }
+        if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
     for (int s = 0; s < 12; s++) {
