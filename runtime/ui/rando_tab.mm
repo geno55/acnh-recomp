@@ -96,7 +96,7 @@ struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
     uint64_t rng = 0;         // 36-bit random part of the seed ID
     int logic = 0;            // basic advanced glitched hell none (always basic for now: no UI choice)
-    int dungeon_items = 3;    // none stone-beak mc mcb
+    int dungeon_items = 0;    // none stone-beak mc mcb (default: shuffled)
     int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
     bool bomb_bag = false, powder_bag = false;  // shuffle-bombs / shuffle-powder
     bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets

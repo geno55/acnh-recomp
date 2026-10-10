@@ -87,7 +87,7 @@ def default_settings(seed):
     excluded.update(['30-seashell-reward', '40-seashell-reward', '50-seashell-reward'])
     return {
         'seed': seed, 'logic': 'basic', 'platform': 'emulator', 'create-spoiler': True, 'free-book': True,
-        'extended-consumable-drop': True, 'dungeon-items': 'mcb', 'unlocked-bombs': True, 'shuffle-bombs': False,
+        'extended-consumable-drop': True, 'dungeon-items': 'none', 'unlocked-bombs': True, 'shuffle-bombs': False,
         'shuffle-powder': False, 'fast-fishing': False, 'fast-stealing': True, 'fast-songs': False,
         'shuffle-instruments': False, 'starting-instruments': 0, 'bad-pets': False, 'open-kanalet': True,
         'open-bridge': True, 'open-mamu': True, 'traps': 'few', 'blupsanity': False, 'classic-d2': False,
