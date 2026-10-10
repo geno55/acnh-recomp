@@ -2,10 +2,12 @@
 // are used): 360-degree movement and blur removal ("360 Controls (And More!)"). Button prompts are
 // runtime/nvn/texpatch.c, the Hero Mode icon is hidden there too.
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
+#include "../rando.h"
 #include "../settings.h"
 
 #define MAIN_BASE 0x7000000000ull
@@ -38,36 +40,114 @@ int rt_snap_dir(Cpu *c) {
     return 1;
 }
 
-// Blur removal: the post-process looks its tilt-shift parameters up in postprocess.bfsha by the name at
-// main+0x16cbd73 ("PFXTiltShiftParam"); renaming it to one the shader doesn't have turns the blur off (LAS-Randomizer
-// 'blur-removal', patch by theboy181). Swapped back and forth here as the setting changes.
-#define TILT_NAME (MAIN_BASE + 0x16cbd73)
-static char g_tilt_orig[18];
-
-static void set_tilt_name(bool removed) {
-    char *p = (char *)(uintptr_t)TILT_NAME;
-    if (!g_tilt_orig[0]) {
-        if (memcmp(p, "PFXTiltShift", 12)) { LOG("[qol] tilt-shift name not found: blur removal off\n"); g_tilt_orig[0] = 1; return; }
-        memcpy(g_tilt_orig, p, sizeof g_tilt_orig);
+// No Guardian Acorns / Pieces of Power (randomizer option no-buff-drops). Enemy kills count up two bytes of PlayerStatus
+// (+0xa4, +0xa5, saturating at 255; shared death code main+0x7c6950). The drop roll main+0x89b960 takes the dropper's
+// ItemDrop row; a row with mAllowBuffReplace (+0x38: NormalLow / NormalMid / RupeeMid...) first checks the
+// kill counters in PlayerStatus (+0xa5 >= 14: "DefenceUp" = Guardian Acorn; +0xa4 past a threshold: "PowerUp" =
+// Piece of Power; the counter is then wrapped) and drops that item symbol directly - the ItemDrop rows GuardianAcorn /
+// PowerPiece (emptied by LAS-Randomizer item_drops.py) aren't involved, which is why the option alone didn't work.
+// tools/patches.py BUFF_REPLACE_SITE reads the flag as false here: the counters are never consumed (they stay at 255) and
+// the row's own lot table is rolled as usual. Anything else that would make one (ItemPowerPiece 0xb2 / ItemGuardianAcorn 0xb3) is
+// held back at the actor factory (souls.c).
+static int g_no_buff = -1;  // (per seed: read again after an in-place reboot)
+static bool no_buff(void) {
+    if (g_no_buff < 0) {
+        g_no_buff = 0;
+        const char *dir = rando_seed_dir();
+        char p[512];
+        if (dir) {
+            snprintf(p, sizeof p, "%s/settings.json", dir);
+            FILE *f = fopen(p, "rb");
+            if (f) {
+                static char buf[1 << 16];
+                size_t n = fread(buf, 1, sizeof buf - 1, f);
+                buf[n] = 0;
+                fclose(f);
+                g_no_buff = strstr(buf, "\"no-buff-drops\": true") != NULL;
+            }
+        }
+        const char *e = getenv("LARECOMP_NO_BUFF");  // test: 1 / 0 forces it
+        if (e) g_no_buff = atoi(e) != 0;
+        LOG("[qol] no Guardian Acorns / Pieces of Power: %s\n", g_no_buff ? "ON" : "off");
     }
-    if (g_tilt_orig[0] == 1) return;
-    uintptr_t page = (uintptr_t)p & ~0x3FFFull;
-    plat_protect(page, ((uintptr_t)p + sizeof g_tilt_orig - page + 0x3FFF) & ~0x3FFFull, PLAT_PROT_RW);
-    if (removed) memcpy(p, "NoTiltShift", 12);
-    else memcpy(p, g_tilt_orig, sizeof g_tilt_orig);
+    return g_no_buff;
+}
+RT_ON_RESET(no_buff_reset) { g_no_buff = -1; }  // (seed switch)
+
+int rt_buff_replace(int allow) {
+    // LARECOMP_BUFF_PRIME=1 (test): every roll finds the Guardian Acorn counter full; =2: and every row allows buffs
+    // (grass then drops Acorns unless the option is on)
+    static int test = -1;
+    if (test < 0) test = ENV("LARECOMP_BUFF_PRIME") ? atoi(ENV("LARECOMP_BUFF_PRIME")) : 0;
+    if (test) {
+        uint64_t ps = LD64(MAIN_BASE + 0x1CC1368);  // PlayerStatus*
+        if (ps) ST8(ps + 0xa5, 14);
+        if (test == 2) allow = 1;
+        { extern uint64_t renderer_present_count(void); LOG("[qol] f%llu drop roll: buff replace %d -> %d\n", (unsigned long long)renderer_present_count(), allow, allow && !no_buff()); }
+    }
+    return allow && !no_buff();
 }
 
-static int g_tilt_applied = -1;  // blur removal as last applied to the module (-1: not yet)
-RT_ON_RESET(qol_reset) { g_tilt_applied = -1; }  // (reboot: the module is loaded again with the original name)
+bool rt_no_buff_actor(uint32_t type) {
+    if ((type != 0xb2 && type != 0xb3) || !no_buff()) return false;
+    LOG("[qol] %s held back (no-buff-drops)\n", type == 0xb2 ? "Piece of Power" : "Guardian Acorn");
+    return true;
+}
 
-// Game thread, once per frame (runtime/hle/input.c) and at boot (before the post-process is set up).
+// Blur removal: the post-process's tilt-shift object (post-process manager +0x620, set up once at boot by
+// main+0x1071220) copies the name at main+0x16cbd73 ("PFXTiltShiftParam") into a std::string (+0x58) and makes its
+// uniform buffer (+0x50) with a pointer to that text (buffer +0x60). The buffer is bound to postprocess.bfsha's block
+// of that name each frame; under any other name the shader gets no parameters and draws no blur (LAS-Randomizer
+// 'blur-removal', patch by theboy181, renames the string in the module - which only took effect at the next start,
+// the copy being made once). tools/patches.py TILT_INIT_SITE hands us the object; its copy's first letter is
+// switched P <-> X as the setting changes, live.
+static uint64_t g_tilt_obj;
+static int g_tilt_applied = -1;  // blur removal as last applied (-1: not yet)
+RT_ON_RESET(qol_reset) { g_tilt_obj = 0; g_tilt_applied = -1; }  // (reboot: a new post-process)
+
+void rt_tilt_obj(uint64_t obj) { g_tilt_obj = obj; g_tilt_applied = -1; }
+
+static bool apply_tilt(int removed) {  // false: not set up yet (or not the name we know)
+    uint64_t buf = g_tilt_obj ? LD64(g_tilt_obj + 0x50) : 0;
+    char *name = buf ? (char *)(uintptr_t)LD64(buf + 0x60) : NULL;
+    if (!name || memcmp(name + 1, "FXTiltShiftParam", 17) || (name[0] != 'P' && name[0] != 'X')) return false;
+    name[0] = removed ? 'X' : 'P';
+    return true;
+}
+
+// LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
+// would (move_360, blur_removal, dpad_move).
+static void setting_at_tick(void) {
+    static const char *spec;
+    static int init;
+    static uint64_t last;
+    if (!init) { init = 1; spec = getenv("LARECOMP_SETTING_AT"); }
+    if (!spec) return;
+    extern uint64_t renderer_present_count(void);
+    uint64_t now = renderer_present_count();
+    if (now == last) return;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *save = NULL, *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        unsigned long f;
+        char key[32];
+        int v;
+        if (sscanf(tok, "%lu:%31[a-z_0-9]=%d", &f, key, &v) != 3 || f <= last || f > now) continue;
+        bool *b = !strcmp(key, "move_360") ? &g_settings.move_360 : !strcmp(key, "blur_removal") ? &g_settings.blur_removal :
+                  !strcmp(key, "dpad_move") ? &g_settings.dpad_move : NULL;
+        if (b) { *b = v != 0; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+    }
+    last = now;
+}
+
+// Game thread, once per frame (runtime/hle/input.c).
 void qol_tick(void) {
+    setting_at_tick();
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
     int want = env == 2 ? g_settings.blur_removal : env;
-    if (want != g_tilt_applied) {
-        set_tilt_name(want);
-        if (g_tilt_applied >= 0 || want) LOG("[qol] blur removal %s\n", want ? "on" : "off");
+    if (want != g_tilt_applied && apply_tilt(want)) {
+        LOG("[qol] blur removal %s\n", want ? "on" : "off");
         g_tilt_applied = want;
     }
 }
