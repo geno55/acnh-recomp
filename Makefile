@@ -146,6 +146,10 @@ app:
 	$(MAKE) B=$(APP_B) MACOS_MIN=$(APP_MIN) DEPS=$(CURDIR)/build/deps $(APP_B)/lasrecomp
 	MACOS_MIN=$(APP_MIN) tools/bundle_macos.sh $(APP_B)/lasrecomp
 
+# macOS release disk image (the .app + an Applications shortcut to drag it onto): build/dist/LAS Recomp-<v>-macOS.dmg
+dmg: app
+	tools/make_dmg.sh
+
 # Windows (UNTESTED): build/dist/LAS Recomp-<version>-windows.zip, top folder "LAS Recomp/": the exe, hactool, the
 # seed generator helper when built, and the MSYS2 DLLs they load (runs without MSYS2). vulkan-1.dll is left out:
 # every Vulkan driver installs the loader in System32. Saves, seeds and game files go next to the exe at run time.
@@ -188,7 +192,7 @@ build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
 	$(RANDO_VPY) -m pip install -q -r third_party/LAS-Randomizer/requirements.txt pyinstaller==6.22.3
 	touch $@
 
-.PHONY: all gen gen-objs runtime-objs hactool deps app dist rando-helper
+.PHONY: dmg all gen gen-objs runtime-objs hactool deps app dist rando-helper
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
