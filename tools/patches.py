@@ -284,18 +284,18 @@ def _res_name(gen, a):
 PATCHES[RES_NAME_SITE] = _res_name
 
 
-# Field mini-bosses (enemy randomizer): a mini-boss starts its fight when the dungeon's zone-change signal reaches
-# it (zone manager -> f_7000029520 -> actor vfunc +0x100), which never happens in the Field. f_70003bf2b0 (a type
-# check run on these actors every frame) tells the runtime which actors exist (runtime/hle/miniboss.c), and the
-# runtime sends the start itself.
-MB_SEEN_SITE = 0x70003bf2b0
+# Field mini-bosses (enemy randomizer, runtime/hle/miniboss.c): a mini-boss waits in its idle state until its dungeon
+# room's start event runs, which never happens in the Field. f_70000ec310 (an actor component's per-frame update)
+# asks its actor a type question through vtable +0x68 every frame: the runtime sees each actor there, picks out the
+# mini-boss classes by vtable and moves them into their fight state itself.
+MB_SEEN_SITE = 0x70000ec354
 
 
 def _mb_seen(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
-    assert w == 0xf81e0ff3, hex(w)  # str x19, [sp, #-32]!
-    return ('{ extern void rt_mb_seen(Cpu *); rt_mb_seen(c); uint64_t ea = c->sp - 32; ST64(ea, c->x[19]); c->sp = ea; }'
-            f'  /* {a:#x}: str x19, [sp, #-32]! (mini-boss actor seen) */')
+    assert w == 0xf94002a8, hex(w)  # ldr x8, [x21]
+    return ('{ extern void rt_mb_seen(uint64_t); rt_mb_seen(c->x[21]); c->x[8] = LD64(c->x[21]); }'
+            f'  /* {a:#x}: ldr x8, [x21] (actor seen: field mini-bosses) */')
 
 
 PATCHES[MB_SEEN_SITE] = _mb_seen

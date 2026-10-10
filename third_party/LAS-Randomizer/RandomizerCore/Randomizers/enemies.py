@@ -1,10 +1,21 @@
 import random
 from RandomizerCore.randomizer_data import ENEMY_DATA
 
-# LARecomp: mini-bosses that work as overworld enemies (spawn and fight normally outside their dungeon arena;
-# tested one by one on Field_04P). id -> leb parameters. Only replaces 'land' enemies on the Field, at most one
-# per room, with MINIBOSS_CHANCE per land enemy (setting 'enemy-minibosses').
-FIELD_MINIBOSSES = {}
+# LARecomp: mini-bosses that work as overworld enemies (spawn and fight outside their dungeon arena; Hinox is woken by
+# the runtime, runtime/hle/miniboss.c). id -> leb parameters. Only replaces randomized 'land' enemies on the Field
+# (never the Excluded_Actors kept vanilla for logic / tricks, so no check needs one killed), at most one per room,
+# with MINIBOSS_CHANCE per land enemy (setting 'enemy-minibosses'). No switches: no defeat flag is ever written.
+# Left out: Cue Ball 0x58 (circles its arena's channel; on the Field it never leaves its spawn state), Gohma 0x5a
+# (charges along its arena's row, left the screen in tests; unconfirmed), Avalaunch 0x60 (unconfirmed), Rolling Bones
+# 0x51 / Moblin Chief 0x52 (don't spawn outside their rooms), Lanmola 0x57 (sand only), Master Stalfos 0x59 / Grim
+# Creeper 0x5d (scripted fights that flee), Smasher 0x5c (crashes on spawn), Blaino 0x5f (knock-out warps Link to a
+# locator only its dungeon has).
+FIELD_MINIBOSSES = {
+    0x53: ['HinoxStart'],  # Hinox
+    0x56: [],              # Dodongo Snake (bombs)
+    0x5B: [],              # Armos Knight
+    0x61: [],              # Giant Buzz Blob (Magic Powder, then sword)
+}
 MINIBOSS_CHANCE = 0.08
 
 

@@ -566,8 +566,13 @@ extern "C" void rando_tab_draw(float scale) {
         for (auto &x : o) { ImGui::TableNextColumn(); ImGui::Checkbox(x.n, x.v); }
         ImGui::EndTable();
     }
-    // "Mini-bosses among overworld enemies" (enemy-minibosses): wired in LAS enemies.py, hidden until a mini-boss
-    // actually fights outside its arena (they wait for their dungeon start event; notes/PLAN.md 2026-10-08)
+    ImGui::BeginDisabled(!g_opts.randomize_enemies);  // enemy-minibosses (LAS enemies.py, runtime/hle/miniboss.c)
+    ImGui::Indent();
+    ImGui::Checkbox("Include mini-bosses", &g_opts.enemy_minibosses);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Some overworld enemies become Hinox, Armos Knight, Dodongo Snake or Giant Buzz Blob.");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
     ImGui::Checkbox("Bombs must be found first", &g_opts.bomb_bag);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Bombs are an item in the pool; until you find them, shops don't sell bombs and none drop.");
@@ -696,14 +701,6 @@ extern "C" void rando_tab_draw(float scale) {
                           "The item logic follows the new layout (keys, locks, boss doors, one-way doors). Without keysanity\n"
                           "a dungeon's keys are inside that dungeon. Experimental: what a room needs to cross it (pits, water\n"
                           "inside the room) and what opens each shutter are approximated.");
-    ImGui::Spacing();
-    ImGui::TextDisabled("Experimental:");
-    ImGui::BeginDisabled(!g_opts.randomize_enemies);
-    ImGui::Checkbox("Mini-bosses among overworld enemies", &g_opts.enemy_minibosses);
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Needs Randomize enemies. Some overworld enemies become mini-bosses (Hinox, Cue Ball, ...).\n"
-                          "Known issue: they appear but don't fight yet (they wait for their dungeon room's start event).");
-    ImGui::EndDisabled();
     ImGui::Spacing();
     ImGui::TextDisabled("In development: grass holds items.");
     ImGui::Spacing();
