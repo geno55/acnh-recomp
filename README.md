@@ -34,6 +34,11 @@ https://discord.gg/DhrgdYqdcY
 
 This is a 0.1 alpha release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the alpha designation. Please use the Discord for discussing possible randomizer logic issues and submitting bug reports.
 
+### Known issues
+
+- The Mysterious Woods look wrong when viewed from outside the woods.
+- Some lighting effects show horizontal lines in dungeons, caves and houses.
+
 ## Features
 
 **Runs natively**
