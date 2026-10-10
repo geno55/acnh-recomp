@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -37,6 +38,7 @@ void controls_bindings_draw(float scale);  // controls_ui.mm
 
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};
+static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen keyboard has the keys (render thread: ui_text_busy)
 static std::atomic<bool> g_want_fullscreen_apply{false};
 
 struct QEvent {
@@ -70,7 +72,7 @@ static void set_open(bool open) {
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();
     if (open) save_editor_on_open();
-    else settings_save();
+    else { settings_save(); osk_cancel(); g_text_busy = false; }
 }
 
 static ImGuiKey key_from_scancode(SDL_Scancode sc) {
@@ -134,6 +136,8 @@ static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[96];
 static int g_kbd_max = 8;
 static bool capturing() { return g_open.load() || g_kbd.load() == 1; }
+// The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
+extern "C" bool menu_input_captured(void) { return capturing(); }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
@@ -148,11 +152,13 @@ bool menu_handle_event(const SDL_Event *e) {
         g_kbd = 2;
         return true;
     }
+    // typing (a text field, the on-screen keyboard, the name entry): keys are text, not menu shortcuts
+    bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
                                (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
-            set_open(!g_open.load());
+            if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
             return true;
         }
         if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F11 ||
@@ -185,7 +191,7 @@ bool menu_handle_event(const SDL_Event *e) {
         bool down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
         if (e->gbutton.button == SDL_GAMEPAD_BUTTON_BACK) back_down = down;
         if (e->gbutton.button == SDL_GAMEPAD_BUTTON_START) start_down = down;
-        if (down && ((back_down && start_down) || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)) {
+        if (down && !typing && ((back_down && start_down) || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE)) {
             set_open(!g_open.load());
             return true;
         }
@@ -497,6 +503,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
 RT_ON_RESET(menu_reset) {
     set_open(false);
     g_kbd = 0;
+    osk_cancel();
     pthread_mutex_lock(&q_lock);
     q_events.clear();
     pthread_mutex_unlock(&q_lock);
@@ -512,11 +519,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::PushFont(g_font_big);
     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Enter your name");
     ImGui::PopFont();
-    static bool was_open;
-    bool appearing = !was_open;
-    was_open = true;
-    int len = (int)strlen(g_kbd_text);
-    if (!g_last_pad.load()) {  // keyboard: type straight into the field
+    static bool was_open, was_pad;
+    bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
+    was_open = true, was_pad = pad;
+    if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();
         ImGui::SetNextItemWidth(-1);
         ImGui::PushFont(g_font_big);
@@ -526,33 +532,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::PopFont();
         if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
         ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
-    } else {  // controller: on-screen keyboard
-        static bool upper = true;
-        ImGui::PushFont(g_font_big);
-        ImGui::Text("%s_", g_kbd_text);
-        ImGui::PopFont();
-        static const char *rows_u[] = {"ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ-.'!", "0123456789"};
-        static const char *rows_l[] = {"abcdefghij", "klmnopqrst", "uvwxyz-.'!", "0123456789"};
-        const char **rows = upper ? rows_u : rows_l;
-        float k = 70 * scale;
-        for (int r = 0; r < 4; r++) {
-            for (int i = 0; rows[r][i]; i++) {
-                if (i) ImGui::SameLine();
-                char lbl[8] = {rows[r][i], 0};
-                if (appearing && r == 0 && i == 0) ImGui::SetKeyboardFocusHere();
-                if (ImGui::Button(lbl, ImVec2(k, k)) && len < g_kbd_max) { g_kbd_text[len] = rows[r][i]; g_kbd_text[len + 1] = 0; }
-            }
-        }
-        if (ImGui::Button(upper ? "abc" : "ABC", ImVec2(k * 2, k))) upper = !upper;
-        ImGui::SameLine();
-        if (ImGui::Button("Space", ImVec2(k * 3, k)) && len < g_kbd_max && len > 0) { g_kbd_text[len] = ' '; g_kbd_text[len + 1] = 0; }
-        ImGui::SameLine();
-        if (ImGui::Button("Delete", ImVec2(k * 2.5f, k)) && len > 0) g_kbd_text[len - 1] = 0;
-        ImGui::SameLine();
-        if (ImGui::Button("OK", ImVec2(k * 2.5f, k))) g_kbd = 2;
-        // B deletes (Start / + confirms, see menu_handle_event)
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) && (len = (int)strlen(g_kbd_text)) > 0) g_kbd_text[len - 1] = 0;
-        ImGui::TextDisabled("A  type      B  delete      Start / +  OK      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+    } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields)
+        int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
+        if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
     }
     ImGui::End();
     if (g_kbd.load() != 1) was_open = false;
@@ -687,9 +669,12 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         static const char *tabs[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
                                      "Controls"};
         const int ntabs = 8;
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
-        bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+        // (not while typing: Q / E are letters then, and the on-screen keyboard has the controller)
+        bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
+        if (!any_popup && !typing) {
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
+        }
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
             for (int i = 0; i < ntabs; i++) {
                 ImGuiTabItemFlags f = g_tab_request == i ? ImGuiTabItemFlags_SetSelected : 0;
@@ -721,15 +706,18 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui::EndTabBar();
         }
         ImGui::TextDisabled("L / R  switch tabs      A  select      B  back      Minus + Plus / F1  close");
-        // B with nothing focused-deeper closes the menu
-        if (!any_popup && !io.WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
+        // before, so it's still true the frame a field lets go)
+        if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
         ImGui::End();
+        osk_draw(g_font_big, scale);  // (a text field activated with the controller)
     }
 
     if (kbd) keyboard_draw(io, scale);
     ImGui::Render();
+    g_text_busy = open && ui_text_busy();
 #ifdef __APPLE__
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);

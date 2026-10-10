@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "osk.h"
 #include "item_names.h"
 
 extern "C" void give_item_request(int id, int count, int index);
@@ -188,7 +189,7 @@ extern "C" void save_editor_draw(float scale) {
 
     section("Player");
     label("Name");
-    if (ImGui::InputText("##name", g_name, 9 * 3)) g_name_dirty = true;
+    if (ui_input_text("##name", g_name, 9 * 3, 0, NULL, "Name")) g_name_dirty = true;
     if (g_name_dirty && !ImGui::IsItemActive()) { write_name(g_name); g_name_dirty = false; }
 
     int containers = __builtin_popcount(F<uint16_t>(CONTAINERS) & 0x1FF);

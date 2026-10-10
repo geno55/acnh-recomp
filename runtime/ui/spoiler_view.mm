@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "osk.h"
 
 namespace {  // (tracker_overlay.mm has its own Node: keep both local or vector<Node> code gets merged)
 struct Node {
@@ -81,7 +82,7 @@ bool spoiler_view_draw(const std::string &seed, float scale) {
     }
     static char q[64];
     ImGui::SetNextItemWidth(420 * scale);
-    ImGui::InputTextWithHint("##q", "search (item, place...)", q, sizeof q);
+    ui_input_text("##q", q, sizeof q, 0, "search (item, place...)", "Search the spoiler log");
     ImGui::BeginChild("##spoiler", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
     for (size_t i = 0; i < g_doc.size(); i++) {
         Node &n = g_doc[i];
