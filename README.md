@@ -189,10 +189,15 @@ Release builds include these components; their source code for the exact version
 | evfl (seed generator) | 1.2.0 | GPL 2.0+ | https://github.com/zeldamods/evfl/releases/tag/v1.2.0 |
 | quicktex (seed generator) | 0.2.1 | LGPL 3.0 | https://github.com/drewcassidy/quicktex/releases/tag/v0.2.1 |
 | PyInstaller (packs the seed generator) | 6.22.3 | GPL 2.0+ with bootloader exception | https://github.com/pyinstaller/pyinstaller/releases/tag/v6.22.3 |
-| CPython (seed generator) | 3.12.14 | PSF | https://github.com/python/cpython/releases/tag/v3.12.14 |
-| FFmpeg (macOS build, LGPL configuration) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
+| CPython (seed generator) | 3.12.14 (macOS), 3.12.10 (Windows) | PSF | https://github.com/python/cpython/releases/tag/v3.12.14, https://github.com/python/cpython/releases/tag/v3.12.10 |
+| FFmpeg (LGPL configuration, macOS and Windows builds) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
 | SDL 3 | 3.4.18 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18 |
-| hactool | 1.4.0 | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0 |
+| hactool | 1.4.0 (macOS), 1.4.0-13-g1d64a83 (Windows) | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0, https://github.com/SciresM/hactool/tree/1d64a83 |
+| shaderc (Windows: GLSL to SPIR-V) | 2026.4 | Apache 2.0 | https://github.com/google/shaderc |
+| libiconv (Windows: used by SDL 3) | 1.19 | LGPL 2.1+ | https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz |
+| GCC runtime: libgcc, libstdc++ (Windows) | 16.2.0 | GPL 3.0 with the GCC Runtime Library Exception | https://gcc.gnu.org/ |
+| winpthreads (Windows, mingw-w64) | 14.0.0 | MIT / BSD | https://www.mingw-w64.org/ |
 
-The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`
-and `tools/rando/rando_gen.spec`.
+The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`,
+`tools/build_deps_windows.sh` and `tools/rando/rando_gen.spec`. The Windows build takes SDL 3, shaderc, libiconv and the
+compiler runtime from MSYS2's UCRT64 packages (https://packages.msys2.org, which links each package's source).
