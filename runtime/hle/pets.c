@@ -258,6 +258,19 @@ uint64_t pets_menu_input(uint64_t b, int32_t st[4]) {
     return b & ~(dirs | A | X | Y);
 }
 
+// save editor (randomizer seeds): companion c found / give or take it (as finding it would, without calling it)
+bool pets_owned(int c) { return c > C_NONE && c <= C_ROOSTER && flag_get(kComp[c].found); }
+void pets_give(int c, bool on) {
+    if (c <= C_NONE || c > C_ROOSTER) return;
+    flag_put(kComp[c].found, on);
+    if (c == C_GHOST && on) {  // (as rt_pet_item: straight to "take me to my grave")
+        flag_put("GhostClear1", true);
+        flag_put("Ghost2_Clear", true);
+        flag_put("Ghost3_Clear", true);
+    }
+    LOG("[pets] save editor: %s %s\n", kComp[c].name, on ? "given" : "taken");
+}
+
 // rt_add_item (keysanity.c): x2 index PET_INDEX + n. Returns 1 (handled: nothing is added to the inventory)
 int rt_pet_item(int n) {
     if (n < 0 || n >= NPETS) return 0;

@@ -12,6 +12,9 @@
 #include "item_names.h"
 
 extern "C" void give_item_request(int id, int count, int index);
+extern "C" bool pets_owned(int c);             // runtime/hle/pets.c
+extern "C" void pets_give(int c, bool on);
+extern "C" const char *rando_seed_dir(void);
 
 extern "C" {
 #include "../hle.h"
@@ -296,6 +299,18 @@ extern "C" void save_editor_draw(float scale) {
             ImGui::EndCombo();
         }
         ImGui::PopID();
+    }
+    if (rando_seed_dir()) {  // randomizer seeds: companions are items (runtime/hle/pets.c)
+        section("Companions");
+        static const struct { int c; const char *name; } comps[] = {{1, "BowWow"}, {2, "Marin"}, {4, "Flying Rooster"}, {3, "Ghost"}};
+        for (const auto &k : comps) {
+            bool on = pets_owned(k.c);
+            ImGui::PushID(k.c);
+            if (ImGui::Checkbox(k.name, &on)) pets_give(k.c, on);
+            ImGui::PopID();
+            if (k.c != 3) ImGui::SameLine();
+        }
+        ImGui::NewLine();
     }
     section("Give any item");
     {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
