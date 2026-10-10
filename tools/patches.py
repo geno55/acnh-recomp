@@ -447,3 +447,46 @@ def _tilt_init(gen, a):
 
 
 PATCHES[TILT_INIT_SITE] = _tilt_init
+
+
+# Event parameters: main+0x109fb80 looks up a String parameter of an event action and throws when it's missing
+# ("String 型の '{0}' というパラメータが見つかりません"). Two of the game's timelines leave an AimPlayer / AimActor
+# 'boneName' out (tl/WindFishSong: learning Marin's song; tl/HippoModelSlap); on the Switch the throw is caught up in
+# the event system, but recompiled code can't unwind (crash). A missing String reads as "" instead - what the other
+# events pass for boneName (tl/ManboTamegoro's PlayOneshotSE has no 'label': no sound).
+MISSING_STRING_SITE = 0x700109fca8
+
+
+def _missing_string(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x321c03e0, hex(w)  # mov w0, #0x10 (orr w0, wzr, #0x10: __cxa_allocate_exception size)
+    # "" (the terminator of ".ptcl" right before the message; callers strlen() the result, so not NULL)
+    return ('{ ST64(c->sp + 0x18, 0x70016cf23aull); ST32(c->sp + 0x20, 0); goto L_700109fc78; }'
+            f'  /* {a:#x}: mov w0, #0x10 (missing String event parameter: return "", no throw) */')
+
+
+PATCHES[MISSING_STRING_SITE] = _missing_string
+
+
+# Event actions with no handler: main+0x108e300 runs an event action through the actor's handler map; an entry whose
+# std::function is empty throws std::bad_function_call (0x108edc8), which the same function catches (catch
+# std::exception, landing pad 0x108f1c8 -> 0x108ef3c) to abort the event. Common.bfevfl's OcarinaWarpOut (every Manbo's
+# Mambo warp) gets here at WarpHoleEventBox.PlayTailorOtherChannelEx, after the level jump has been requested.
+# Recompiled code can't unwind, so the throw goes straight into the catch block, without the C++ runtime's
+# begin / end catch (nothing was thrown).
+NO_HANDLER_SITES = {
+    0x700108edc8: (0x321d03e0, 'goto L_700108ef3c;', 'mov w0, #8 (bad_function_call: to the catch block)'),
+    0x700108ef40: (0x940e8868, '', 'bl __cxa_begin_catch (skipped)'),
+    0x700108f074: (0x940e887b, '', 'bl __cxa_end_catch (skipped)'),
+}
+
+
+def _no_handler(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    want, code, what = NO_HANDLER_SITES[a]
+    assert w == want, hex(w)
+    return f'{{ {code} }}  /* {a:#x}: {what} */'
+
+
+for _a in NO_HANDLER_SITES:
+    PATCHES[_a] = _no_handler
