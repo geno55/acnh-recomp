@@ -629,7 +629,8 @@ extern "C" void launcher_run(const char *root) {
             if (page == MAIN) {
                 bool hov = false;
                 char label[192];
-                snprintf(label, sizeof label, "PLAY    \xe2\x80\xb9 %s \xe2\x80\xba", choices[choice].c_str());
+                snprintf(label, sizeof label, "PLAY    \xe2\x80\xb9 %s%s \xe2\x80\xba", choice ? "Randomizer Seed: " : "",
+                         choices[choice].c_str());  // (choice 0 = Vanilla)
                 ImGui::SetCursorPosX(x0);
                 static bool focused_once;
                 if (!focused_once) { ImGui::SetKeyboardFocusHere(); focused_once = true; }
