@@ -660,8 +660,13 @@ extern "C" void rando_tab_draw(float scale) {
         }
         ImGui::EndTable();
     }
-    // "Mini-bosses among overworld enemies" (enemy-minibosses): wired in LAS enemies.py, hidden until a mini-boss
-    // actually fights outside its arena (they wait for their dungeon start event; notes/PLAN.md 2026-10-08)
+    ImGui::BeginDisabled(!g_opts.randomize_enemies);  // enemy-minibosses (LAS enemies.py, runtime/hle/miniboss.c)
+    ImGui::Indent();
+    ImGui::Checkbox("Include mini-bosses", &g_opts.enemy_minibosses);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Some overworld enemies become Hinox, Armos Knight, Dodongo Snake or Giant Buzz Blob.");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
     ImGui::Checkbox("Bombs must be found first", &g_opts.bomb_bag);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Bombs are an item in the pool; until you find them, shops don't sell bombs and none drop.");
