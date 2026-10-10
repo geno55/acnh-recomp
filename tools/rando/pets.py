@@ -4,16 +4,20 @@
   Rooster  (setting pet-rooster): logic token `rooster` (LAS logic already uses it wherever the Flying Rooster can stand
            in for the feather or hookshot, inside dungeons only with bad-pets = "Companions allowed in dungeons").
            The vanilla revival at the rooster's grave in Mabe still works but leaves the logic.
-  Ghost    (setting pet-ghost): the Ghost's grave check (`ghost-reward`, the Owl at the grave) needs the Ghost found:
-           finding him skips his house visit (Ghost2/3 flags) so he asks for his grave right away. The Surf Harp no
-           longer finishes the Ghost's quest, and he no longer appears by himself after the Harp (GhostJoinCheck).
+  Ghost    (setting pet-ghost): an Items-page item, NOT a follower (Link has one companion slot: a following Ghost
+           sent the Rooster / Marin away). Found, he sits in the equipment panel's free slot (runtime/ui/
+           inventory_overlay.mm) and the grave takes him: reaching it (its vanilla EventTriggerTag, Graveyard) lays him
+           to rest (Ghost4_Clear) and his Owl flies in with the grave check (`ghost-reward`); the slot then shows a
+           tick (EighthClear). His house visit is skipped (Ghost2/3 flags). The Surf Harp no longer finishes the
+           Ghost's quest, and he no longer appears by himself after the Harp (GhostJoinCheck).
   Marin    (open-desert off): the Walrus sleeps in front of Yarna Desert until Marin sings to him (vanilla event),
            so the desert needs Marin found. With open-desert on (LAS default: WalrusAwaked from the start) Marin
            isn't in the pool.
 
 A pet item is a dummy Items.gsheet entry (the companion's model on the chest / in Link's hands) that reaches the
 game's AddItem with index PET_INDEX + n; the runtime (runtime/hle/pets.c) turns that into the companion following
-Link (save +0x555D) and remembers it (event flag FLAGS[n]) so the in-game menu can call any found pet back.
+Link (save +0x555D; the Ghost: no) and remembers it (event flag FLAGS[n]) so the pause menu can call any found pet
+back. Seeds mark the Ghost item in settings.json ("ghost-item"; older seeds: the Ghost follows, as before).
 """
 
 PET_INDEX = 90
@@ -96,10 +100,21 @@ def apply(out_dir, romfs, pets, oead_tools, event_tools):
     oead_tools.writeSheet(os.path.join(ds, 'Items.gsheet'), sheet)
     ev = os.path.join(out_dir, 'romfs', 'region_common', 'event')
     os.makedirs(ev, exist_ok=True)
-    if 'ghost' in pets:  # laid to rest he gives the vanilla bottle (Bottle 0): the check is his Owl (ghost-reward)
+    if 'ghost' in pets:
+        # the grave's trigger (Field_07E EventTriggerTag Graveyard: companion Ghost, Ghost3_Clear, !Ghost4_Clear)
+        # takes the Ghost ITEM (found flag) instead of the following Ghost
+        cs = oead_tools.readSheet(path('datasheets', 'Conditions.gsheet'))
+        g = next(v for v in cs['values'] if v['symbol'] == 'Graveyard')
+        assert g['conditions'][0]['category'] == 3 and g['conditions'][0]['parameter'] == 'Ghost'
+        g['conditions'][0] = {'category': 1, 'parameter': FLAGS[ORDER.index('ghost')]}  # (as LAS conditions.py)
+        oead_tools.writeSheet(os.path.join(ds, 'Conditions.gsheet'), cs)
+        # Graveyard_talk walks the Ghost to the grave, says goodbye, gives the vanilla bottle (Bottle 0) and leaves
+        # the companion slot: with no Ghost actor only its Ghost4_Clear stays (the Owl, ghost-reward, then flies in)
         flow = event_tools.readFlow(path('event', 'Field.bfevfl'))
-        assert event_tools.findEvent(flow.flowchart, 'Event72').data.actor_action.v.v == 'AddBottle'
-        event_tools.insertEventAfter(flow.flowchart, 'Event18', 'Event8')  # Ghost Destroy -> LeaveCompanion
+        e6 = event_tools.findEvent(flow.flowchart, 'Event6')
+        assert e6.data.params.data['symbol'] == 'Ghost4_Clear'
+        event_tools.insertEventAfter(flow.flowchart, 'Graveyard_talk', 'Event6')
+        event_tools.removeEventAfter(flow.flowchart, 'Event6')
         event_tools.writeFlow(os.path.join(ev, 'Field.bfevfl'), flow)
     if 'marin-companion' in pets:
         # talking to the sleeping Walrus without Marin sets WalrusTalked (vanilla: Marin then moves to the Animal

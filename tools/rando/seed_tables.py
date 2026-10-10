@@ -11,7 +11,7 @@ WANT_EXACT = {'RibbonDrop', 'DogfoodDrop', 'BananaDrop', 'StickDrop', 'Honeycomb
               'LetterDrop', 'BroomDrop', 'FishhookDrop', 'BrassiereDrop', 'ScaleDrop', 'MarthaStatueOpened'}
 # + the flags runtime/hle/pets.c reads / sets (tools/rando/pets.py RUNTIME_FLAGS)
 EXACT = {'unused0427', 'unused0428', 'unused0429', 'unused0430', 'GhostClear1', 'Ghost2_Clear', 'Ghost3_Clear',
-         'Ghost4_Clear', 'WalrusAwaked'}
+         'Ghost4_Clear', 'WalrusAwaked', 'EighthClear'}
 
 
 def write_flags(seed_dir, oead_tools, romfs=None):
