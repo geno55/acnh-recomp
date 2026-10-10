@@ -143,8 +143,8 @@ none of their files are used):
 
 LAS Recomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
 and *Link's Awakening* are trademarks of Nintendo. No game files, assets, keys or fonts are included - not in this
-repository and not in release builds. Release builds contain the recompiled game program only; you must provide your
-own legally obtained copy of the game (and your own keys) to play, and everything else is loaded from it.
+repository and not in release builds. You must provide your own legally obtained copy of the game (and your own keys)
+to play.
 
 ## License
 
