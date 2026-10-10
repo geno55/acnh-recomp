@@ -89,8 +89,6 @@ static double g_gen_start;
 static bool g_gen_failed;
 static bool g_gen_done;  // finished (or failed to start): the overlay shows the result until Play Now / Close
 
-static const char *const kTunics[] = {"default", "random", "Purple", "Orange", "Yellow", "Pink", "Teal", "Sky",
-                                      "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
 
 struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
@@ -102,7 +100,7 @@ struct GenOpts {
     bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets
     bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk): always on
     bool enemy_minibosses = false;  // enemy-minibosses (needs Randomize enemies)
-    int tunic = 0;            // tunic-color: index into kTunics (tools/rando/cosmetics.py COLOURS)
+    int tunic = 0;            // retired tunic-color (always 0 = default): the tunic is a live cosmetic now
     bool inc_fishing = false, inc_rapids = false, inc_dampe = false, inc_trade = false, inc_blue = false;
     int traps = 1;            // none few several many trapsanity
     int seashells = 2;        // max reward included: none 5 15 30 40 50
@@ -126,12 +124,6 @@ struct GenOpts {
 };
 static GenOpts g_opts;
 
-// Tunic colour of the next seed (still part of the seed ID / request), for the Cosmetics tab: names + the choice.
-extern "C" int *rando_tunic_choice(const char *const **names, int *n) {
-    if (names) *names = kTunics;
-    if (n) *n = (int)(sizeof kTunics / sizeof *kTunics);
-    return &g_opts.tunic;
-}
 
 // ---- Seed IDs: a 25-character code (Crockford base32, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX) holding the random seed and
 // every generation option, with a checksum in the last 5 bits. Same ID + same LAS Recomp version = the same seed, so
@@ -226,6 +218,7 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     // (+ connector caves) is part of tier 2 now
     t.logic = 0;
     t.skip_story = true;
+    t.tunic = 0;  // (the tunic colour is the Cosmetics tab's, live: new seeds stay green; placement never used it)
     if (t.entrances > 2) t.entrances = 2;
     o = t;
     return "";
@@ -296,7 +289,7 @@ static void start_generation(void) {
             g_opts.bomb_bag ? "false" : "true", g_opts.powder_bag ? "true" : "false");
     fprintf(f, " \"randomize-environments\": %s, \"bad-pets\": %s,\n", g_opts.environments ? "true" : "false",
             g_opts.pets_in_dungeons ? "true" : "false");
-    fprintf(f, " \"skip-story-events\": true, \"tunic-color\": \"%s\", \"enemy-minibosses\": %s,\n", kTunics[g_opts.tunic],
+    fprintf(f, " \"skip-story-events\": true, \"tunic-color\": \"default\", \"enemy-minibosses\": %s,\n",
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
