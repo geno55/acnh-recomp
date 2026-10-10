@@ -75,7 +75,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
-#define LARECOMP_VERSION "0.11"
+#define LARECOMP_VERSION "0.12"
 
 // ------------------------------------------------------------------ game files
 static std::string g_root;  // extracted game: <root>/exefs, <root>/romfs
