@@ -37,7 +37,7 @@
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL,
-       R_TUNIC, R_TUNIC_RED, R_HEART };
+       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_HEART };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -91,6 +91,8 @@ static int role_of(const char *name) {
         // Hp_04 mask; HeartUp = the life-up flash. Their draws are tinted.
         {"MI_body_alb.0", R_TUNIC}, {"MI_body_alb.1", R_TUNIC_RED},
         {"Hp_00^w", R_HEART}, {"Hp_01^w", R_HEART}, {"Hp_02^w", R_HEART}, {"HeartUp^w", R_HEART},
+        // the Items page's cursor brackets: identified only (hidden while the companion card has the cursor, pets.c)
+        {"ItemCursor_", R_ITEM_CURSOR},
     };
     for (unsigned i = 0; i < sizeof m / sizeof *m; i++)
         if (!strncmp(name, m[i].prefix, strlen(m[i].prefix))) return m[i].role;
@@ -225,6 +227,7 @@ static const uint8_t *seed_tunic(uint32_t *size) {
 
 static TexLayout g_tunic_layout;  // (the game's tunic texture: its levels' places in the map's data)
 static bool g_tunic_layout_ok;
+bool texpatch_is_item_cursor(int id) { return id >= 0 && id < g_nrefs && g_refs[id].role == R_ITEM_CURSOR; }
 
 int texpatch_identify(const NvnTexture *t) {
     pthread_once(&g_once, load_refs);
@@ -996,7 +999,7 @@ void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h
     const Ref *r = &g_refs[id];
     if (r->role == R_TUNIC) { tunic_apply(lv, blocks, w, h, row); return; }
     if (lv || r->w != w || r->h != h) return;
-    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_HEART) return;
+    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_ITEM_CURSOR || r->role == R_HEART) return;
     if (r->role == R_HERO) {  // fully transparent (BC5 blocks of zeros)
         if (hide_hero()) for (uint32_t y = 0; y < (h + 3) / 4; y++) memset(blocks + y * row, 0, (w + 3) / 4 * 16);
         return;

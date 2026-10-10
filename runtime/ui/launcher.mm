@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -564,6 +565,10 @@ extern "C" void launcher_run(const char *root) {
             ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Link's Awakening");
             ImGui::PopFont();
             ImGui::SetCursorPos(ImVec2(x0, 330 * s));
+            // typing in a text field / the on-screen keyboard (osk.h): B / Esc are for it, not "back" (from the frame
+            // before too, so the Esc that ends the typing doesn't also leave the page)
+            static bool typed_before;
+            bool typing = typed_before || ui_text_busy();
 
             if (page == MAIN) {
                 bool hov = false;
@@ -650,8 +655,11 @@ extern "C" void launcher_run(const char *root) {
                     if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                    ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = MAIN; }  // (B / Esc: back)
+                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    settings_save();  // (B / Esc: back)
+                    page = MAIN;
+                }
                 } else if (page == COSMETICS) {  // tunic / heart colours (also the in-game menu's Cosmetics tab)
                 ImGui::PushFont(g_font_small);
                 const struct { const char *label; int *v; const char *const *names; int n; } rows[] = {
@@ -670,8 +678,11 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::PopFont();
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                    ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { settings_save(); page = SETTINGS; }
+                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                    settings_save();
+                    page = SETTINGS;
+                }
                 } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
                 ImGui::PushFont(g_font_small);
                 controls_bindings_draw(s);
@@ -679,7 +690,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
-                if (menu_item("BACK", true) || (cap_dev < 0 && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                if (menu_item("BACK", true) || (cap_dev < 0 && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                                                 ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
                     bind_capture_cancel();
                     settings_save();
@@ -728,8 +739,8 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::PopFont();
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", !busy) || (!busy && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                                      ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
@@ -761,6 +772,8 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PopFont();
             ImGui::End();
             ImGui::PopStyleColor();
+            osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
+            typed_before = ui_text_busy();
 
             ImGui::Render();
 #ifdef __APPLE__

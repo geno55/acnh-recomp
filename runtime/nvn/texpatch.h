@@ -14,6 +14,8 @@ int texpatch_identify(const NvnTexture *t);
 // Known texture `id` is the empty bottle's item icon (1) or its 3D model's colour map (2), else 0 (the gold Escape
 // Bottle: runtime/hle/escape.c).
 int texpatch_bottle_kind(int id);
+// Known texture `id` is one of the Items page's cursor brackets (hidden while the companion card has the cursor)
+bool texpatch_is_item_cursor(int id);
 // Changes whenever the wanted look of the known textures changes (prompt style, controller, Hero icon setting):
 // backends re-upload identified textures when it differs from the value they uploaded with.
 uint32_t texpatch_generation(void);

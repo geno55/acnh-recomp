@@ -13,6 +13,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "osk.h"
 
 extern "C" {
 #include "../hle.h"
@@ -506,11 +507,11 @@ extern "C" void rando_tab_draw(float scale) {
             bool is_active = active && s.name == active;
             if (renaming == s.name) {
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
-                if (ImGui::InputText("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                if (!osk_is_open() && (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive())) ImGui::SetKeyboardFocusHere();
+                if (ui_input_text("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue, NULL, "Rename seed")) {
                     rename_from = s.name, rename_to = clean_name(rename_buf);
                 }
-                if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renaming.clear();
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ui_input_text_cancelled()) renaming.clear();
             } else if (is_active) ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1), "%s  (playing)", s.name.c_str());
             else ImGui::TextUnformatted(s.name.c_str());
             if (!s.id.empty()) {
@@ -577,7 +578,7 @@ extern "C" void rando_tab_draw(float scale) {
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
     label("Seed name");
-    ImGui::InputTextWithHint("##seed", "random name (yours to choose)", g_opts.seed, sizeof g_opts.seed);
+    ui_input_text("##seed", g_opts.seed, sizeof g_opts.seed, 0, "random name (yours to choose)", "Seed name");
     // Seed ID: shows the ID of the options below (+ this seed's random part); paste one to load a shared seed
     static char idbuf[48];
     static std::string id_msg;
@@ -585,8 +586,8 @@ extern "C" void rando_tab_draw(float scale) {
     label("Seed ID");
     float bw = 150 * scale;
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 2 * bw - 2 * ImGui::GetStyle().ItemSpacing.x);
-    bool editing = ImGui::InputTextWithHint("##seedid", "paste a shared seed ID", idbuf, sizeof idbuf,
-                                            ImGuiInputTextFlags_CharsUppercase);
+    bool editing = ui_input_text("##seedid", idbuf, sizeof idbuf, ImGuiInputTextFlags_CharsUppercase, "paste a shared seed ID",
+                                 "Seed ID");
     bool active_id = ImGui::IsItemActive();
     if (editing) {
         GenOpts t = g_opts;
@@ -597,7 +598,8 @@ extern "C" void rando_tab_draw(float scale) {
     if (!active_id) {  // follow the options
         char cur[48];
         seed_id_encode(g_opts, cur, sizeof cur);
-        if (strcmp(cur, idbuf)) { strlcpy(idbuf, cur, sizeof idbuf); if (id_msg.rfind("Loaded", 0)) id_msg.clear(); }
+        // (an ID from the on-screen keyboard arrives with the field inactive: keep its error to read)
+        if (strcmp(cur, idbuf)) { strlcpy(idbuf, cur, sizeof idbuf); if (id_msg.rfind("Loaded", 0) && !editing) id_msg.clear(); }
     }
     ImGui::SameLine();
     if (ImGui::Button("Copy##id", ImVec2(bw, 0))) ImGui::SetClipboardText(idbuf);
