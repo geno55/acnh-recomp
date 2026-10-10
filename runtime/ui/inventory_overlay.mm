@@ -38,10 +38,11 @@ static uint64_t g_items_obj;  // the Items page (x0 of ITEMS_PAGE_SITE); +0x4020
 
 // Trade sequence (save TRADE_SLOT values 1..14), the LAS flag set when each one is obtained, and the flag the trade
 // NPC's flow sets when it takes the item (its "...Drop" = what it hands over; tools/rando/seed_tables.py exports them).
-// Trade quest shuffle lets Link carry several at once, so the row tells which he still has.
+// Trade quest shuffle lets Link carry several at once, so the row tells which he still has. TradeBananasDone is
+// seed_tables.py's alias (KikiGone with open-bridge, else StickDrop - which open-bridge sets at the start).
 static const struct { const char *name, *flag, *done; } kTrade[] = {
     {"Doll", "TradeYoshiDollGet", "RibbonDrop"}, {"Ribbon", "TradeRibbonGet", "DogfoodDrop"},
-    {"Dog Food", "TradeDogFoodGet", "BananaDrop"}, {"Bananas", "TradeBananasGet", "StickDrop"},
+    {"Dog Food", "TradeDogFoodGet", "BananaDrop"}, {"Bananas", "TradeBananasGet", "TradeBananasDone"},
     {"Stick", "TradeStickGet", "HoneycombDrop"}, {"Honey", "TradeHoneycombGet", "PineappleGet"},
     {"Pineapple", "TradePineappleGet", "HibiscusDrop"}, {"Hibiscus", "TradeHibiscusGet", "LetterDrop"},
     {"Letter", "TradeLetterGet", "BroomDrop"}, {"Broom", "TradeBroomGet", "FishhookDrop"},
