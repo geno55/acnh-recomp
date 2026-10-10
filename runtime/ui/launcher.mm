@@ -11,6 +11,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #endif
 #include <SDL3/SDL.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <pthread.h>
 #include <string>
@@ -135,6 +136,40 @@ static std::string largest_with(const std::string &dir, const char *ext) {
     return best;
 }
 
+// hactool 1.4.0 (the latest; its parser is unchanged since) rejects the whole keys file at the first known key whose
+// value isn't exactly its size. Newer dumps write master_kek_source_06+ / mariko_master_kek_source_05+ as 34 digits,
+// and none of those are needed here, so hactool gets a copy keeping only "name = hex" lines whose value is whole
+// 16-byte blocks. Returns the number of lines dropped (-1: unreadable).
+static int clean_keys(const std::string &src, const std::string &dst) {
+    FILE *in = fopen(src.c_str(), "rb");
+    if (!in) return -1;
+    FILE *out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); return -1; }
+    int dropped = 0;
+    char line[4096];
+    while (fgets(line, sizeof line, in)) {
+        std::string name, value;
+        const char *eq = strchr(line, '=');
+        for (const char *p = line; *p && p != eq; p++)
+            if (!isspace((unsigned char)*p)) name += *p;
+        if (eq)
+            for (const char *p = eq + 1; *p; p++)
+                if (!isspace((unsigned char)*p)) value += *p;
+        if (name.empty() || name[0] == ';' || name[0] == '#') continue;
+        bool hex = !value.empty() && value.size() % 32 == 0 &&
+                   std::all_of(value.begin(), value.end(), [](char ch) { return isxdigit((unsigned char)ch) != 0; });
+        if (!hex) {
+            dropped++;
+            fprintf(stderr, "[launcher] keys: skipping %s (%zu hex digits)\n", name.c_str(), value.size());
+            continue;
+        }
+        fprintf(out, "%s = %s\n", name.c_str(), value.c_str());
+    }
+    fclose(in);
+    fclose(out);
+    return dropped;
+}
+
 static void *extract_thread(void *) {
     std::string dump, keys;
     pthread_mutex_lock(&g_lock);
@@ -149,6 +184,7 @@ static void *extract_thread(void *) {
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
     set_job("Reading the game dump...");
+    if (clean_keys(keys, tmp + "/prod.keys") >= 0) keys = tmp + "/prod.keys";  // (removed with .extract at the end)
     std::vector<std::string> a = {hactool, "-k", keys};
     std::string titlekey;
     if (nsp) {
