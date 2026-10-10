@@ -400,7 +400,10 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
         for (int i = 0; i < nm; i++) {
             float x0 = p0.x + sw * i;
             soul_icon(dl, ImVec2(x0 + 12 * u, (sy0 + sy1) * 0.5f + 4 * u), 20 * u, mo[i]);
-            dl->AddText(font, sfs, ImVec2(x0 + 22 * u, (sy0 + sy1 - sfs) * 0.5f),
+            // (long names - "Dodongo Snakes" - shrink to their cell instead of running into the next one)
+            float tw = font->CalcTextSizeA(sfs, FLT_MAX, 0, mn[i]).x, room = sw - 26 * u;
+            float fs = tw > room && tw > 0 ? sfs * room / tw : sfs;
+            dl->AddText(font, fs, ImVec2(x0 + 22 * u, (sy0 + sy1 - fs) * 0.5f),
                         mo[i] ? IM_COL32(255, 240, 200, 255) : IM_COL32(150, 130, 100, 200), mn[i]);
         }
     }
