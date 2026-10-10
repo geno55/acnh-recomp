@@ -119,7 +119,33 @@ dist: $(EXE)
 	cp $(EXE) build/dist/
 	ldd $(EXE) | awk '/ucrt64/ {print $$3}' | sort -u | xargs -I{} cp -u {} build/dist/
 
-.PHONY: all gen gen-objs runtime-objs dist
+# Seed generator as a standalone helper, so players need no Python: build/helper/rando-gen/ (rando-gen[.exe] +
+# _internal/), frozen by PyInstaller from tools/rando/rando_gen.spec in its own venv (build/rando-venv). Ship the
+# rando-gen folder next to the exe (Windows) or as LARecomp.app/Contents/Resources/rando-gen (runtime/ui/rando_tab.mm
+# generator_cmd). PyInstaller only builds for the OS it runs on.
+# macOS arm64: Homebrew python@3.12 and keystone (`brew install keystone`: the keystone wheel has no dylib); the
+#   helper needs the macOS version that Python was built for or newer (python.org's 3.12 targets older ones).
+# Windows x86-64 (untested): from the MSYS2 shell with a python.org CPython 3.12 (MSYS2's Python has no oead wheel),
+#   e.g. make rando-helper RANDO_PY="/c/Users/<you>/AppData/Local/Programs/Python/Python312/python.exe"
+ifeq ($(PLATFORM),macos)
+RANDO_PY  ?= python3.12
+RANDO_VPY := build/rando-venv/bin/python
+else
+RANDO_PY  ?= py -3.12
+RANDO_VPY := build/rando-venv/Scripts/python.exe
+endif
+
+rando-helper: build/rando-venv/.ok
+	$(RANDO_VPY) -m PyInstaller --noconfirm --clean --log-level WARN --distpath build/helper --workpath build/pyinstaller \
+	    tools/rando/rando_gen.spec
+	@du -sh build/helper/rando-gen
+
+build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
+	$(RANDO_PY) -m venv build/rando-venv
+	$(RANDO_VPY) -m pip install -q -r third_party/LAS-Randomizer/requirements.txt pyinstaller==6.22.3
+	touch $@
+
+.PHONY: all gen gen-objs runtime-objs dist rando-helper
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c

@@ -108,7 +108,9 @@ Requirements (macOS on Apple Silicon): Xcode command line tools (clang), [Homebr
 2. Recompile the game code: `make gen` (writes `generated/`, from your own `extracted/exefs`).
 3. Build: `make -j10` -> `build/larecomp`.
 4. Randomizer: create the Python environment for LAS-Randomizer in `third_party/LAS-Randomizer/venv`:
-   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`.
+   `python3.12 -m venv venv && venv/bin/pip install -r requirements.txt`. Release builds instead ship the seed
+   generator as a standalone helper, so players need no Python: `make rando-helper` (needs `brew install keystone`)
+   -> `build/helper/rando-gen/`.
 5. Run: `./build/larecomp extracted` (start screen) or `./build/larecomp extracted --play` (straight into the game).
 
 ## Credits
@@ -135,6 +137,10 @@ none of their files are used):
 - [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) - Windows renderer (MIT)
 - [hactool](https://github.com/SciresM/hactool) by SciresM - game file extraction (ISC)
 - [oead](https://github.com/zeldamods/oead) and [evfl](https://github.com/zeldamods/evfl) - Nintendo file formats, used by LAS-Randomizer
+- [PyInstaller](https://pyinstaller.org) - packs the seed generator into a standalone helper (GPL 2.0+ with the
+  bootloader exception, which allows distributing the packed program). The helper bundles CPython (PSF License),
+  oead / evfl (GPL 2.0+), [Keystone](https://www.keystone-engine.org) (GPL 2.0; Python bindings BSD), quicktex
+  (LGPL 3), Pillow (MIT-CMU), PyYAML (MIT) and appdirs (MIT)
 - [Capstone](https://www.capstone-engine.org) - disassembly in the development tools
 - [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
@@ -150,6 +156,7 @@ to play.
 
 LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
 [MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), Dear ImGui (MIT),
-Vulkan Memory Allocator (MIT), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), hactool (ISC), oead / evfl (used by
-the randomizer's Python environment, under their own licenses). The license covers LAS Recomp's code only - it grants
+Vulkan Memory Allocator (MIT), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), hactool (ISC), and the seed generator
+helper's bundled libraries listed under Credits (oead / evfl / Keystone are GPL 2.0+: the helper is a separate program
+the game runs, and its sources are this repository plus those projects' published sources). The license covers LAS Recomp's code only - it grants
 nothing for Nintendo's game, which you must supply yourself.
