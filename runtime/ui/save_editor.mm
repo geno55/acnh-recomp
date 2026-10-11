@@ -10,6 +10,7 @@
 #include "imgui.h"
 #include "osk.h"
 #include "item_names.h"
+#include "option_rows.h"
 
 extern "C" void give_item_request(int id, int count, int index);
 extern "C" bool pets_owned(int c);             // runtime/hle/pets.c
@@ -50,10 +51,8 @@ static void sync_header(void) {
 }
 
 static char g_name[32];
-static bool g_name_dirty;
 
 extern "C" void save_editor_on_open(void) {
-    g_name_dirty = false;
     if (!loaded()) return;
     const uint16_t *u = (const uint16_t *)(S() + NAME);
     int n = 0;
@@ -79,82 +78,54 @@ static void write_name(const char *s) {
     memcpy(S() + NAME, out, sizeof out);
 }
 
-// ---- small widgets (label column + control column, controller friendly)
-static float g_col;
-static void label(const char *t) {
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(t);
-    ImGui::SameLine(g_col);
-    ImGui::SetNextItemWidth(-1);
+// ---- rows (runtime/ui/option_rows.h)
+static bool bit_get(uint32_t off, int bit, int width) {
+    return width == 8 ? (F<uint8_t>(off) >> bit) & 1 : width == 16 ? (F<uint16_t>(off) >> bit) & 1 : (F<uint32_t>(off) >> bit) & 1;
 }
-
-static bool slider(const char *t, int *v, int lo, int hi, const char *fmt = "%d") {
-    ImGui::PushID(t);
-    label(t);
-    bool ch = ImGui::SliderInt("##s", v, lo, hi, fmt, ImGuiSliderFlags_AlwaysClamp);
-    ImGui::PopID();
-    return ch;
-}
-
-static bool bitbox(const char *t, uint32_t off, int bit, int width = 32) {
-    bool v;
-    if (width == 8) v = (F<uint8_t>(off) >> bit) & 1;
-    else if (width == 16) v = (F<uint16_t>(off) >> bit) & 1;
-    else v = (F<uint32_t>(off) >> bit) & 1;
-    if (!ImGui::Checkbox(t, &v)) return false;
+static void bit_set(uint32_t off, int bit, int width, bool v) {
     if (width == 8) F<uint8_t>(off) = (uint8_t)((F<uint8_t>(off) & ~(1u << bit)) | ((uint32_t)v << bit));
     else if (width == 16) F<uint16_t>(off) = (uint16_t)((F<uint16_t>(off) & ~(1u << bit)) | ((uint32_t)v << bit));
     else F<uint32_t>(off) = (F<uint32_t>(off) & ~(1u << bit)) | ((uint32_t)v << bit);
-    return true;
+}
+
+struct Bit { const char *name; uint32_t off; int bit; int width; const char *desc; };
+static void bit_rows(const Bit *b, int n) {
+    for (int i = 0; i < n; i++) {
+        bool v = bit_get(b[i].off, b[i].bit, b[i].width);
+        if (opt_toggle(b[i].name, &v, false, b[i].desc)) bit_set(b[i].off, b[i].bit, b[i].width, v);
+    }
 }
 
 // Level item: "owned" bit in ITEMS plus an upgrade bit in UPGRADES.
-static bool level(const char *t, int item_bit, int up_bit, const char *const names[3]) {
+static void level(const char *t, int item_bit, int up_bit, const char *const names[3], const char *desc) {
     int lv = !((F<uint32_t>(ITEMS) >> item_bit) & 1) ? 0 : ((F<uint8_t>(UPGRADES) >> up_bit) & 1) ? 2 : 1;
-    ImGui::PushID(t);
-    label(t);
-    bool ch = false;
-    if (ImGui::BeginCombo("##l", names[lv])) {
-        for (int i = 0; i < 3; i++)
-            if (ImGui::Selectable(names[i], i == lv)) { lv = i; ch = true; }
-        ImGui::EndCombo();
-    }
-    if (ImGui::IsItemFocused()) {
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) { lv = (lv + 1) % 3; ch = true; }
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) { lv = (lv + 2) % 3; ch = true; }
-    }
-    if (ch) {
-        F<uint32_t>(ITEMS) = (F<uint32_t>(ITEMS) & ~(1u << item_bit)) | ((uint32_t)(lv > 0) << item_bit);
-        F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & ~(1u << up_bit)) | ((uint32_t)(lv == 2) << up_bit));
-    }
-    ImGui::PopID();
-    return ch;
+    if (!opt_choice(t, &lv, names, 3, 0, desc)) return;
+    F<uint32_t>(ITEMS) = (F<uint32_t>(ITEMS) & ~(1u << item_bit)) | ((uint32_t)(lv > 0) << item_bit);
+    F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & ~(1u << up_bit)) | ((uint32_t)(lv == 2) << up_bit));
 }
 
-static void section(const char *t) {
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", t);
-    ImGui::Separator();
-}
-
-// Grid of checkboxes, `cols` per row.
-struct Bit { const char *name; uint32_t off; int bit; int width; };
-static void bit_grid(const Bit *b, int n, int cols) {
-    if (ImGui::BeginTable("##g", cols)) {
-        for (int i = 0; i < n; i++) {
-            ImGui::TableNextColumn();
-            bitbox(b[i].name, b[i].off, b[i].bit, b[i].width);
-        }
-        ImGui::EndTable();
-    }
-}
-
-static void capacity(const char *t, uint32_t count_off, int up_bit, int base_cap) {
+static void ammo(const char *t, uint32_t count_off, int up_bit, int base_cap, const char *desc) {
     int cap = ((F<uint8_t>(UPGRADES) >> up_bit) & 1) ? base_cap * 2 : base_cap;
     int v = F<uint8_t>(count_off);
-    char lbl[64];
-    snprintf(lbl, sizeof lbl, "%s", t);
-    if (slider(lbl, &v, 0, cap)) F<uint8_t>(count_off) = (uint8_t)v;
+    if (v > cap) v = cap;
+    char fmt[16];
+    snprintf(fmt, sizeof fmt, "%%d / %d", cap);
+    if (opt_int(t, &v, 0, cap, 1, cap, fmt, desc)) F<uint8_t>(count_off) = (uint8_t)v;
+}
+
+static void max_out(void) {
+    F<uint16_t>(CONTAINERS) = 0x1FF;
+    F<uint64_t>(PIECES) = 0xFFFFFFFFull;
+    F<uint32_t>(RUPEES) = 999;
+    F<uint64_t>(SHELLS) = low_bits(50);
+    F<uint8_t>(LEAVES) = 0x1F;
+    F<uint32_t>(ITEMS) |= 0xFFFF;
+    F<uint8_t>(UPGRADES) |= 0x3F;
+    F<uint8_t>(BOMBS) = 60; F<uint8_t>(ARROWS) = 60; F<uint8_t>(POWDER) = 40;
+    F<uint8_t>(SONGS) = 7;
+    F<uint32_t>(KEYITEMS) |= 0x7FFF;
+    F<uint8_t>(SENSOR) |= 1;
+    F<int16_t>(HP) = (int16_t)max_hp();
 }
 
 extern "C" void save_editor_draw(float scale) {
@@ -162,176 +133,164 @@ extern "C" void save_editor_draw(float scale) {
         ImGui::TextDisabled("Load a save file first: the editor changes the save that's currently being played.");
         return;
     }
-    g_col = ImGui::GetContentRegionAvail().x * 0.38f;
-    ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Changes apply immediately and are kept the next time the game saves. The heart row on the HUD "
-                        "updates after the next screen transition.");
-    ImGui::PopTextWrapPos();
+    opt_begin("##save", scale);
 
-    if (ImGui::Button("Max out everything")) {
-        F<uint16_t>(CONTAINERS) = 0x1FF;
-        F<uint64_t>(PIECES) = 0xFFFFFFFFull;
-        F<uint32_t>(RUPEES) = 999;
-        F<uint64_t>(SHELLS) = low_bits(50);
-        F<uint8_t>(LEAVES) = 0x1F;
-        F<uint32_t>(ITEMS) |= 0xFFFF;
-        F<uint8_t>(UPGRADES) |= 0x3F;
-        F<uint8_t>(BOMBS) = 60; F<uint8_t>(ARROWS) = 60; F<uint8_t>(POWDER) = 40;
-        F<uint8_t>(SONGS) = 7;
-        F<uint32_t>(KEYITEMS) |= 0x7FFF;
-        F<uint8_t>(SENSOR) |= 1;
-        F<int16_t>(HP) = (int16_t)max_hp();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Refill hearts & ammo")) {
+    opt_section("Quick");
+    if (opt_button("Max out everything", "Every heart, item, upgrade, song, instrument and dungeon key, full ammo, "
+                                         "999 rupees, all 50 Secret Seashells and 5 Golden Leaves.\n\n"
+                                         "The hearts on the HUD update after the next screen change."))
+        max_out();
+    if (opt_button("Refill hearts & ammo", "Refills health, and the bombs, arrows and Magic Powder Link owns.")) {
         F<int16_t>(HP) = (int16_t)max_hp();
         if (F<uint32_t>(ITEMS) & (1u << 2)) F<uint8_t>(BOMBS) = (F<uint8_t>(UPGRADES) & 0x10) ? 60 : 30;
         if (F<uint32_t>(ITEMS) & (1u << 3)) F<uint8_t>(ARROWS) = (F<uint8_t>(UPGRADES) & 0x20) ? 60 : 30;
         if (F<uint32_t>(ITEMS) & (1u << 8)) F<uint8_t>(POWDER) = (F<uint8_t>(UPGRADES) & 0x08) ? 40 : 20;
     }
 
-    section("Player");
-    label("Name");
-    if (ui_input_text("##name", g_name, 9 * 3, 0, NULL, "Name")) g_name_dirty = true;
-    if (g_name_dirty && !ImGui::IsItemActive()) { write_name(g_name); g_name_dirty = false; }
-
+    opt_section("Player");
+    if (opt_text("Name", g_name, 9 * 3, NULL, "The save file's name (up to 8 letters).")) write_name(g_name);
     int containers = __builtin_popcount(F<uint16_t>(CONTAINERS) & 0x1FF);
-    if (slider("Heart containers", &containers, 0, 9)) F<uint16_t>(CONTAINERS) = (uint16_t)low_bits(containers);
+    if (opt_int("Heart Containers", &containers, 0, 9, 1, 0, "%d / 9",
+                "Heart Containers (one heart each), from the dungeon bosses.\n\n"
+                "The hearts on the HUD update after the next screen change."))
+        F<uint16_t>(CONTAINERS) = (uint16_t)low_bits(containers);
     int pieces = __builtin_popcountll(F<uint64_t>(PIECES) & 0xFFFFFFFFull);
-    if (slider("Pieces of heart", &pieces, 0, 32)) F<uint64_t>(PIECES) = low_bits(pieces);
-    int mh = max_hp();
-    int hp = F<int16_t>(HP);
-    if (hp > mh) { hp = mh; F<int16_t>(HP) = (int16_t)hp; }
-    float hearts = hp / 4.0f;
-    ImGui::PushID("hp");
-    label("Health");
-    char fmt[64];
-    snprintf(fmt, sizeof fmt, "%%.2f / %.0f hearts", mh / 4.0f);
-    if (ImGui::SliderFloat("##hp", &hearts, 0.25f, mh / 4.0f, fmt, ImGuiSliderFlags_AlwaysClamp))
-        F<int16_t>(HP) = (int16_t)fmaxf(1, roundf(hearts * 4));
-    ImGui::PopID();
-    int rupees = (int)F<uint32_t>(RUPEES);
-    if (slider("Rupees", &rupees, 0, 999)) F<uint32_t>(RUPEES) = (uint32_t)rupees;
-    int shells = __builtin_popcountll(F<uint64_t>(SHELLS) & low_bits(50));
-    if (slider("Secret Seashells", &shells, 0, 50)) F<uint64_t>(SHELLS) = low_bits(shells);
-    int leaves = __builtin_popcount(F<uint8_t>(LEAVES) & 0x1F);
-    if (slider("Golden Leaves", &leaves, 0, 5)) F<uint8_t>(LEAVES) = (uint8_t)low_bits(leaves);
+    if (opt_int("Pieces of Heart", &pieces, 0, 32, 1, 0, "%d / 32",
+                "Pieces of Heart: every 4 make a heart.\n\nThe hearts on the HUD update after the next screen change."))
+        F<uint64_t>(PIECES) = low_bits(pieces);
     {
-        const char *tunics[] = {"Green", "Red", "Blue", "Red + Blue"};
+        int mh = max_hp();
+        if (F<int16_t>(HP) > mh) F<int16_t>(HP) = (int16_t)mh;
+        float hearts = F<int16_t>(HP) / 4.0f;
+        if (opt_slider("Health", &hearts, 0.25f, mh / 4.0f, 0.25f, mh / 4.0f, "%g hearts",
+                       "Link's current health, in quarter hearts."))
+            F<int16_t>(HP) = (int16_t)fmaxf(1, roundf(hearts * 4));
+    }
+    int rupees = (int)F<uint32_t>(RUPEES);
+    if (opt_int("Rupees", &rupees, 0, 999, 1, 0, "%d", "Rupees in Link's wallet (up to 999).\n\nHold left / right to go faster."))
+        F<uint32_t>(RUPEES) = (uint32_t)rupees;
+    int shells = __builtin_popcountll(F<uint64_t>(SHELLS) & low_bits(50));
+    if (opt_int("Secret Seashells", &shells, 0, 50, 1, 0, "%d / 50", "Secret Seashells collected."))
+        F<uint64_t>(SHELLS) = low_bits(shells);
+    int leaves = __builtin_popcount(F<uint8_t>(LEAVES) & 0x1F);
+    if (opt_int("Golden Leaves", &leaves, 0, 5, 1, 0, "%d / 5", "Golden Leaves for Richard."))
+        F<uint8_t>(LEAVES) = (uint8_t)low_bits(leaves);
+    {
+        static const char *const tunics[] = {"Green", "Red", "Blue", "Red + Blue"};
         int t = (F<uint8_t>(UPGRADES) >> 6) & 3;
-        ImGui::PushID("tunic");
-        label("Tunics owned");
-        if (ImGui::BeginCombo("##t", tunics[t])) {
-            for (int i = 0; i < 4; i++)
-                if (ImGui::Selectable(tunics[i], i == t)) F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & 0x3F) | (i << 6));
-            ImGui::EndCombo();
-        }
-        ImGui::PopID();
+        if (opt_choice("Tunics", &t, tunics, 4, 0, "The tunics from the Color Dungeon: red doubles Link's attack, blue "
+                                                   "halves the damage he takes."))
+            F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & 0x3F) | (t << 6));
     }
 
-    section("Equipment");
-    static const char *sword[] = {"None", "Sword", "Level 2 Sword"};
-    static const char *shield[] = {"None", "Shield", "Mirror Shield"};
-    static const char *bracelet[] = {"None", "Power Bracelet", "Level 2 Bracelet"};
-    level("Sword", 0, 0, sword);
-    level("Shield", 1, 1, shield);
-    level("Power Bracelet", 10, 2, bracelet);
+    opt_section("Equipment");
+    static const char *const sword[] = {"None", "Sword", "Level 2"};
+    static const char *const shield[] = {"None", "Shield", "Mirror Shield"};
+    static const char *const bracelet[] = {"None", "Power Bracelet", "Level 2"};
+    level("Sword", 0, 0, sword, "Link's sword. Level 2 is the Noble Sword from the Seashell Mansion.");
+    level("Shield", 1, 1, shield, "Link's shield. The Mirror Shield blocks beams and fire.");
+    level("Power Bracelet", 10, 2, bracelet, "Lifts pots and rocks. Level 2 lifts the heavy ones.");
     static const Bit items[] = {
-        {"Bombs", ITEMS, 2, 32}, {"Bow", ITEMS, 3, 32}, {"Hookshot", ITEMS, 4, 32}, {"Boomerang", ITEMS, 5, 32},
-        {"Magic Rod", ITEMS, 6, 32}, {"Shovel", ITEMS, 7, 32}, {"Magic Powder", ITEMS, 8, 32}, {"Roc's Feather", ITEMS, 9, 32},
-        {"Pegasus Boots", ITEMS, 11, 32}, {"Ocarina", ITEMS, 12, 32}, {"Flippers", KEYITEMS, 0, 32},
-        {"Secret Medicine", KEYITEMS, 1, 32}, {"Sleepy Toadstool", KEYITEMS, 15, 32}, {"Seashell Sensor", SENSOR, 0, 8},
+        {"Bombs", ITEMS, 2, 32, "The bombs item (bomb bag)."},
+        {"Bow", ITEMS, 3, 32, "The bow."},
+        {"Hookshot", ITEMS, 4, 32, "The Hookshot."},
+        {"Boomerang", ITEMS, 5, 32, "The Boomerang."},
+        {"Magic Rod", ITEMS, 6, 32, "The Magic Rod."},
+        {"Shovel", ITEMS, 7, 32, "The Shovel."},
+        {"Magic Powder", ITEMS, 8, 32, "Magic Powder."},
+        {"Roc's Feather", ITEMS, 9, 32, "Roc's Feather: jump."},
+        {"Pegasus Boots", ITEMS, 11, 32, "Pegasus Boots: dash."},
+        {"Ocarina", ITEMS, 12, 32, "The Ocarina. Songs are under Ocarina songs."},
+        {"Flippers", KEYITEMS, 0, 32, "Flippers: swim and dive."},
+        {"Secret Medicine", KEYITEMS, 1, 32, "Secret Medicine: revives Link once when his health runs out."},
+        {"Sleepy Toadstool", KEYITEMS, 15, 32, "The Sleepy Toadstool for the witch."},
+        {"Seashell Sensor", SENSOR, 0, 8, "The Seashell Sensor: chimes near hidden Secret Seashells."},
     };
-    ImGui::PushID("items");
-    bit_grid(items, sizeof items / sizeof items[0], 3);
-    ImGui::PopID();
-    section("Ammo");
-    bitbox("Bomb bag upgrade (60)", UPGRADES, 4, 8); ImGui::SameLine();
-    bitbox("Quiver upgrade (60)", UPGRADES, 5, 8); ImGui::SameLine();
-    bitbox("Powder upgrade (40)", UPGRADES, 3, 8);
-    capacity("Bombs", BOMBS, 4, 30);
-    capacity("Arrows", ARROWS, 5, 30);
-    capacity("Magic Powder", POWDER, 3, 20);
+    bit_rows(items, sizeof items / sizeof items[0]);
 
-    section("Ocarina songs");
-    static const Bit songs[] = {{"Ballad of the Wind Fish", SONGS, 0, 8}, {"Manbo's Mambo", SONGS, 1, 8}, {"Frog's Song of Soul", SONGS, 2, 8}};
-    ImGui::PushID("songs");
-    bit_grid(songs, 3, 3);
-    ImGui::PopID();
+    opt_section("Ammo");
+    static const Bit ups[] = {
+        {"Bomb bag upgrade", UPGRADES, 4, 8, "Carry up to 60 bombs instead of 30."},
+        {"Quiver upgrade", UPGRADES, 5, 8, "Carry up to 60 arrows instead of 30."},
+        {"Powder upgrade", UPGRADES, 3, 8, "Carry up to 40 Magic Powder instead of 20."},
+    };
+    bit_rows(ups, 3);
+    ammo("Bombs", BOMBS, 4, 30, "Bombs carried.");
+    ammo("Arrows", ARROWS, 5, 30, "Arrows carried.");
+    ammo("Magic Powder", POWDER, 3, 20, "Magic Powder carried.");
 
-    section("Bottles");
-    static const Bit bottles[] = {{"Bottle 1", ITEMS, 13, 32}, {"Bottle 2", ITEMS, 14, 32}, {"Bottle 3", ITEMS, 15, 32},
-                                  {"Fairy in bottle 1", FAIRIES, 0, 8}, {"Fairy in bottle 2", FAIRIES, 1, 8}, {"Fairy in bottle 3", FAIRIES, 2, 8}};
-    ImGui::PushID("bottles");
-    bit_grid(bottles, 6, 3);
-    ImGui::PopID();
+    opt_section("Ocarina songs");
+    static const Bit songs[] = {
+        {"Ballad of the Wind Fish", SONGS, 0, 8, "Marin's song."},
+        {"Manbo's Mambo", SONGS, 1, 8, "Warps to Manbo's Pond or a warp point."},
+        {"Frog's Song of Soul", SONGS, 2, 8, "Brings some things back to life."},
+    };
+    bit_rows(songs, 3);
 
-    section("Instruments of the Sirens");
+    opt_section("Bottles");
+    static const Bit bottles[] = {
+        {"Bottle 1", ITEMS, 13, 32, "An empty bottle."}, {"Fairy in bottle 1", FAIRIES, 0, 8, "A fairy in bottle 1."},
+        {"Bottle 2", ITEMS, 14, 32, "An empty bottle."}, {"Fairy in bottle 2", FAIRIES, 1, 8, "A fairy in bottle 2."},
+        {"Bottle 3", ITEMS, 15, 32, "An empty bottle."}, {"Fairy in bottle 3", FAIRIES, 2, 8, "A fairy in bottle 3."},
+    };
+    bit_rows(bottles, 6);
+
+    opt_section("Instruments of the Sirens");
+    if (opt_button("All instruments", "Gives all eight instruments.")) F<uint32_t>(KEYITEMS) |= 0x7F80;
     static const Bit inst[] = {
-        {"Full Moon Cello", KEYITEMS, 7, 32}, {"Conch Horn", KEYITEMS, 8, 32}, {"Sea Lily's Bell", KEYITEMS, 9, 32},
-        {"Surf Harp", KEYITEMS, 10, 32}, {"Wind Marimba", KEYITEMS, 11, 32}, {"Coral Triangle", KEYITEMS, 12, 32},
-        {"Evening Calm Organ", KEYITEMS, 13, 32}, {"Thunder Drum", KEYITEMS, 14, 32},
+        {"Full Moon Cello", KEYITEMS, 7, 32, "Tail Cave's instrument."},
+        {"Conch Horn", KEYITEMS, 8, 32, "Bottle Grotto's instrument."},
+        {"Sea Lily's Bell", KEYITEMS, 9, 32, "Key Cavern's instrument."},
+        {"Surf Harp", KEYITEMS, 10, 32, "Angler's Tunnel's instrument."},
+        {"Wind Marimba", KEYITEMS, 11, 32, "Catfish's Maw's instrument."},
+        {"Coral Triangle", KEYITEMS, 12, 32, "Face Shrine's instrument."},
+        {"Evening Calm Organ", KEYITEMS, 13, 32, "Eagle's Tower's instrument."},
+        {"Thunder Drum", KEYITEMS, 14, 32, "Turtle Rock's instrument."},
     };
-    ImGui::PushID("inst");
-    bit_grid(inst, 8, 4);
-    ImGui::PopID();
-    if (ImGui::Button("All instruments")) F<uint32_t>(KEYITEMS) |= 0x7F80;
+    bit_rows(inst, 8);
 
-    section("Dungeon keys");
-    static const Bit keys[] = {{"Tail Key", KEYITEMS, 2, 32}, {"Slime Key", KEYITEMS, 3, 32}, {"Angler Key", KEYITEMS, 4, 32},
-                               {"Face Key", KEYITEMS, 5, 32}, {"Bird Key", KEYITEMS, 6, 32}};
-    ImGui::PushID("keys");
-    bit_grid(keys, 5, 3);
-    ImGui::PopID();
+    opt_section("Dungeon keys");
+    static const Bit keys[] = {
+        {"Tail Key", KEYITEMS, 2, 32, "Opens Tail Cave."},
+        {"Slime Key", KEYITEMS, 3, 32, "Opens Key Cavern."},
+        {"Angler Key", KEYITEMS, 4, 32, "Opens Angler's Tunnel."},
+        {"Face Key", KEYITEMS, 5, 32, "Opens Face Shrine."},
+        {"Bird Key", KEYITEMS, 6, 32, "Opens Eagle's Tower."},
+    };
+    bit_rows(keys, 5);
 
-    section("Trading sequence");
+    opt_section("Trading quest");
     {
-        static const char *trade[] = {"None", "Yoshi Doll", "Ribbon", "Dog Food", "Bananas", "Stick", "Honeycomb", "Pineapple",
-                                      "Hibiscus", "Goat's Letter", "Broom", "Fishing Hook", "Necklace", "Mermaid's Scale",
-                                      "Magnifying Lens"};
+        static const char *const trade[] = {"None", "Yoshi Doll", "Ribbon", "Dog Food", "Bananas", "Stick", "Honeycomb",
+                                            "Pineapple", "Hibiscus", "Goat's Letter", "Broom", "Fishing Hook", "Necklace",
+                                            "Mermaid's Scale", "Magnifying Lens"};
         int t = F<uint8_t>(TRADE);
         if (t > 14) t = 0;
-        ImGui::PushID("trade");
-        label("Current item");
-        if (ImGui::BeginCombo("##tr", trade[t])) {
-            for (int i = 0; i < 15; i++)
-                if (ImGui::Selectable(trade[i], i == t)) F<uint8_t>(TRADE) = (uint8_t)i;
-            ImGui::EndCombo();
-        }
-        ImGui::PopID();
+        if (opt_choice("Trade item", &t, trade, 15, 0, "The trading quest item Link is carrying.")) F<uint8_t>(TRADE) = (uint8_t)t;
     }
+
     if (rando_seed_dir()) {  // randomizer seeds: companions are items (runtime/hle/pets.c)
-        section("Companions");
+        opt_section("Companions");
         static const struct { int c; const char *name; } comps[] = {{1, "BowWow"}, {2, "Marin"}, {4, "Flying Rooster"}, {3, "Ghost"}};
         for (const auto &k : comps) {
             bool on = pets_owned(k.c);
-            ImGui::PushID(k.c);
-            if (ImGui::Checkbox(k.name, &on)) pets_give(k.c, on);
-            ImGui::PopID();
-            if (k.c != 3) ImGui::SameLine();
+            if (opt_toggle(k.name, &on, false, "In this seed companions are items: owning one lets it follow Link."))
+                pets_give(k.c, on);
         }
-        ImGui::NewLine();
     }
-    section("Give any item");
+
+    opt_section("Give any item");
     {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
         static int item = 0, count = 1, index = -1;
-        ImGui::PushID("give");
-        label("Item");
-        if (ImGui::BeginCombo("##item", kItemNames[item])) {
-            for (int i = 0; i < (int)(sizeof kItemNames / sizeof kItemNames[0]); i++)
-                if (ImGui::Selectable(kItemNames[i], i == item)) item = i;
-            ImGui::EndCombo();
-        }
-        slider("Count", &count, 1, 99);
-        label("Index (-1 = any)");
-        ImGui::InputInt("##idx", &index);
-        ImGui::Spacing();
-        if (ImGui::Button("Give")) give_item_request(item, count, index);
-        ImGui::SameLine();
-        ImGui::TextDisabled("Heart pieces, seashells, golden leaves etc. use their index.");
-        ImGui::PopID();
+        int n = (int)(sizeof kItemNames / sizeof kItemNames[0]);
+        opt_choice("Item", &item, kItemNames, n, -1, "The item to give, through the game's own pickup.");
+        opt_int("Count", &count, 1, 99, 1, 1, "%d", "How many to give.");
+        opt_int("Index", &index, -1, 99, 1, -1, "%d",
+                "Which one, for items with several: Pieces of Heart, Secret Seashells, Golden Leaves etc. each have "
+                "an index.", "Any");
+        if (opt_button("Give", "Gives the item above.")) give_item_request(item, count, index);
     }
-    (void)scale;
+    opt_end();
     sync_header();
 }
 

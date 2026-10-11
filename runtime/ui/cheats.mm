@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "imgui.h"
+#include "option_rows.h"
 
 extern "C" {
 #include "../hle.h"
@@ -55,52 +56,45 @@ extern "C" void cheats_frame(void) {
     if (g_settings.cheat_rupees && F<uint32_t>(RUPEES) != 999) F<uint32_t>(RUPEES) = 999;
 }
 
-static bool toggle(const char *label, const char *desc, bool *v) {
-    bool changed = ImGui::Checkbox(label, v);
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", desc);
-    if (changed) settings_save();
-    return changed;
-}
-
 extern "C" void cheats_draw(float scale) {
-    (void)scale;
     if (!game_in_play()) {
         ImGui::TextDisabled("Load a save file and get into the game to use cheats.");
         return;
     }
-    ImGui::SeparatorText("Always on (saved)");
-    toggle("Infinite hearts", "health refills to full", &g_settings.cheat_hearts);
-    toggle("Infinite ammo", "bombs, arrows and magic powder stay full (for bags you own)", &g_settings.cheat_ammo);
-    toggle("Infinite rupees", "999 rupees", &g_settings.cheat_rupees);
-    toggle("Hookshot anything", "latches onto any wall or object (seeds made with it: on)", &g_settings.cheat_hookshot);
-    ImGui::Spacing();
-    ImGui::SeparatorText("One-time");
-    if (ImGui::Button("Max hearts (20)")) {
+    opt_begin("##cheats", scale);
+    opt_section("Always on");
+    if (opt_toggle("Infinite hearts", &g_settings.cheat_hearts, false, "Health refills to full whenever Link is hurt."))
+        settings_save();
+    if (opt_toggle("Infinite ammo", &g_settings.cheat_ammo, false,
+                   "Bombs, arrows and Magic Powder stay full.\n\nOnly for the bags Link already owns."))
+        settings_save();
+    if (opt_toggle("Infinite rupees", &g_settings.cheat_rupees, false, "Rupees stay at 999.")) settings_save();
+
+    opt_section("One time");
+    if (opt_button("Max hearts", "Gives all 9 Heart Containers and 32 Pieces of Heart (20 hearts), then refills them.\n\n"
+                                 "The hearts on the HUD update after the next screen change.")) {
         F<uint16_t>(CONTAINERS) = 0x1FF;
         F<uint64_t>(PIECES) = 0xFFFFFFFFull;
         F<int16_t>(HP) = (int16_t)max_hp();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Refill hearts")) F<int16_t>(HP) = (int16_t)max_hp();
-    ImGui::SameLine();
-    if (ImGui::Button("Max capacity (bombs/arrows/powder)")) {
+    if (opt_button("Refill hearts", "Refills health to full.")) F<int16_t>(HP) = (int16_t)max_hp();
+    if (opt_button("Max ammo capacity", "Upgrades the bomb bag and quiver to 60 and Magic Powder to 40, then fills "
+                                        "them (for the bags Link owns).")) {
         F<uint8_t>(UPGRADES) |= 0x38;  // bits 3-5: powder 40, bombs 60, arrows 60
         fill_ammo(BOMBS, 2, 4, 30);
         fill_ammo(ARROWS, 3, 5, 30);
         fill_ammo(POWDER, 8, 3, 20);
     }
-    ImGui::Spacing();
-    ImGui::SeparatorText("Companion");
+
+    opt_section("Companion");
     {  // save+0x555D: the follower (verified: setting it spawns that companion at the next screen / room load)
-        static const char *names[] = {"None", "BowWow", "Marin", "Ghost", "Flying Rooster"};
+        static const char *const names[] = {"None", "BowWow", "Marin", "Ghost", "Flying Rooster"};
         int cur = F<uint8_t>(0x555D);
         if (cur < 0 || cur > 4) cur = 0;
-        ImGui::SetNextItemWidth(260);
-        if (ImGui::Combo("##companion", &cur, names, 5)) F<uint8_t>(0x555D) = (uint8_t)cur;
-        ImGui::SameLine();
-        ImGui::TextDisabled("joins at the next screen change; story events may expect a specific companion");
+        if (opt_choice("Companion", &cur, names, 5, 0,
+                       "Who follows Link. They join at the next screen change.\n\n"
+                       "Story events may expect a specific companion."))
+            F<uint8_t>(0x555D) = (uint8_t)cur;
     }
-    ImGui::Spacing();
-    ImGui::TextDisabled("Items, songs, instruments and anything else: Save Editor tab (incl. \"Give any item\").");
+    opt_end();
 }

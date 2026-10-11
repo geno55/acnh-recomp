@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #ifdef __APPLE__
@@ -432,73 +433,81 @@ extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
 
 static void tab_display(void) {
-    header("Video");
-    const char *aspects[] = {"Unlocked (fill the window)", "Original 16:9"};
-    choice("Aspect ratio", &g_settings.aspect, aspects, 2);
-    ImGui::Spacing();
+    float scale = ImGui::GetFontSize() / 34;
+    opt_begin("##video", scale);
+    opt_section("Display");
+    const char *aspects[] = {"Unlocked", "Original 16:9"};
+    opt_choice("Aspect ratio", &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
+               "Unlocked: the view fills the window, so wider (or taller) windows show more of the island - up to "
+               "ultrawide; houses and dungeons keep their framing. Original 16:9: the game's own framing, with bars.");
     bool fs = g_settings.fullscreen;
-    if (toggle("Fullscreen", &fs)) { g_settings.fullscreen = fs; g_want_fullscreen_apply.store(true); }
-    hint("Also: F11, Alt+Enter or Cmd+Ctrl+F.");
-    ImGui::Spacing();
+    if (opt_toggle("Fullscreen", &fs, false, "Fills the screen. Also: F11, Alt+Enter or Cmd+Ctrl+F.")) {
+        g_settings.fullscreen = fs;
+        g_want_fullscreen_apply.store(true);
+    }
+    opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+
+    opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)
-    static const char *res[] = {"Match display", "Dynamic resolution", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x",
-                                "0.75x", "0.50x", "0.25x"};
+    static const char *res[] = {"Match display", "Dynamic", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x",
+                                "75%", "50%", "25%"};
     static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, 5, 6, 7, 8, RES_Q75, RES_Q50, RES_Q25};
     {
         int ri = 0;
         for (int i = 0; i < 13; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
-        if (choice("Internal resolution", &ri, res, 13)) g_settings.res_mode = res_mode[ri];
-    }
-    {
         float sx, sy;
         renderer_get_scale(&sx, &sy);
-        char line[200];
-        int n = snprintf(line, sizeof line, "Rendering at %.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
+        char d[400];
+        int n = snprintf(d, sizeof d, "How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
+                                      "as sharp as your GPU keeps at full speed. 1x-8x: the Switch's 1080p times that. "
+                                      "75%% / 50%% / 25%%: a share of the display, for slower machines.\n\nRendering at "
+                                      "%.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
-            snprintf(line + n, sizeof line - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
-        hint(line);
+            snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
+        if (opt_choice("Internal resolution", &ri, res, 13, 0, d)) g_settings.res_mode = res_mode[ri];
     }
 #ifdef __APPLE__
     static const char *ups[] = {"Bilinear", "MetalFX"};
-    choice("Upscaler", &g_settings.upscaler, ups, 2);
+    opt_choice("Upscaler", &g_settings.upscaler, ups, 2, UPSCALE_METALFX,
+               "How the image is scaled up to the window when it renders at a lower resolution. MetalFX: Apple's "
+               "upscaler, sharper. Bilinear: plain and soft.");
 #endif
-    ImGui::Spacing();
-    toggle("Show FPS", &g_settings.show_fps);
-    ImGui::Spacing();
-    header("Game");
-    toggle("Remove blur", &g_settings.blur_removal);
-    hint("Turns off the tilt-shift blur at the top and bottom of the screen.");
-    toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon);
-    hint("Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+
+    opt_section("Game");
+    opt_toggle("Remove blur", &g_settings.blur_removal, false,
+               "Turns off the tilt-shift blur at the top and bottom of the screen.");
+    opt_toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon, false,
+               "Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+    opt_end();
 }
 
 // Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c); never part of a seed
-static void cosmetic(const char *label, int *v, const char *const *names, int n) {
-    float bw = ImGui::CalcTextSize("Random").x + ImGui::GetStyle().FramePadding.x * 2;
-    choice(label, v, names, n, bw + ImGui::GetStyle().ItemSpacing.x);
-    ImGui::SameLine();
-    ImGui::PushID(label);
-    if (ImGui::Button("Random")) *v = (*v + 1 + rand() % (n - 1)) % n;  // (any other colour, Default included)
-    ImGui::PopID();
-}
-
 static void tab_cosmetics(void) {
-    header("Cosmetics");
-    cosmetic("Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS);
-    cosmetic("Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS);
+    opt_begin("##cosmetics", ImGui::GetFontSize() / 34);
+    opt_section("Colours");
+    opt_choice("Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS, 0,
+               "Link's tunic colour. Default: the game's own (or the randomizer seed's).");
+    opt_choice("Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS, 0,
+               "The colour of the hearts on the HUD.");
+    if (opt_action("Random colours", "", "Picks a random tunic and heart colour (any other colour, Default included).")) {
+        g_settings.tunic = (g_settings.tunic + 1 + rand() % (N_TUNIC_COLOURS - 1)) % N_TUNIC_COLOURS;
+        g_settings.hearts = (g_settings.hearts + 1 + rand() % (N_HEART_COLOURS - 1)) % N_HEART_COLOURS;
+    }
+    opt_end();
 }
 
 static void tab_audio(void) {
-    header("Audio");
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Volume");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
-    ImGui::SetNextItemWidth(-1);
-    int pct = (int)(g_settings.volume * 100 + 0.5f);
-    if (ImGui::SliderInt("##vol", &pct, 0, 200, "%d%%")) g_settings.volume = pct / 100.0f;
-    toggle("Room reverb", &g_settings.reverb);
-    toggle("Movie audio", &g_settings.movie_audio);
-    hint("Movie audio applies the next time a movie starts.");
+    opt_begin("##audio", ImGui::GetFontSize() / 34);
+    opt_section("Sound");
+    float pct = roundf(g_settings.volume * 100);
+    if (opt_slider("Volume", &pct, 0, 200, 5, 100, "%g%%",
+                   "The game's volume. 100% is the game's own level; above it, louder."))
+        g_settings.volume = pct / 100.0f;
+    opt_toggle("Room reverb", &g_settings.reverb, true,
+               "The game's echo in caves, dungeons and big rooms.");
+    opt_toggle("Movie audio", &g_settings.movie_audio, true,
+               "Sound in the game's movies (the opening and the ending). Applies the next time a movie starts.");
+    opt_end();
 }
 
 static void tab_about(void) {
@@ -605,9 +614,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     Tab tabs[10];
     int ntabs = 0;
     if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
-    static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
+    static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
                                   "Cosmetics", "Controls"};
-    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2};  // Controls, Video, Audio, Difficulty, Cosmetics, Randomizer,
+    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2};  // Controls, Video, Audio, Gameplay, Cosmetics, Randomizer,
                                                              // Cheats, Warp, Save Editor (ids stay: test hooks use them)
     for (int i : order) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
     int cur = 0;  // g_tab / g_tab_request hold ids
@@ -665,7 +674,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             if (open) {
                 g_tab = t.id;
                 ImGui::Spacing();
-                ImGui::BeginChild("##page", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8 * scale), ImGuiChildFlags_None,
+                ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
                                   ImGuiWindowFlags_NavFlattened);
                 switch (t.id) {
                 case -1: prelaunch(scale); break;
@@ -779,38 +788,37 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (open) {
         // dim the game behind the menu
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
-        float w = fminf(io.DisplaySize.x * 0.9f, 1500 * scale), h = io.DisplaySize.y * 0.86f;
+        float w = fminf(io.DisplaySize.x * 0.9f, 1500 * scale), h = io.DisplaySize.y - 2 * 18 * scale;  // (all the height: a slim margin)
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
         ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         ImFont *keep_big = g_font_big;  // (the window in the menu's font; header() uses g_font_big)
         g_font_big = g_menu_font_big;
         ImGui::PushFont(g_menu_font);
+        // header as on the start screen's Settings: the title, and a close X in the corner (B / Esc too). ("Title
+        // screen" - rt_request_reboot(RT_REBOOT_TITLE) - is to find a new home; user 2026-10-11.)
         ImGui::PushFont(g_font_big);
-        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Link's Awakening");
+        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Settings");
         ImGui::PopFont();
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("  LAS Recomp");
-        ImGui::SameLine(ImGui::GetWindowWidth() - 520 * scale);
-        if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) ImGui::OpenPopup("##totitle");
-        ImGui::SameLine(ImGui::GetWindowWidth() - 260 * scale);
-        if (ImGui::Button("Resume game", ImVec2(230 * scale, 0))) set_open(false);
-        if (ImGui::BeginPopupModal("##totitle", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-            ImGui::Text("Return to the title screen? Progress since your last save is lost.");
-            if (ImGui::Button("Title screen", ImVec2(230 * scale, 0))) {  // (the game reboots in place)
-                ImGui::CloseCurrentPopup();
-                rt_request_reboot(RT_REBOOT_TITLE);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(230 * scale, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
-                ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
+        {
+            float bx = 44 * scale;
+            ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+            bool close = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
+            ImGui::PopStyleColor();
+            bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+            ImU32 col = hot ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255);
+            float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * scale * 1.5f;
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), IM_COL32(255, 255, 255, 20), 8 * scale);
+            dl->AddLine(ImVec2(p.x + m, p.y + m), ImVec2(p.x + bx - m, p.y + bx - m), col, t);
+            dl->AddLine(ImVec2(p.x + bx - m, p.y + m), ImVec2(p.x + m, p.y + bx - m), col, t);
+            if (close) set_open(false);
         }
 
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();  // (before the
         tabs_body(scale, true, NULL);                                                                          //  pages run)
-        ImGui::TextDisabled("L / R  switch tabs      A  select      B  back      Minus + Plus / F1  close");
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)
         if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&

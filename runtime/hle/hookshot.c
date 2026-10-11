@@ -5,7 +5,7 @@
 // 0x4000 = hookshot target: the hook goes to Adhere ("HookshotPierce" effect) and Link's own state pulls him to it.
 // Without the bit it goes to Return ("HookshotHit" clink). tools/patches.py redirects that load here.
 //
-// On when the active seed was made with "hookshot-anything" (its logic counts on it), or with the Cheats toggle.
+// On when the active seed was made with "hookshot-anything" (its logic counts on it), or with the Gameplay toggle.
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,26 +17,44 @@
 
 #define HOOK_TARGET 0x4000u
 
+// a seed folder's settings.json says "hookshot-anything": true
+static int dir_has_it(const char *dir) {
+    char p[512];
+    snprintf(p, sizeof p, "%s/settings.json", dir);
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    static char buf[1 << 16];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = 0;
+    fclose(f);
+    return strstr(buf, "\"hookshot-anything\": true") != NULL;
+}
+
 static int g_seed_on = -1;  // (per seed: read again after an in-place reboot)
 static int seed_on(void) {
     if (g_seed_on < 0) {
-        g_seed_on = 0;
         const char *dir = rando_seed_dir();
-        char p[512];
-        if (dir) {
-            snprintf(p, sizeof p, "%s/settings.json", dir);
-            FILE *f = fopen(p, "rb");
-            if (f) {
-                static char buf[1 << 16];
-                size_t n = fread(buf, 1, sizeof buf - 1, f);
-                buf[n] = 0;
-                fclose(f);
-                g_seed_on = strstr(buf, "\"hookshot-anything\": true") != NULL;
-            }
-        }
+        g_seed_on = dir ? dir_has_it(dir) : 0;
         LOG("[hookshot] hookshot anything %s by the seed\n", g_seed_on ? "ON" : "off");
     }
     return g_seed_on;
+}
+
+// The seed forces it on (the Gameplay toggle is greyed out then). On the start screen: the seed PLAY would start
+// (g_settings.rando_seed, kept up to date there), read from its folder - rando_seed_dir() would apply its patches
+// before the game is loaded.
+extern int g_start_screen;  // warp.c
+int rt_hookshot_seed_forced(void) {
+    if (!g_start_screen) return seed_on();
+    static char last[128] = "\x01";
+    static int on;
+    if (strcmp(last, g_settings.rando_seed)) {
+        snprintf(last, sizeof last, "%s", g_settings.rando_seed);
+        char dir[256];
+        snprintf(dir, sizeof dir, "rando/%s", g_settings.rando_seed);
+        on = g_settings.rando_seed[0] && dir_has_it(dir);
+    }
+    return on;
 }
 
 int rt_hookshot_anything(void) {

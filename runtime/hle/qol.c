@@ -49,28 +49,48 @@ int rt_snap_dir(Cpu *c) {
 // tools/patches.py BUFF_REPLACE_SITE reads the flag as false here: the counters are never consumed (they stay at 255) and
 // the row's own lot table is rolled as usual. Anything else that would make one (ItemPowerPiece 0xb2 / ItemGuardianAcorn 0xb3) is
 // held back at the actor factory (souls.c).
-static int g_no_buff = -1;  // (per seed: read again after an in-place reboot)
-static bool no_buff(void) {
+// a seed folder's settings.json says "no-buff-drops": true
+static int dir_no_buff(const char *dir) {
+    char p[512];
+    snprintf(p, sizeof p, "%s/settings.json", dir);
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    static char buf[1 << 16];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = 0;
+    fclose(f);
+    return strstr(buf, "\"no-buff-drops\": true") != NULL;
+}
+
+static int g_no_buff = -1;  // the running seed has it (per seed: read again after an in-place reboot)
+static bool seed_no_buff(void) {
     if (g_no_buff < 0) {
-        g_no_buff = 0;
         const char *dir = rando_seed_dir();
-        char p[512];
-        if (dir) {
-            snprintf(p, sizeof p, "%s/settings.json", dir);
-            FILE *f = fopen(p, "rb");
-            if (f) {
-                static char buf[1 << 16];
-                size_t n = fread(buf, 1, sizeof buf - 1, f);
-                buf[n] = 0;
-                fclose(f);
-                g_no_buff = strstr(buf, "\"no-buff-drops\": true") != NULL;
-            }
-        }
-        const char *e = getenv("LARECOMP_NO_BUFF");  // test: 1 / 0 forces it
-        if (e) g_no_buff = atoi(e) != 0;
-        LOG("[qol] no Guardian Acorns / Pieces of Power: %s\n", g_no_buff ? "ON" : "off");
+        g_no_buff = dir ? dir_no_buff(dir) : 0;
+        LOG("[qol] no Guardian Acorns / Pieces of Power by the seed: %s\n", g_no_buff ? "ON" : "off");
     }
     return g_no_buff;
+}
+// on: the Gameplay tab's lever, or the seed was made with it
+static bool no_buff(void) {
+    const char *e = getenv("LARECOMP_NO_BUFF");  // test: 1 / 0 forces it
+    if (e) return atoi(e) != 0;
+    return g_settings.no_buff_drops || seed_no_buff();
+}
+// The seed forces it (the Gameplay toggle is greyed out). On the start screen: the seed PLAY would start, from its
+// folder (rando_seed_dir() would apply its patches before the game is loaded) - as rt_hookshot_seed_forced.
+extern int g_start_screen;  // warp.c
+int rt_no_buff_seed_forced(void) {
+    if (!g_start_screen) return seed_no_buff();
+    static char last[128] = "\x01";
+    static int on;
+    if (strcmp(last, g_settings.rando_seed)) {
+        snprintf(last, sizeof last, "%s", g_settings.rando_seed);
+        char dir[256];
+        snprintf(dir, sizeof dir, "rando/%s", g_settings.rando_seed);
+        on = g_settings.rando_seed[0] && dir_no_buff(dir);
+    }
+    return on;
 }
 RT_ON_RESET(no_buff_reset) { g_no_buff = -1; }  // (seed switch)
 

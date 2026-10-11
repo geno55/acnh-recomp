@@ -269,11 +269,12 @@ def main():
     if pets:
         print('pets:', ', '.join(pets), flush=True)
 
-    # ---- LAS Recomp entrance randomizer: tier 1 = LAS dungeon shuffle, tier 2 = + single-entrance interiors and
-    # connector caves (tier 3 was "+ connector caves" on its own: same as 2 now)
+    # ---- LAS Recomp entrance randomizer: dungeon entrances are LAS's own 'shuffle-dungeons' (its own lever in the
+    # menu); tier 2 = single-entrance interiors and connector caves, with or without the dungeons (tier 1 = the old
+    # "dungeons only" level: turns shuffle-dungeons on; tier 3 was "+ connector caves" on its own: same as 2 now)
     tier = settings['entrance-tier'] = min(int(settings.get('entrance-tier', 0)), 2)
     ent = None
-    if tier >= 1:
+    if tier == 1:
         settings['shuffle-dungeons'] = True
     if tier >= 2:
         import random as _random

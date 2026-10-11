@@ -898,6 +898,8 @@ extern "C" void launcher_run(const char *root) {
     }
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
+        // the seed PLAY would start, kept current (Settings > Gameplay greys out what that seed forces)
+        snprintf(g_settings.rando_seed, sizeof g_settings.rando_seed, "%s", choice ? choices[choice].c_str() : "");
         if (g_files_deleted) {  // (Settings > Prelaunch deleted them)
             g_files_deleted = false;
             status = check_game_files(g_root);
@@ -1113,7 +1115,7 @@ extern "C" void launcher_run(const char *root) {
             } else if (page == SETTINGS) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
                 // loaded game say so
-                float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y * 0.86f;
+                float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y - 2 * 18 * sc;  // (all the height: a slim margin)
                 ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + ds.x,
                                                           ImGui::GetWindowPos().y + ds.y), IM_COL32(0, 0, 0, 110));
                 ImVec2 wp = ImGui::GetWindowPos();
@@ -1129,15 +1131,24 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PushFont(g_font_menu);
                 ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Settings");
                 ImGui::PopFont();
-                ImGui::SameLine(ImGui::GetWindowWidth() - 260 * sc);
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.22f, 0.18f, 1));  // (the menu's green)
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.36f, 0.25f, 1));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.21f, 0.50f, 0.34f, 1));
-                bool back = ImGui::Button("Back", ImVec2(230 * sc, 0));
-                ImGui::PopStyleColor(3);
+                bool back;
+                {  // close: a drawn X in the corner (B / Esc too)
+                    float bx = 44 * sc;
+                    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+                    back = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
+                    ImGui::PopStyleColor();
+                    bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+                    ImU32 col = hot ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255);
+                    float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * sc * 1.5f;
+                    ImDrawList *dl = ImGui::GetWindowDrawList();
+                    if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), IM_COL32(255, 255, 255, 20), 8 * sc);
+                    dl->AddLine(ImVec2(p.x + m, p.y + m), ImVec2(p.x + bx - m, p.y + bx - m), col, t);
+                    dl->AddLine(ImVec2(p.x + bx - m, p.y + m), ImVec2(p.x + m, p.y + bx - m), col, t);
+                }
                 bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);  // (before the pages run, like the menu)
                 menu_tabs_draw(sc, g_font_small, g_font_menu, false, prelaunch_tab);
-                ImGui::TextDisabled("L / R  switch tabs      A  select      B  back");
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
                 if (!popup && !typing && cap_dev < 0 && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&

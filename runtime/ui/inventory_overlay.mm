@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <string>
 #include "imgui.h"
 
 extern "C" {
@@ -94,9 +95,32 @@ static bool companion_card(void) {
     return pets_menu_options(o) >= 2;
 }
 
+// The dungeon keys panel: on with keysanity (the seed's settings.json "keysanity" isn't "off"; keys can be anywhere,
+// so the Items screen shows what each dungeon's are). Read once per seed.
+static bool keys_shown(void) {
+    const char *dir = rando_seed_dir();
+    if (!dir) return false;
+    static std::string seed;
+    static bool on;
+    if (seed != dir) {
+        seed = dir;
+        on = false;
+        if (FILE *f = fopen((seed + "/settings.json").c_str(), "rb")) {
+            static char buf[1 << 16];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            const char *k = strstr(buf, "\"keysanity\":");
+            static const char off[] = "\"keysanity\": \"off\"";
+            on = k && strncmp(k, off, sizeof off - 1) != 0;
+        }
+    }
+    return on;
+}
+
 extern "C" bool escape_bottle_owned(void);  // runtime/hle/escape.c
 extern "C" bool inventory_overlay_wanted(void) {
-    return (g_settings.inv_keys || escape_bottle_owned() || pets_ghost_state() >= 0 || companion_card()) &&
+    return (keys_shown() || escape_bottle_owned() || pets_ghost_state() >= 0 || companion_card()) &&
            rando_seed_dir() && items_page_shown();
 }
 
@@ -379,7 +403,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     if (escape_bottle_owned()) escape_tag(dl, font, ox, oy, u);
     pets_draw(dl, font, ox, oy, u);
-    if (!g_settings.inv_keys) return;
+    if (!keys_shown()) return;
     dl->AddRectFilled(p0, p1, IM_COL32(52, 38, 20, 205), 14 * u);
     dl->AddRect(p0, p1, IM_COL32(214, 176, 92, 230), 14 * u, 0, 2.5f * u);
     int n = (int)(sizeof kDungeons / sizeof kDungeons[0]);

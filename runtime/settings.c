@@ -77,6 +77,7 @@ void settings_load(void) {
         else if (!strcmp(key, "cheat_ammo")) g_settings.cheat_ammo = atoi(val) != 0;
         else if (!strcmp(key, "cheat_rupees")) g_settings.cheat_rupees = atoi(val) != 0;
         else if (!strcmp(key, "cheat_hookshot")) g_settings.cheat_hookshot = atoi(val) != 0;
+        else if (!strcmp(key, "no_buff_drops")) g_settings.no_buff_drops = atoi(val) != 0;
         else if (!strcmp(key, "diff_damage")) g_settings.diff_damage = (float)atof(val);
         else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
         else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
@@ -123,6 +124,7 @@ void settings_save(void) {
     fprintf(f, "cheat_hearts = %d\ncheat_ammo = %d\ncheat_rupees = %d\n", g_settings.cheat_hearts, g_settings.cheat_ammo,
             g_settings.cheat_rupees);
     fprintf(f, "cheat_hookshot = %d\n", g_settings.cheat_hookshot);
+    fprintf(f, "no_buff_drops = %d\n", g_settings.no_buff_drops);
     fprintf(f, "diff_damage = %.2f\ndiff_ohko = %d\ndiff_hero = %d\n", g_settings.diff_damage, g_settings.diff_ohko,
             g_settings.diff_hero);
     fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
