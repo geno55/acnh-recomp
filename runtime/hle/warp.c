@@ -560,6 +560,7 @@ static void pane_scan_tick(uint64_t frame) {
 void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
+    { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
     { extern void pot_reveal_tick(uint64_t frame); pot_reveal_tick(frame); }  // (after doorjump: Link found)
