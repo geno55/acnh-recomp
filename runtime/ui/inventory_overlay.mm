@@ -130,8 +130,9 @@ static bool trade_shown(void) {
     return keys_shown() || (s && strstr(s, "\"include-trade-gifts\": true"));
 }
 
+extern "C" int rt_tunic_upgrades(void);  // runtime/hle/qol.c
 extern "C" bool inventory_overlay_wanted(void) {
-    return (trade_shown() || pets_ghost_state() >= 0 || companion_card()) &&
+    return (trade_shown() || pets_ghost_state() >= 0 || companion_card() || rt_tunic_upgrades()) &&
            rando_seed_dir() && items_page_shown();
 }
 
@@ -313,6 +314,29 @@ static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u)
     }
 }
 
+// Treat Tunics as Upgrades (runtime/hle/qol.c): a small box under the companion card's place, the same width, with the
+// two tunics - lit once owned (save +0x555C: 0x40 red, 0x80 blue)
+static void tunics_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
+    ImVec2 a(ox + 62 * u, oy + 496 * u), b(ox + 140 * u, oy + 556 * u);
+    float cx = (a.x + b.x) * 0.5f;
+    dl->AddRectFilled(a, b, IM_COL32(52, 38, 20, 215), 12 * u);
+    dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 12 * u, 0, 2 * u);
+    const char *t = "Tunics";
+    float fs = 15 * u;
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, t);
+    dl->AddText(font, fs, ImVec2(cx - ts.x * 0.5f, a.y + 6 * u), IM_COL32(240, 206, 110, 255), t);
+    int bits = LD8(MAIN_BASE + 0x1CBB220 + 0x555C);
+    static const struct { int bit; ImU32 on; } kT[2] = {{0x40, IM_COL32(222, 64, 52, 255)}, {0x80, IM_COL32(60, 120, 230, 255)}};
+    for (int i = 0; i < 2; i++) {
+        ImVec2 c(cx + (i ? 15 : -15) * u, a.y + 39 * u);
+        if (bits & kT[i].bit) {
+            dl->AddCircleFilled(c, 9 * u, kT[i].on, 24);
+            dl->AddCircle(c, 9 * u, IM_COL32(255, 220, 120, 255), 24, 1.6f * u);
+        } else {
+            dl->AddCircle(c, 9 * u, IM_COL32(120, 100, 70, 200), 24, 1.4f * u);
+        }
+    }
+}
 
 struct Dungeon { const char *label; int index; };
 // record = 2 x (dungeon number - 1); the Color Dungeon is record 18 (verified from the in-dungeon key HUD)
@@ -401,6 +425,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     ImVec2 p0(ox + 150 * u, oy + 512 * u), p1(ox + 1130 * u, oy + 630 * u);
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     pets_draw(dl, font, ox, oy, u);
+    if (rt_tunic_upgrades()) tunics_draw(dl, font, ox, oy, u);
     bool keys = keys_shown();
     if (!keys && !trade_shown()) return;
     float trade_y = p0.y + 84 * u;  // (the trade row: under the keys, or alone in a short panel at the same place)

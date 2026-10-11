@@ -487,6 +487,28 @@ def _missing_float(gen, a):
 PATCHES[MISSING_FLOAT_SITE] = _missing_float
 
 
+# Treat Tunics as Upgrades (runtime/hle/qol.c rt_tunic_upgrades): the add-item code (main+0x8d08e0) sets a tunic's
+# bit in the tunics byte (PlayerStatus +0x9c = save +0x555C: 0x40 red, 0x80 blue), then clears the other one; with
+# the seed option the clear is skipped, so both tunics (and both effects) are kept.
+TUNIC_CLEAR_SITES = {
+    0x70008d1118: (0x12197929, 0xffffffbf, 'and w9, w9, #0xffffffbf (blue tunic: red cleared)'),
+    0x70008d12f8: (0x12001929, 0x7f, 'and w9, w9, #0x7f (red tunic: blue cleared)'),
+}
+
+
+def _tunic_clear(gen, a):
+    word, mask, what = TUNIC_CLEAR_SITES[a]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == word, hex(w)
+    return ('{ extern int rt_tunic_upgrades(void); '
+            f'if (!rt_tunic_upgrades()) c->x[9] = (uint32_t)((uint32_t)c->x[9] & {mask:#x}u); }}'
+            f'  /* {a:#x}: {what} - kept with Treat Tunics as Upgrades */')
+
+
+for _a in TUNIC_CLEAR_SITES:
+    PATCHES[_a] = _tunic_clear
+
+
 # Event actions with no handler: main+0x108e300 runs an event action through the actor's handler map; an entry whose
 # std::function is empty throws std::bad_function_call (0x108edc8), which the same function catches (catch
 # std::exception, landing pad 0x108f1c8 -> 0x108ef3c) to abort the event. Common.bfevfl's OcarinaWarpOut (every Manbo's

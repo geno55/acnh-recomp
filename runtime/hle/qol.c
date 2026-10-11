@@ -94,6 +94,30 @@ int rt_no_buff_seed_forced(void) {
 }
 RT_ON_RESET(no_buff_reset) { g_no_buff = -1; }  // (seed switch)
 
+// Treat Tunics as Upgrades (seed option "tunic-upgrades"): the game's add-item code sets the new tunic's bit in the
+// tunics byte (save +0x555C: 0x40 red, 0x80 blue) and clears the other one (tools/patches.py TUNIC_CLEAR_SITES); with
+// the option the other one stays. The game applies each tunic's effect from its own bit (attack: main+0xd1f580, red
+// or a Piece of Power; damage halved after main+0xd4c738 etc: blue or a Guardian Acorn), so with both Link has both.
+static int g_tunic_up = -1;  // (per seed)
+int rt_tunic_upgrades(void) {
+    if (g_tunic_up < 0) {
+        g_tunic_up = 0;
+        const char *dir = rando_seed_dir();
+        char p[512];
+        FILE *f = dir ? (snprintf(p, sizeof p, "%s/settings.json", dir), fopen(p, "rb")) : NULL;
+        if (f) {
+            static char buf[1 << 16];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            g_tunic_up = strstr(buf, "\"tunic-upgrades\": true") != NULL;
+        }
+        LOG("[qol] tunics as upgrades: %s\n", g_tunic_up ? "ON" : "off");
+    }
+    return g_tunic_up;
+}
+RT_ON_RESET(tunic_up_reset) { g_tunic_up = -1; }
+
 int rt_buff_replace(int allow) {
     // LARECOMP_BUFF_PRIME=1 (test): every roll finds the Guardian Acorn counter full; =2: and every row allows buffs
     // (grass then drops Acorns unless the option is on)

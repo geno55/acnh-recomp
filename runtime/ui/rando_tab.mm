@@ -135,6 +135,7 @@ struct GenOpts {
     bool miniboss_souls = false;  // miniboss-souls: a dungeon mini-boss only appears once its soul is found (souls.py)
     // starting-items (the game's own start): stored as "not" so seed IDs made before these options (zeros) keep them
     bool no_start_sword = false, no_start_shield = false, no_start_ocarina = false;  // (ocarina: with Manbo's Mambo)
+    bool tunic_upgrades = false;  // tunic-upgrades: the red / blue tunics add up instead of swapping (runtime: qol.c)
 };
 static GenOpts g_opts;
 
@@ -161,7 +162,8 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.shuffle_dungeons, &o.randomize_enemies, &o.randomize_music, &o.open_mabe, &o.fast_songs,
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
-                 &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina};
+                 &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
+                 &o.tunic_upgrades};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -317,6 +319,7 @@ static void start_generation(void) {
     }
     fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s, \"digs\": %s,\n", g_opts.pots ? "true" : "false",
             g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false", g_opts.digs ? "true" : "false");
+    fprintf(f, " \"tunic-upgrades\": %s,\n", g_opts.tunic_upgrades ? "true" : "false");
     fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
                " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
             g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
@@ -581,6 +584,9 @@ extern "C" void rando_tab_draw(float scale) {
                        "with logic."))
             g_opts.no_start_ocarina = !oc;
     }
+    opt_toggle("Treat Tunics as Upgrades", &g_opts.tunic_upgrades, false,
+               "The red and blue tunics add up instead of replacing each other: the blue one always halves the damage "
+               "Link takes, the red one always strengthens his attacks, and with both he has both.");
     if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,
                    "The overworld map marks the checks you have and haven't done yet."))
         settings_save();
