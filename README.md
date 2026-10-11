@@ -32,7 +32,7 @@ https://discord.gg/DhrgdYqdcY
 
 ## Status
 
-This is a 0.1 alpha release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the alpha designation. Please use the Discord for discussing possible randomizer logic issues and submitting bug reports.
+This is a beta release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the beta designation. Please use the Discord for discussing possible randomizer logic issues and submitting bug reports.
 
 ### Known issues
 
