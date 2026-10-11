@@ -26,9 +26,7 @@ Settings g_settings = {
     .tracker = true,
     .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
-#ifdef __APPLE__
-    .upscaler = UPSCALE_METALFX,  // (MetalFX on macOS by default)
-#endif
+    .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
 };
 
 void settings_load(void) {
@@ -60,7 +58,8 @@ void settings_load(void) {
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
         }
-        else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "metalfx") ? UPSCALE_METALFX : UPSCALE_BILINEAR;
+        else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
+        else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
@@ -103,7 +102,8 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
-    fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : "bilinear");
+    fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
+    fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");

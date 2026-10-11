@@ -693,6 +693,149 @@ static id<MTLTexture> metalfx_upscale(id<MTLCommandBuffer> cb, id<MTLTexture> in
     }
     return g_fx && g_fx_out ? g_fx_out : nil;
 }
+// SMAA 1x (Video tab "Anti-aliasing"; third_party/smaa, MIT; as runtime/nvn/vulkan/shaders.c / exec.c): luma edges ->
+// blending weights -> neighbourhood blending, at the game image's size, before the present / MetalFX. The reference
+// SMAA.hlsl has no Metal mode: it is built through its SMAA_CUSTOM_SL porting macros, with a few textual fixes for
+// MSL (out / inout parameters and array parameters as references, no swizzles bound to them, no discard in a
+// helper). The render-target size is a literal in the source (SMAA's preferred form): the library is compiled for
+// each new image size, on first use - a problem there is logged once and turns SMAA off. Metal's texture origin is
+// top-left, as SMAA expects.
+static NSString *smaa_msl(NSUInteger w, NSUInteger h) {
+    extern const char smaa_hlsl_src[];
+    NSMutableString *s = [NSMutableString stringWithUTF8String:smaa_hlsl_src];
+    struct { const char *from, *to; } fix[] = {
+        {"inout float2 variable", "thread float2 &variable"},
+        {"inout float4 variable", "thread float4 &variable"},
+        {"SMAAMovc(cond.xy, variable.xy, value.xy);", "variable = select(variable, value, cond);"},
+        {"SMAAMovc(cond.zw, variable.zw, value.zw);", ""},
+        {"out float4 offset[3]", "thread float4 (&offset)[3]"},
+        {"float4 offset[3]", "thread float4 (&offset)[3]"},
+        {"thread thread float4 (&offset)[3]", "thread float4 (&offset)[3]"},
+        {"out float2 pixcoord", "thread float2 &pixcoord"},
+        {"out float4 offset)", "thread float4 &offset)"},
+        {"out float2 e)", "thread float2 &e)"},
+        {"inout float2 weights", "thread float2 &weights"},
+        {"SMAADetectHorizontalCornerPattern(SMAATexturePass2D(edgesTex), weights.rg, coords.xyzy, d);",
+         "{ float2 w_ = weights.rg; SMAADetectHorizontalCornerPattern(SMAATexturePass2D(edgesTex), w_, coords.xyzy, d); weights.rg = w_; }"},
+        {"SMAADetectVerticalCornerPattern(SMAATexturePass2D(edgesTex), weights.ba, coords.xyxz, d);",
+         "{ float2 w_ = weights.ba; SMAADetectVerticalCornerPattern(SMAATexturePass2D(edgesTex), w_, coords.xyxz, d); weights.ba = w_; }"},
+        {"        discard;", "        return float2(0.0, 0.0);"},
+    };
+    for (size_t i = 0; i < sizeof fix / sizeof fix[0]; i++)
+        [s replaceOccurrencesOfString:@(fix[i].from) withString:@(fix[i].to) options:0 range:NSMakeRange(0, s.length)];
+    NSString *head = [NSString stringWithFormat:
+        @"#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "#define SMAA_CUSTOM_SL\n"
+        "#define SMAA_PRESET_HIGH\n"
+        "#define SMAA_RT_METRICS float4(%.9g, %.9g, %.1f, %.1f)\n"
+        "constexpr sampler LinearSampler(filter::linear, address::clamp_to_edge);\n"
+        "constexpr sampler PointSampler(filter::nearest, address::clamp_to_edge);\n"
+        "#define SMAATexture2D(tex) texture2d<float> tex\n"
+        "#define SMAATexturePass2D(tex) tex\n"
+        "#define SMAASampleLevelZero(tex, coord) tex.sample(LinearSampler, coord, level(0.0))\n"
+        "#define SMAASampleLevelZeroPoint(tex, coord) tex.sample(PointSampler, coord, level(0.0))\n"
+        "#define SMAASampleLevelZeroOffset(tex, coord, offset) tex.sample(LinearSampler, coord, level(0.0), offset)\n"
+        "#define SMAASample(tex, coord) tex.sample(LinearSampler, coord)\n"
+        "#define SMAASamplePoint(tex, coord) tex.sample(PointSampler, coord)\n"
+        "#define SMAASampleOffset(tex, coord, offset) tex.sample(LinearSampler, coord, offset)\n"
+        "#define SMAA_FLATTEN\n"
+        "#define SMAA_BRANCH\n"
+        "#define lerp(a, b, t) mix(a, b, t)\n"
+        "#define mad(a, b, c) fma(a, b, c)\n",
+        1.0 / w, 1.0 / h, (double)w, (double)h];
+    NSString *tail =
+        @"struct V { float4 pos [[position]]; };\n"
+        "vertex V smaa_vs(uint vid [[vertex_id]]) {\n"
+        "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
+        "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1); return o; }\n"
+        "fragment float4 smaa_edge(V in [[stage_in]], texture2d<float> t0 [[texture(0)]]) {\n"
+        "  float2 uv = in.pos.xy * SMAA_RT_METRICS.xy;\n"
+        "  float4 off[3];\n"
+        "  SMAAEdgeDetectionVS(uv, off);\n"
+        "  return float4(SMAALumaEdgeDetectionPS(uv, off, t0), 0.0, 0.0); }\n"
+        "fragment float4 smaa_weight(V in [[stage_in]], texture2d<float> t0 [[texture(0)]], texture2d<float> t1 [[texture(1)]],\n"
+        "                            texture2d<float> t2 [[texture(2)]]) {\n"
+        "  float2 uv = in.pos.xy * SMAA_RT_METRICS.xy, pix;\n"
+        "  float4 off[3];\n"
+        "  SMAABlendingWeightCalculationVS(uv, pix, off);\n"
+        "  return SMAABlendingWeightCalculationPS(uv, pix, off, t0, t1, t2, float4(0.0)); }\n"
+        "fragment float4 smaa_blend(V in [[stage_in]], texture2d<float> t0 [[texture(0)]], texture2d<float> t1 [[texture(1)]]) {\n"
+        "  float2 uv = in.pos.xy * SMAA_RT_METRICS.xy;\n"
+        "  float4 off;\n"
+        "  SMAANeighborhoodBlendingVS(uv, off);\n"
+        "  return float4(SMAANeighborhoodBlendingPS(uv, off, t0, t1).rgb, 1.0); }\n";
+    return [NSString stringWithFormat:@"%@%@%@", head, s, tail];
+}
+
+static id<MTLTexture> smaa_target(id<MTLTexture> old, NSUInteger w, NSUInteger h, MTLPixelFormat f) {
+    if (old && old.width == w && old.height == h && old.pixelFormat == f) return old;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    return [dev newTextureWithDescriptor:td];
+}
+
+static void smaa_pass(id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> p, id<MTLTexture> dst, bool clear,
+                      id<MTLTexture> t0, id<MTLTexture> t1, id<MTLTexture> t2) {
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = dst;
+    rp.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionDontCare;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:p];
+    [e setFragmentTexture:t0 atIndex:0];
+    if (t1) [e setFragmentTexture:t1 atIndex:1];
+    if (t2) [e setFragmentTexture:t2 atIndex:2];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+}
+
+static id<MTLTexture> smaa_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
+    static bool failed;  // (shader / pipeline error: logged once, SMAA stays off)
+    static NSUInteger lw, lh;
+    static MTLPixelFormat lf;
+    static id<MTLRenderPipelineState> pe, pw, pb;
+    static id<MTLTexture> area, search, edges, weights, out;
+    if (failed) return in;
+    if (!area) {  // the lookup textures (runtime/nvn/smaa_data.c), uploaded once
+        extern const unsigned char *smaa_area_tex(void);
+        extern const unsigned char *smaa_search_tex(void);
+        MTLTextureDescriptor *ad = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG8Unorm width:160 height:560 mipmapped:NO];
+        area = [dev newTextureWithDescriptor:ad];
+        [area replaceRegion:MTLRegionMake2D(0, 0, 160, 560) mipmapLevel:0 withBytes:smaa_area_tex() bytesPerRow:160 * 2];
+        MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:64 height:16 mipmapped:NO];
+        search = [dev newTextureWithDescriptor:sd];
+        [search replaceRegion:MTLRegionMake2D(0, 0, 64, 16) mipmapLevel:0 withBytes:smaa_search_tex() bytesPerRow:64];
+    }
+    if (!pe || lw != in.width || lh != in.height || lf != in.pixelFormat) {
+        NSError *err = nil;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:smaa_msl(in.width, in.height) options:nil error:&err];
+        if (!lib) { LOG("[smaa] shader: %s\n", err.localizedDescription.UTF8String); failed = true; return in; }
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"smaa_vs"];
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.fragmentFunction = [lib newFunctionWithName:@"smaa_edge"];
+        pe = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        pd.fragmentFunction = [lib newFunctionWithName:@"smaa_weight"];
+        pw = pe ? [dev newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+        pd.fragmentFunction = [lib newFunctionWithName:@"smaa_blend"];
+        pd.colorAttachments[0].pixelFormat = in.pixelFormat;
+        pb = pw ? [dev newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+        if (!pb) { LOG("[smaa] pipeline: %s\n", err.localizedDescription.UTF8String); failed = true; return in; }
+        lw = in.width; lh = in.height; lf = in.pixelFormat;
+        LOG("[smaa] %lux%lu\n", (unsigned long)in.width, (unsigned long)in.height);
+    }
+    edges = smaa_target(edges, in.width, in.height, MTLPixelFormatRGBA8Unorm);
+    weights = smaa_target(weights, in.width, in.height, MTLPixelFormatRGBA8Unorm);
+    out = smaa_target(out, in.width, in.height, in.pixelFormat);
+    smaa_pass(cb, pe, edges, true, in, nil, nil);
+    smaa_pass(cb, pw, weights, true, edges, area, search);
+    smaa_pass(cb, pb, out, false, in, weights, nil);
+    return out;
+}
+
 static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in) {
     g_fx.colorTexture = in;
     g_fx.inputContentWidth = in.width;
@@ -853,6 +996,16 @@ void backend_present(NvnTexture *t) {
         renderer_set_scale((float)sx, (float)sy);
         if (b && b->tex) {
             id<MTLTexture> src = raw_view(b->tex);
+            // SMAA (Video tab "Anti-aliasing"): first, at the game image's size (MetalFX then upscales its result)
+            if (g_settings.antialias == AA_SMAA) {
+                [enc endEncoding];
+                src = smaa_encode(cb, src);
+                MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
+                rp2.colorAttachments[0].texture = drawable.texture;
+                rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
+                enc = [cb renderCommandEncoderWithDescriptor:rp2];
+            }
             // MetalFX (Video tab "Upscaler"): when the game image is smaller than its place in the window, Apple's
             // spatial upscaler brings it to the window's size first (the whole image, so the interior crop below
             // still applies); the present pass then samples it about 1:1. Its own pass: the drawable's pass is

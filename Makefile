@@ -81,6 +81,14 @@ $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@
 
+# SMAA (third_party/smaa, MIT): the reference shader as a C string for runtime/nvn/smaa_data.c (both backends build
+# their passes from it); the non-ASCII bytes in its comments become '?'
+$(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
+	@mkdir -p $(dir $@)
+	LC_ALL=C tr '\200-\377' '?' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@
+$(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
+$(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
+
 $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OSFLAGS) -c $< -o $@

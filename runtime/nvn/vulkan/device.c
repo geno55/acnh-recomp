@@ -385,6 +385,26 @@ bool vk_frame_begin(const float clear[4]) {
     return true;
 }
 
+// Passes of their own between vk_frame_begin and vk_frame_end (exec.c post passes): end the window image's
+// rendering, and begin it again keeping what was drawn.
+void vk_frame_suspend(void) {
+    if (cur_frame.ok) vkCmdEndRendering(vk_cmd());
+}
+void vk_frame_resume(void) {
+    if (!cur_frame.ok) return;
+    VkCommandBuffer cb = vk_cmd();
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport vp = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
+    VkRect2D sc = {{0, 0}, g_vk.sc_extent};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+}
+
 VkExtent2D vk_frame_extent(void) { return g_vk.sc_extent; }
 void *vk_frame_cmd(void) { return (void *)vk_cmd(); }
 
