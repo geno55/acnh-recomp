@@ -627,7 +627,12 @@ static void vk_end_pass_at(int line) {
     in_pass = false;
     if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
         char path[256];
-        snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
+        static uint64_t debug_pass_frame = ~0ull;
+        static int multi = -1;
+        if (multi < 0) multi = getenv("LARECOMP_DEBUG_FRAMES") != NULL;
+        if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
+        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
+        else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
     }
 }
@@ -1339,6 +1344,28 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
     return d;
 }
 
+// (debug frames) a depth image's depth values as a greyscale PGM, stretched over its own min..max
+static void debug_save_depth(TexBackend *b, const char *path) {
+    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || b->format != VK_FORMAT_D32_SFLOAT_S8_UINT) return;
+    uint64_t n = (uint64_t)b->width * b->height;
+    VkSpan out = vk_readback(n * 4);
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
+                           .imageExtent = {b->width, b->height, 1}};
+    vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    renderer_flush();
+    const float *d = out.ptr;
+    float lo = 1e30f, hi = -1e30f;
+    for (uint64_t i = 0; i < n; i++) { if (d[i] < lo) lo = d[i]; if (d[i] > hi) hi = d[i]; }
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P5 %u %u 255\n", b->width, b->height);
+    for (uint64_t i = 0; i < n; i++) fputc(hi > lo ? (int)((d[i] - lo) / (hi - lo) * 255.0f) : 0, f);
+    fclose(f);
+    LOG("[vk] saved %s (%ux%u depth %.6f..%.6f)\n", path, b->width, b->height, lo, hi);
+}
+
 static void resolve_feedback(Prog *pr) {
     nfeedback = 0;
     static int off = -1;
@@ -1376,6 +1403,15 @@ static void resolve_feedback(Prog *pr) {
             VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
                               .extent = {src->width, src->height, 1}};
             vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+            if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+                static int nd;
+                char path[128];
+                snprintf(path, sizeof path, "build/fbdepth_%03d_src.pgm", nd);
+                debug_save_depth(src, path);
+                snprintf(path, sizeof path, "build/fbdepth_%03d_snap.pgm", nd++);
+                debug_save_depth(dst, path);
+                cb = vk_cmd();
+            }
             feedback_tex[nfeedback] = t;
             feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
@@ -2006,6 +2042,13 @@ static void draw_(CmdRec *r, bool indexed) {
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        if (g_debug_frame) {
+            VkRect2D sr = scissor_rect();
+            LOG("[draw]   vp %.2f %.2f %.2f %.2f (stretch %.3f, fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
+                vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, k, (unsigned long long)g_cur_fs_hash, sr.offset.x, sr.offset.y,
+                sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
+                vp_sx, vp_sy);
+        }
     }
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
@@ -2159,10 +2202,33 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
         pr->vi->cbuf_mask, pr->fi->cbuf_mask, st.rt.ncolor);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format);
-    if (st.rt.depth) LOG(" d%#x", st.rt.depth->format);
+    if (st.rt.depth) LOG(" d%#x %p", st.rt.depth->format, (void *)st.rt.depth);
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
         st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
         st.channel_mask);
+    if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
+        for (int s = 0; s < 2; s++) {
+            if (!st.vbuf[s].addr) continue;
+            const float *v = (const float *)(uintptr_t)st.vbuf[s].addr;
+            LOG("[draw]   vbuf%d %llx size %llu:", s, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size);
+            for (int k = 0; k < 16; k++) LOG(" %.4g", v[k]);
+            LOG("\n");
+        }
+        for (int c = 0; c < 18; c++) {
+            if (!((pr->fi->cbuf_mask >> c) & 1) || !st.ubuf[1][c].addr) continue;
+            const float *u = (const float *)(uintptr_t)st.ubuf[1][c].addr;
+            LOG("[draw]   fcb%d %llx size %u:", c, (unsigned long long)st.ubuf[1][c].addr, (unsigned)st.ubuf[1][c].size);
+            for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[1][c].size; k++) LOG(" %.6g", u[k]);
+            LOG("\n");
+        }
+    }
+    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {  // fragment textures: guest size / format, allocation, scale
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+        if (!t) { LOG("[draw]   tex%d: none\n", i); continue; }
+        LOG("[draw]   tex%d: %p %ux%u f%#x lv %u -> %ux%u scale %.4f %.4f%s\n", i, (void *)t, t->width, t->height, t->format,
+            b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "");
+    }
 }
 
 // ================================================================== texture copies
@@ -2294,6 +2360,26 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     uint32_t sly = src->has_view && (src->view.setmask & 2) ? src->view.min_layer : 0;
     uint32_t dly = dst->has_view && (dst->view.setmask & 2) ? dst->view.min_layer : 0;
     if (slv >= s->levels || dlv >= d->levels || sly >= s->layers || dly >= d->layers) return;
+    {   // whole-image regions are the level's extent, and every region stays inside its level: scaled allocations
+        // (internal resolution below 1x) round guest regions past the edge, and out-of-bounds copies / blits are
+        // undefined in Vulkan (garbage that changed every frame on NVIDIA: flicker in the depth pyramid's users)
+        int slw = (int)level_extent(s->width, slv), slh = (int)level_extent(s->height, slv);
+        int dlw = (int)level_extent(d->width, dlv), dlh = (int)level_extent(d->height, dlv);
+        if (!sr[3]) sw = slw - sx0;
+        if (!sr[4]) sh = slh - sy0;
+        if (!dr[3]) dw = dlw - dx0;
+        if (!dr[4]) dh = dlh - dy0;
+        if (sx0 + sw > slw) sw = slw - sx0;
+        if (sy0 + sh > slh) sh = slh - sy0;
+        if (dx0 + dw > dlw) dw = dlw - dx0;
+        if (dy0 + dh > dlh) dh = dlh - dy0;
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    }
+    if (g_debug_frame)
+        LOG("[copytex] %p %ux%u f%#x lv%u (%d,%d %dx%d) [%ux%u] -> %p %ux%u f%#x lv%u (%d,%d %dx%d) [%ux%u] phys (%d,%d %dx%d) -> (%d,%d %dx%d) flags %llx\n",
+            (void *)st_, st_->width, st_->height, st_->format, slv, sr[0], sr[1], sr[3], sr[4], s->width, s->height, (void *)dt, dt->width,
+            dt->height, dt->format, dlv, dr[0], dr[1], dr[3], dr[4], d->width, d->height, sx0, sy0, sw, sh, dx0, dy0, dw, dh,
+            (unsigned long long)flags);
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     VkImageAspectFlags sa = s->aspect, da = d->aspect;

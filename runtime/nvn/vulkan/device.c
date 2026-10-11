@@ -529,7 +529,10 @@ void backend_present(NvnTexture *t) {
     if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
     extern volatile int g_debug_frame_request;
     if (g_debug_frame_request) { g_debug_frame_request = 0; debug_at = (long)total_frames + 1; }
-    g_debug_frame = debug_at && total_frames == (uint64_t)debug_at;
+    // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
+    static long debug_n = -1;
+    if (debug_n < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
+    g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
     {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);

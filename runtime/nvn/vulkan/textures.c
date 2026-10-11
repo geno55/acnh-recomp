@@ -320,6 +320,21 @@ static void create_image(NvnTexture *t, TexBackend *b) {
                  : t->target == 8 ? VK_IMAGE_VIEW_TYPE_CUBE : t->target == 9 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY
                  : layers > 1 || t->target == 4 || t->target == 6 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     vk_image_init_layout(vk_upload_cmd(), b->image, b->aspect);
+    if (depthfmt) {
+        // New depth / stencil images start zeroed (as fresh memory reads on Apple GPUs). The game builds its depth
+        // pyramid with depth-only copies, so the stencil of those images was never written: whatever the memory
+        // held, different per image and per run, then failed or passed the depth-of-field passes' stencil test in
+        // patches (flicker that came and went between runs, every other frame, below 1x internal resolution).
+        VkCommandBuffer cb = vk_upload_cmd();
+        VkClearDepthStencilValue zero = {0.0f, 0};
+        VkImageSubresourceRange rg = {b->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        vkCmdClearDepthStencilImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
+        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        vkCmdPipelineBarrier2(cb, &di);
+    }
 }
 
 static void defer(Dead d) {
