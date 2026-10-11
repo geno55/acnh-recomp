@@ -2108,8 +2108,40 @@ static void draw_(CmdRec *r, bool indexed) {
 
     if (prof) prof_vtx += SDL_GetTicksNS() - prof_t2_;
     // ---- draw
-    if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
-    else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
+    // Instanced draws with item spots among their instances (bushsanity: bushes are drawn in batches, each instance's
+    // model matrix in vertex storage buffer 0, indexed by instance id): drawn as runs of instances, gold runs tinted
+    // (as renderer.m; gl_InstanceIndex includes the base instance, so a run [b + k, b + k + n) draws exactly those).
+    enum { MAX_RUNS = 64 };
+    uint32_t run_at[MAX_RUNS], run_n[MAX_RUNS];
+    bool run_gold[MAX_RUNS];
+    int nruns = 0;
+    if (pr->fi->uses_tint && inst > 1 && st.sbuf[0][0].addr) {
+        extern bool pot_glow_active(void);
+        extern bool pot_instance_gold(const float *m);
+        uint64_t recs = st.sbuf[0][0].size / 64;
+        if (pot_glow_active() && (uint64_t)base_inst + inst <= recs) {
+            const float *m = (const float *)(uintptr_t)st.sbuf[0][0].addr;
+            for (uint32_t i = 0; i < inst; i++) {
+                bool g = pot_instance_gold(m + (size_t)(base_inst + i) * 16);
+                if (nruns && run_gold[nruns - 1] == g) { run_n[nruns - 1]++; continue; }
+                if (nruns == MAX_RUNS) { nruns = 0; break; }  // (too fragmented: draw as is)
+                run_at[nruns] = i; run_n[nruns] = 1; run_gold[nruns] = g; nruns++;
+            }
+            if (nruns == 1 && !run_gold[0]) nruns = 0;
+        }
+    }
+    if (!nruns) { run_at[0] = 0; run_n[0] = inst; nruns = 1; run_gold[0] = false; }
+    for (int ri = 0; ri < nruns; ri++) {
+        if (nruns > 1 || run_gold[0]) {  // this run's tint: a fragment set of its own
+            float rtint[8] = {0};
+            extern void pot_gold_tint(float tint[8]);
+            if (run_gold[ri]) pot_gold_tint(rtint);
+            VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
+        }
+        if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
+        else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
+    }
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
