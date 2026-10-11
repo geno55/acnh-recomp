@@ -118,9 +118,8 @@ static bool keys_shown(void) {
     return on;
 }
 
-extern "C" bool escape_bottle_owned(void);  // runtime/hle/escape.c
 extern "C" bool inventory_overlay_wanted(void) {
-    return (keys_shown() || escape_bottle_owned() || pets_ghost_state() >= 0 || companion_card()) &&
+    return (keys_shown() || pets_ghost_state() >= 0 || companion_card()) &&
            rando_seed_dir() && items_page_shown();
 }
 
@@ -303,18 +302,6 @@ static void pets_draw(ImDrawList *dl, ImFont *font, float ox, float oy, float u)
 }
 
 
-// Escape Bottle (runtime/hle/escape.c): item names are hidden in randomizer seeds, so the third bottle's slot (last of
-// the bottom row, game layout 1076, 428) gets a name tag under it
-static void escape_tag(ImDrawList *dl, ImFont *font, float ox, float oy, float u) {
-    const char *t = "Escape Bottle";
-    float fs = 19 * u;
-    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, t), c(ox + 1076 * u, oy + 488 * u);
-    ImVec2 a(c.x - ts.x * 0.5f - 9 * u, c.y - ts.y * 0.5f - 3 * u), b(c.x + ts.x * 0.5f + 9 * u, c.y + ts.y * 0.5f + 3 * u);
-    dl->AddRectFilled(a, b, IM_COL32(52, 38, 20, 225), 9 * u);
-    dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 9 * u, 0, 1.8f * u);
-    dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 240, 200, 255), t);
-}
-
 struct Dungeon { const char *label; int index; };
 // record = 2 x (dungeon number - 1); the Color Dungeon is record 18 (verified from the in-dungeon key HUD)
 static const Dungeon kDungeons[] = {{"D1", 0}, {"D2", 2}, {"D3", 4}, {"D4", 6}, {"D5", 8},
@@ -401,7 +388,6 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     float u = bw / 1280.0f;  // game layout units (1280x720)
     ImVec2 p0(ox + 150 * u, oy + 512 * u), p1(ox + 1130 * u, oy + 630 * u);
     ImDrawList *dl = ImGui::GetForegroundDrawList();
-    if (escape_bottle_owned()) escape_tag(dl, font, ox, oy, u);
     pets_draw(dl, font, ox, oy, u);
     if (!keys_shown()) return;
     dl->AddRectFilled(p0, p1, IM_COL32(52, 38, 20, 205), 14 * u);

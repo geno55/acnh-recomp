@@ -3,8 +3,7 @@
 // Bottle: Tarin hands it over with the starting items, in the game's own get-item message
 // (tools/rando/escape_bottle.py). Equipped on X / Y and used: inside a dungeon Link warps to that dungeon's entrance
 // (the entrance room stays at its own cell in shuffled layouts: tools/rando/dungeon_gen.py ENTRANCES), anywhere else
-// to Marin & Tarin's house (MarinTarinHouse_01A: just inside the front door, where the game puts Link coming in from
-// the village).
+// to Mabe Village, walking out of Marin & Tarin's front door (Field_11C; user 2026-10-11 - was just inside it).
 //
 // Why the third bottle: it is a real inventory item, so it gets an item-page slot, X / Y assignment and the game's own
 // "may Link use an item now?" rules for free: the use is caught in the game's predicate for that slot
@@ -13,8 +12,7 @@
 // (rect per arena below: the fight would be left half done) or Dampe's chambers (chamber.c keeps run state): there it
 // does nothing (no swing either: a fairy caught in it would turn it into a fairy bottle).
 // Nothing in the item logic knows about it (convenience only). Drawn GOLD (escape_bottle_tint below) on the Items page,
-// the HUD button and in Tarin's hands. Items page: a name tag under its slot (item names are
-// hidden in randomizer seeds; runtime/ui/inventory_overlay.mm).
+// the HUD button and in Tarin's hands (no name tag: the gold says it - user 2026-10-11).
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -48,7 +46,8 @@ static const struct { const char *level; float x0, z0, x1, z1; } kBossArena[] = 
     {"Lv07EagleTower", 162, -6, 187, 6},     {"Lv08TurtleRock", 45, 12, 60, 24},
     {"Lv09WindFishsEgg", 75, 0, 90, 12},     {"Lv10ClothesDungeon", 15, 36, 30, 48},
 };
-static const char *const kHome[2] = {"MarinTarinHouse", "MarinTarinHouse_01A"};
+static const char *const kHome[2] = {"Field", "Field_11C"};  // (out of Marin & Tarin's front door)
+static const char *const kTarinHouse = "MarinTarinHouse";  // (where Tarin holds the bottle up)
 
 // LARECOMP_ESCAPE=1 / 0 forces it on / off (tests: also in vanilla)
 static int on = -1;  // (per seed: read again after an in-place reboot)
@@ -140,12 +139,6 @@ void escape_tick(Cpu *c, uint64_t frame) {
         }
 }
 
-// Items page name tag (runtime/ui/inventory_overlay.mm)
-bool escape_bottle_owned(void) {
-    uint64_t ps = LD64(PLAYER_STATUS_PTR);
-    return active() && ps && (LD8(ps + 0xa9) & 0x80);
-}
-
 RT_ON_RESET(escape_reset) { on = -1; }  // (seed switch: the next seed may differ)
 
 // Gold Escape Bottle: the renderer calls this for draws sampling the bottle's item icon (kind 1) or its 3D model's
@@ -166,7 +159,7 @@ void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[
     if (!ps) return;
     bool owned = LD8(ps + 0xa9) & 0x80;
     if (kind == 2) {
-        if (owned || strcmp(cur_level(), kHome[0])) return;
+        if (owned || strcmp(cur_level(), kTarinHouse)) return;
         extern void pot_gold_tint(float tint[8]);  // (the gold of unchecked pots / bushes: lit 3D)
         pot_gold_tint(tint);
         return;
