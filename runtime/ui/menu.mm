@@ -266,7 +266,7 @@ static bool g_inited;
 static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
 static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
-static int g_tab, g_tab_request = -1;
+static int g_tab, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab)
 int g_tab_request_ext = -1;
 
 static void style_init(void) {
@@ -584,30 +584,49 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
 }
 
 // The tab bar and its pages, into the current window: the in-game menu, and the start screen's Settings (in_game
-// false: nothing of the game is loaded yet). font / font_big: the context's fonts (headers use the big one).
-static void tabs_body(float scale, bool in_game) {
-    // L/R (or Q/E) switch tabs
+// false: nothing of the game is loaded yet - the tabs that need it are greyed out; prelaunch: the start screen's own
+// first tab, game files and fonts, drawn by launcher.mm).
+static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
+    // (id: the page; -1 = Prelaunch)
+    struct Tab { const char *name; int id; bool on; };
+    Tab tabs[10];
+    int ntabs = 0;
+    if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
+    static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
+                                  "Cosmetics", "Controls"};
+    for (int i = 0; i < 9; i++) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+    int cur = 0;  // g_tab / g_tab_request hold ids
+    for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
+    if (!tabs[cur].on) cur = 0;
+    // L/R (or Q/E) switch tabs, skipping greyed-out ones (not while typing: Q / E are letters then, and the on-screen
+    // keyboard has the controller)
     if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
-    static const char *tabs[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
-                                 "Cosmetics", "Controls"};
-    const int ntabs = 9;
-    // (not while typing: Q / E are letters then, and the on-screen keyboard has the controller)
     bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
     if (!any_popup && !typing) {
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false)) g_tab_request = (g_tab + 1) % ntabs;
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)) g_tab_request = (g_tab + ntabs - 1) % ntabs;
+        int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
+                 : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
+        if (step) {
+            int i = cur;
+            do i = (i + step + ntabs) % ntabs; while (!tabs[i].on);
+            g_tab_request = tabs[i].id;
+        }
     }
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
-        for (int i = 0; i < ntabs; i++) {
-            ImGuiTabItemFlags f = g_tab_request == i ? ImGuiTabItemFlags_SetSelected : 0;
+        for (int k = 0; k < ntabs; k++) {
+            const Tab &t = tabs[k];
+            ImGuiTabItemFlags f = g_tab_request == t.id && t.on ? ImGuiTabItemFlags_SetSelected : 0;
             char lbl[64];
-            snprintf(lbl, sizeof lbl, "  %s  ", tabs[i]);
-            if (ImGui::BeginTabItem(lbl, NULL, f)) {
-                g_tab = i;
+            snprintf(lbl, sizeof lbl, prelaunch ? " %s " : "  %s  ", t.name);  // (ten tabs: tighter, so none is cut short)
+            ImGui::BeginDisabled(!t.on);  // (out of the game: Save Editor, Warp, Cheats)
+            bool open = ImGui::BeginTabItem(lbl, NULL, f);
+            ImGui::EndDisabled();
+            if (open) {
+                g_tab = t.id;
                 ImGui::Spacing();
                 ImGui::BeginChild("##page", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 8 * scale), ImGuiChildFlags_None,
                                   ImGuiWindowFlags_NavFlattened);
-                switch (i) {
+                switch (t.id) {
+                case -1: prelaunch(scale); break;
                 case 0: tab_display(); break;
                 case 1: tab_audio(); break;
                 case 2:
@@ -615,10 +634,7 @@ static void tabs_body(float scale, bool in_game) {
                     else ImGui::TextDisabled("Load a save file and get into the game to edit it.");
                     break;
                 case 3: rando_tab_draw(scale); break;
-                case 4:
-                    if (!in_game) ImGui::TextDisabled("Warping is available in game.");
-                    else if (warp_tab_draw(scale)) set_open(false);
-                    break;
+                case 4: if (warp_tab_draw(scale)) set_open(false); break;
                 case 5: cheats_draw(scale); break;
                 case 6: difficulty_draw(scale); break;
                 case 7: tab_cosmetics(); break;
@@ -630,18 +646,18 @@ static void tabs_body(float scale, bool in_game) {
                 ImGui::EndTabItem();
             }
         }
-        g_tab_request = -1;
+        g_tab_request = -2;
         ImGui::EndTabBar();
     }
 }
 
-void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game) {
+void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float)) {
     ImFont *f0 = g_font, *f1 = g_font_big;
     g_font = font, g_font_big = font_big;
     ImGuiStyle saved = ImGui::GetStyle();  // the menu's look (the start screen has its own style)
     style_init();
     ImGui::GetStyle().ScaleAllSizes(scale);
-    tabs_body(scale, in_game);
+    tabs_body(scale, in_game, prelaunch);
     ImGui::GetStyle() = saved;
     g_font = f0, g_font_big = f1;
 }
@@ -751,7 +767,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         }
 
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();  // (before the
-        tabs_body(scale, true);                                                                          //  pages run)
+        tabs_body(scale, true, NULL);                                                                          //  pages run)
         ImGui::TextDisabled("L / R  switch tabs      A  select      B  back      Minus + Plus / F1  close");
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)

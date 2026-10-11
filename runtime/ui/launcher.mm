@@ -448,7 +448,7 @@ enum Page { MAIN, SETTINGS, SETUP };  // SETTINGS: the in-game menu's tabs (runt
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
-void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game);  // runtime/ui/menu.mm
+void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float));  // menu.mm
 extern int g_tab_request_ext;
 extern "C" void menu_apply_window_requests(void *sdl_window);
 extern "C" int g_start_screen;  // runtime/hle/warp.c: the start screen is up (no game loaded: don't read its memory)
@@ -676,6 +676,83 @@ static bool launcher_pad_event(const SDL_Event &e) {
 }
 
 // Returns when PLAY is chosen (seed stored in g_settings.rando_seed); QUIT exits.
+// Settings' first tab, on the start screen only: the extracted game files (size, delete) and the user's own Switch
+// fonts (import / back to the substitute)
+// Open a folder in Finder / Explorer (relative paths are in the data root, the working directory)
+static void reveal_folder(const std::string &dir) {
+    std::string path = dir;
+    bool abs = !path.empty() && (path[0] == '/' || path[0] == '\\' || (path.size() > 1 && path[1] == ':'));
+    if (!abs) path = std::string(rt_data_root()) + "/" + path;
+    std::string url = "file://";
+    if (path[0] != '/') url += "/";  // (Windows: file:///C:/...)
+    for (char ch : path) {
+        if (ch == '\\') ch = '/';
+        if (ch == ' ') url += "%20";
+        else if (ch == '%') url += "%25";
+        else if (ch == '#') url += "%23";
+        else url += ch;
+    }
+    SDL_OpenURL(url.c_str());
+}
+
+static SDL_Window *g_launcher_win;
+static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up
+static void prelaunch_tab(float sc) {
+    const ImVec4 gold(0.93f, 0.76f, 0.33f, 1);
+    auto heading = [&](const char *t) {
+        ImGui::PushFont(g_font_menu);
+        ImGui::TextColored(gold, "%s", t);
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::Spacing();
+    };
+    heading("Game files");
+    static double gb = -1;
+    if (gb < 0) gb = rt_game_files_size(g_root.c_str()) / 1e9;
+#ifdef _WIN32
+    if (ImGui::Button("Show in Explorer")) reveal_folder(g_root);
+#else
+    if (ImGui::Button("Show in Finder")) reveal_folder(g_root);
+#endif
+    ImGui::SameLine();
+    if (ImGui::Button("Delete game files")) ImGui::OpenPopup("##delfiles");
+    if (ImGui::BeginPopupModal("##delfiles", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::Text("Delete the extracted game files (%.1f GB)?", gb);
+        ImGui::Spacing();
+        if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
+            bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
+            set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's data folder?).", !ok);
+            g_files_deleted = true, gb = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        ImGui::SetItemDefaultFocus();
+        if (ImGui::Button("Cancel", ImVec2(220 * sc, 0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::Spacing();
+    ImGui::Spacing();
+    heading("Game font");
+    import_fonts();
+    bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
+    ImGui::Text("Text: %s    Button icons: %s", fs ? "Nintendo font (imported)" : "substitute (Hiragino Sans)",
+                fe ? "imported" : "substitute");
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import: "
+                        "nintendo_udsg-r_std_003.bfttf (text) and nintendo_ext_003.bfttf (button icons). "
+                        ".ttf versions with the same names work too.");
+    ImGui::PopTextWrapPos();
+    if (!g_font_msg.empty()) ImGui::Text("%s", g_font_msg.c_str());
+    static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
+    if (ImGui::Button("Import fonts")) SDL_ShowOpenFileDialog(picked_fonts, NULL, g_launcher_win, font_f, 1, NULL, true);
+    if (fs || fe) {
+        ImGui::SameLine();
+        if (ImGui::Button("Use substitute font")) remove_fonts();
+    }
+}
+
 extern "C" void launcher_run(const char *root) {
     g_root = root;
     g_start_screen = 1;
@@ -687,6 +764,7 @@ extern "C" void launcher_run(const char *root) {
     }
     ui_window_init();
     SDL_Window *win = ui_window();
+    g_launcher_win = win;
 #ifdef __APPLE__
     CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
@@ -786,6 +864,11 @@ extern "C" void launcher_run(const char *root) {
     }
     while (!play) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
+        if (g_files_deleted) {  // (Settings > Prelaunch deleted them)
+            g_files_deleted = false;
+            status = check_game_files(g_root);
+            if (!status.empty()) { g_bg = 0; bind_capture_cancel(); settings_save(); page = SETUP; }
+        }
         if (g_play_seed_req) {  // the Randomizer tab's Play: that seed, then PLAY as if pressed (first-launch questions)
             g_play_seed_req = false;
             seeds = list_seeds();
@@ -876,7 +959,7 @@ extern "C" void launcher_run(const char *root) {
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
             if (page != SETTINGS) {  // gold to orange, shadowed (not beside the Settings window)
-                const char *t = "LAS Recomp";
+                const char *t = "LAS Recompiled";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
                         IM_COL32(255, 138, 48, 255), t, 3 * s);
@@ -928,8 +1011,10 @@ extern "C" void launcher_run(const char *root) {
                 if (!focused_once) { ImGui::SetKeyboardFocusHere(); focused_once = true; }
                 ImVec2 play_at = ImGui::GetCursorScreenPos();
                 const char *name = strstr(label, "\xe2\x80\xb9") + 4, *name_end = strstr(label, " \xe2\x80\xba");
-                bool pressed = menu_item(label, status.empty(), &hov, choice ? NULL : name, IM_COL32(246, 232, 176, 255),
-                                         name_end);  // ("Vanilla" in vanilla cream; the arrows stay white)
+                bool pressed = menu_item(label, status.empty(), &hov, name,
+                                         choice ? IM_COL32(250, 250, 255, 255) : IM_COL32(246, 232, 176, 255),
+                                         name_end);  // (the choice keeps its colour when hovered: "Rando: <seed>" white,
+                                                     //  "Vanilla" vanilla cream; the arrows stay white)
                 if (status.empty()) {  // PLAY twinkles now and then while the game is ready
                     ImGui::PushFont(g_font_menu);
                     float w = ImGui::CalcTextSize("PLAY").x, h = ImGui::CalcTextSize("PLAY").y;
@@ -966,8 +1051,10 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("SETTINGS", true)) page = SETTINGS;
-                ImGui::SetCursorPosX(x0);
-                if (menu_item(status.empty() ? "GAME FILES" : "SET UP GAME FILES", !busy)) page = SETUP;
+                if (!status.empty() || busy) {  // (once set up, the game files are kept up in Settings > Prelaunch)
+                    ImGui::SetCursorPosX(x0);
+                    if (menu_item("SET UP GAME FILES", !busy)) page = SETUP;
+                }
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("QUIT", true)) exit(0);
                 g_menu_gap = 0.35f;
@@ -997,7 +1084,7 @@ extern "C" void launcher_run(const char *root) {
                 bool back = ImGui::Button("Back", ImVec2(230 * sc, 0));
                 ImGui::PopStyleColor(3);
                 bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);  // (before the pages run, like the menu)
-                menu_tabs_draw(sc, g_font_small, g_font_menu, false);
+                menu_tabs_draw(sc, g_font_small, g_font_menu, false, prelaunch_tab);
                 ImGui::TextDisabled("L / R  switch tabs      A  select      B  back");
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
@@ -1116,30 +1203,6 @@ extern "C" void launcher_run(const char *root) {
                     if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
                         g_confirm_delete = false;
                 } else {
-                    ImGui::PushFont(g_font_small);
-                    ImGui::Dummy(ImVec2(0, 12 * s));
-                    import_fonts();
-                    bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Game font");
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::Text("Text: %s    Button icons: %s", fs ? "Nintendo font (imported)" : "substitute (Hiragino Sans)",
-                                fe ? "imported" : "substitute");
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::PushTextWrapPos(0);
-                    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import: "
-                                        "nintendo_udsg-r_std_003.bfttf (text) and nintendo_ext_003.bfttf (button icons). "
-                                        ".ttf versions with the same names work too.");
-                    ImGui::PopTextWrapPos();
-                    if (!g_font_msg.empty()) { ImGui::SetCursorPosX(x0); ImGui::Text("%s", g_font_msg.c_str()); }
-                    ImGui::PopFont();
-                    static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
-                    ImGui::SetCursorPosX(x0);
-                    if (menu_item("IMPORT FONTS", true)) SDL_ShowOpenFileDialog(picked_fonts, NULL, win, font_f, 1, NULL, true);
-                    if (fs || fe) {
-                        ImGui::SetCursorPosX(x0);
-                        if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
-                    }
                     ImGui::SetCursorPosX(x0);
                     if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
