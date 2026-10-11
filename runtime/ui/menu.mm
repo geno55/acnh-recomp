@@ -504,12 +504,12 @@ static void tab_display(void) {
 // Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c); never part of a seed
 static void tab_cosmetics(void) {
     opt_begin("##cosmetics", ImGui::GetFontSize() / 34);
-    opt_section("Colours");
-    opt_choice("Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS, 0,
-               "Link's tunic colour. Default: the game's own (or the randomizer seed's).");
-    opt_choice("Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS, 0,
-               "The colour of the hearts on the HUD.");
-    if (opt_action("Random colours", "", "Picks a random tunic and heart colour (any other colour, Default included).")) {
+    opt_section("Colors");
+    opt_choice("Tunic color", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS, 0,
+               "Link's tunic color. Default: the game's own (or the randomizer seed's).");
+    opt_choice("Heart color", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS, 0,
+               "The color of the hearts on the HUD.");
+    if (opt_action("Random colors", "", "Picks a random tunic and heart color (any other color, Default included).")) {
         g_settings.tunic = (g_settings.tunic + 1 + rand() % (N_TUNIC_COLOURS - 1)) % N_TUNIC_COLOURS;
         g_settings.hearts = (g_settings.hearts + 1 + rand() % (N_HEART_COLOURS - 1)) % N_HEART_COLOURS;
     }
