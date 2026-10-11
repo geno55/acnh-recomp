@@ -20,6 +20,7 @@
 #include <algorithm>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // (SetKeyOwner)
 #include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
@@ -578,9 +579,13 @@ static bool menu_item(const char *label, bool enabled, bool *hovered = NULL, con
     ImGui::PushFont(g_menu_small ? g_font_small : g_font_menu);
     ImGui::BeginDisabled(!enabled);
     ImVec2 at = ImGui::GetCursorScreenPos();
-    ImGui::PushID(label);
+    // (the ID from the label's fixed part: PLAY's changes with the seed shown, and a new ID loses the selection)
+    ImGui::PushID(label, split ? split : label + strlen(label));
     ImVec2 sz = ImGui::CalcTextSize(label);
-    bool clicked = ImGui::InvisibleButton("##b", ImVec2(sz.x + 40, sz.y + 6));
+    // (EnableNav: otherwise an InvisibleButton can't be reached with the d-pad / arrow keys - ImGui 1.91)
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the hover band shows the selection, no box)
+    bool clicked = ImGui::InvisibleButton("##b", ImVec2(sz.x + 40, sz.y + 6), ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
     bool hot = ImGui::IsItemFocused() || ImGui::IsItemHovered();
     ImGui::PopID();
     if (hovered) *hovered = hot;
@@ -662,6 +667,20 @@ static bool launcher_pad_event(const SDL_Event &e) {
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
         float v = e.gaxis.value / 32767.0f;
+        // the left stick also works as the d-pad (ImGui moves between items with the d-pad only; the stick scrolls):
+        // pressed past half way, released under 0.3
+        if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX || e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+            static bool held[4];  // left, right, up, down
+            bool x = e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX;
+            int neg = x ? 0 : 2, pos = neg + 1;
+            const ImGuiKey keys[4] = {ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadDpadUp,
+                                      ImGuiKey_GamepadDpadDown};
+            for (int i : {neg, pos}) {
+                float m = i == neg ? -v : v;
+                bool now = held[i] ? m > 0.3f : m > 0.5f;
+                if (now != held[i]) { held[i] = now; io.AddKeyEvent(keys[i], now); }
+            }
+        }
         if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
             io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickLeft, v < -0.3f, v < -0.3f ? -v : 0);
             io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickRight, v > 0.3f, v > 0.3f ? v : 0);
@@ -921,6 +940,10 @@ extern "C" void launcher_run(const char *root) {
             ImGui_ImplVulkan_NewFrame();
 #endif
             ImGui_ImplSDL3_NewFrame();
+            // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
+            // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
+            // controller is connected
+            if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;
@@ -955,6 +978,8 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
             ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+            ImGui::SetScrollX(0);  // (the start screen never scrolls; a long seed name or a stray nav move mustn't shift it)
+            ImGui::SetScrollY(0);
             float x0 = 90 * s;
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
@@ -1048,6 +1073,11 @@ extern "C" void launcher_run(const char *root) {
                         choice = (choice + (int)choices.size() - 1) % (int)choices.size();
                     if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight))
                         choice = (choice + 1) % (int)choices.size();
+                    // left / right are ours while PLAY is selected: ImGui's navigation would otherwise take them too,
+                    // find nothing beside PLAY and scroll the window (PLAY loses its highlight, the cycling stops)
+                    ImGuiID own = ImGui::GetID("##play_lr");
+                    for (ImGuiKey k : {ImGuiKey_LeftArrow, ImGuiKey_RightArrow, ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight})
+                        ImGui::SetKeyOwner(k, own);
                 }
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("SETTINGS", true)) page = SETTINGS;
