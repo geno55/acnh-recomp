@@ -21,7 +21,16 @@ extern "C" {
 #include "../rando.h"
 #include "../settings.h"
 extern const char *g_romfs_dir;
+extern int g_start_screen;  // hle/warp.c
+void launcher_play_seed(const char *seed);  // ui/launcher.mm
 extern char g_window_shot_request[256];  // runtime/hle/hookshot.c (test shots)
+}
+
+// Play a seed ("" = vanilla): in game the game reboots on it; on the start screen (Settings) the game starts with it
+static void play_seed(const char *name) {
+    if (g_start_screen) { launcher_play_seed(name); return; }
+    rando_select(name);
+    rt_request_reboot(RT_REBOOT_GAME);
 }
 
 struct Seed { std::string name, logic, spoiler, id; long mtime; };
@@ -443,8 +452,7 @@ static void gen_overlay(float scale) {
                 g_gen_done = false;
                 g_gen_status.clear();
                 ImGui::CloseCurrentPopup();
-                rando_select(g_gen_seed.c_str());
-                rt_request_reboot(RT_REBOOT_GAME);
+                play_seed(g_gen_seed.c_str());
             }
             ImGui::SetItemDefaultFocus();
             ImGui::SameLine();
@@ -488,16 +496,16 @@ extern "C" void rando_tab_draw(float scale) {
     bool busy = g_gen_pid || g_gen_done;  // the generation overlay is up: the whole panel is greyed out under it
     ImGui::BeginDisabled(busy);
     g_col = ImGui::GetContentRegionAvail().x * 0.4f;
-    const char *active = rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
+    // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
+    const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
 
     ImGui::AlignTextToFramePadding();
     if (active) ImGui::Text("Playing seed:  %s", active);
-    else ImGui::TextUnformatted("Playing:  Vanilla (no randomizer)");
+    else if (!g_start_screen) ImGui::TextUnformatted("Playing:  Vanilla (no randomizer)");
     if (active) {
         ImGui::SameLine();
         if (ImGui::Button("Switch to vanilla")) {
-            rando_select("");
-            rt_request_reboot(RT_REBOOT_GAME);
+            play_seed("");
         }
     }
     ImGui::PushTextWrapPos(0);
@@ -548,8 +556,7 @@ extern "C" void rando_tab_draw(float scale) {
             ImGui::TextUnformatted(s.logic.empty() ? "-" : s.logic.c_str());
             ImGui::TableNextColumn();
             if (!is_active && ImGui::Button("Play")) {
-                rando_select(s.name.c_str());
-                rt_request_reboot(RT_REBOOT_GAME);
+                play_seed(s.name.c_str());
             }
             ImGui::SameLine();
             if (ImGui::Button("Spoiler")) g_spoiler_seed = s.name;

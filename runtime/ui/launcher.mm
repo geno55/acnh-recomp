@@ -444,10 +444,21 @@ static std::vector<std::string> list_seeds() {
 
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
-enum Page { MAIN, SETTINGS, SETUP, CONTROLS, COSMETICS };
+enum Page { MAIN, SETTINGS, SETUP };  // SETTINGS: the in-game menu's tabs (runtime/ui/menu.mm)
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
+void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game);  // runtime/ui/menu.mm
+extern int g_tab_request_ext;
+extern "C" void menu_apply_window_requests(void *sdl_window);
+extern "C" int g_start_screen;  // runtime/hle/warp.c: the start screen is up (no game loaded: don't read its memory)
+// The Randomizer tab's Play / Play Now on the start screen (rando_tab.mm): start the game with that seed
+static std::string g_play_seed;
+static bool g_play_seed_req, g_play_pending;
+extern "C" void launcher_play_seed(const char *seed) {
+    g_play_seed = seed ? seed : "";
+    g_play_seed_req = true;
+}
 static float g_menu_gap = 0.35f;  // space under each item, in line heights
 
 // The first PLAY ever (settings.menu_tip_seen): a note on opening the LAS Recomp menu in game (it isn't obvious),
@@ -667,6 +678,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
 // Returns when PLAY is chosen (seed stored in g_settings.rando_seed); QUIT exits.
 extern "C" void launcher_run(const char *root) {
     g_root = root;
+    g_start_screen = 1;
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;
@@ -735,17 +747,16 @@ extern "C" void launcher_run(const char *root) {
         if (seeds[i] == g_settings.rando_seed) choice = (int)i + 1;
     Page page = status.empty() ? MAIN : SETUP;
     bool play = false;
-    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings / setup / controls / cosmetics
+    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / setup
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
 #ifdef __APPLE__
         layer.framebufferOnly = NO;
 #endif
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
-        if (pg && !strcmp(pg + 1, "settings")) page = SETTINGS;
+        if (pg && !strncmp(pg + 1, "settings", 8)) page = SETTINGS;
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
-        if (pg && !strcmp(pg + 1, "controls")) page = CONTROLS;
-        if (pg && !strcmp(pg + 1, "cosmetics")) page = COSMETICS;
+        if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
         if (pg && !strcmp(pg + 1, "tip")) g_settings.menu_tip_seen = false, g_tip_test = true;
         if (pg && !strcmp(pg + 1, "aspect")) g_settings.aspect_asked = g_settings.menu_tip_seen = false, g_tip_test = true;
@@ -774,9 +785,23 @@ extern "C" void launcher_run(const char *root) {
         if (!status.empty()) { g_bg = 0; page = SETUP; }
     }
     while (!play) {
+        menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
+        if (g_play_seed_req) {  // the Randomizer tab's Play: that seed, then PLAY as if pressed (first-launch questions)
+            g_play_seed_req = false;
+            seeds = list_seeds();
+            choices = {"Vanilla"};
+            choices.insert(choices.end(), seeds.begin(), seeds.end());
+            choice = 0;
+            for (size_t i = 0; i < seeds.size(); i++)
+                if (seeds[i] == g_play_seed) choice = (int)i + 1;
+            bind_capture_cancel();
+            settings_save();
+            page = MAIN;
+            g_play_pending = true;
+        }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            if (page == CONTROLS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
+            if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
         }
@@ -850,7 +875,7 @@ extern "C" void launcher_run(const char *root) {
             float x0 = 90 * s;
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
-            {  // gold to orange, shadowed
+            if (page != SETTINGS) {  // gold to orange, shadowed (not beside the Settings window)
                 const char *t = "Link's Awakening";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
@@ -921,6 +946,7 @@ extern "C" void launcher_run(const char *root) {
                     pressed = false;
                 }
                 // first PLAY ever: the aspect ratio question, then how to reach our menu, then the game
+                if (g_play_pending && status.empty()) pressed = true, g_play_pending = false;
                 if (pressed) {
                     if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
                     else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
@@ -945,6 +971,54 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("QUIT", true)) exit(0);
                 g_menu_gap = 0.35f;
+            } else if (page == SETTINGS) {
+                // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
+                // loaded game say so
+                float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y * 0.86f;
+                ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + ds.x,
+                                                          ImGui::GetWindowPos().y + ds.y), IM_COL32(0, 0, 0, 110));
+                ImVec2 wp = ImGui::GetWindowPos();
+                ImGui::SetCursorScreenPos(ImVec2(wp.x + (ds.x - w) * 0.5f, wp.y + (ds.y - h) * 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.09f, 0.08f, 0.96f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * sc);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28 * sc, 24 * sc));
+                ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();
+                ImGui::BeginChild("##settings", ImVec2(w, h), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NavFlattened);
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor();
+                ImGui::PushFont(g_font_small);
+                ImGui::PushFont(g_font_menu);
+                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Settings");
+                ImGui::PopFont();
+                ImGui::SameLine(ImGui::GetWindowWidth() - 260 * sc);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.22f, 0.18f, 1));  // (the menu's green)
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.36f, 0.25f, 1));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.21f, 0.50f, 0.34f, 1));
+                bool back = ImGui::Button("Back", ImVec2(230 * sc, 0));
+                ImGui::PopStyleColor(3);
+                bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);  // (before the pages run, like the menu)
+                menu_tabs_draw(sc, g_font_small, g_font_menu, false);
+                ImGui::TextDisabled("L / R  switch tabs      A  select      B  back");
+                int cap_dev;
+                bind_capture_active(&cap_dev, NULL, NULL);
+                if (!popup && !typing && cap_dev < 0 && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                    (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+                    back = true;
+                ImGui::PopFont();
+                ImGui::EndChild();
+                ImGui::GetIO().FontGlobalScale = s * 0.5f;
+                if (back) {
+                    bind_capture_cancel();
+                    settings_save();
+                    page = MAIN;
+                    std::string cur = choices[choice];  // seeds made / renamed / deleted in the Randomizer tab
+                    seeds = list_seeds();
+                    choices = {"Vanilla"};
+                    choices.insert(choices.end(), seeds.begin(), seeds.end());
+                    choice = 0;
+                    for (size_t i = 0; i < choices.size(); i++)
+                        if (choices[i] == cur) choice = (int)i;
+                }
             } else {
                 // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
                 // larger text (ui_scale.h) gets a taller panel: it starts closer to the title, ends closer to the status
@@ -960,99 +1034,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PopStyleColor();
                 g_menu_small = true;
                 float x0 = ImGui::GetCursorPosX();
-                if (page == SETTINGS) {
-                ImGui::PushFont(g_font_small);
-                ImGui::SetCursorPosX(x0);
-                ImGui::Checkbox("Fullscreen", &g_settings.fullscreen);
-                ImGui::SetCursorPosX(x0);
-                ImGui::Checkbox("Show FPS", &g_settings.show_fps);
-                ImGui::SetCursorPosX(x0);
-                ImGui::SetNextItemWidth(420 * s);
-                ImGui::SliderFloat("Volume", &g_settings.volume, 0, 1, "%.2f");
-                ImGui::SetCursorPosX(x0);
-                ImGui::Checkbox("360-degree movement", &g_settings.move_360);
-                ImGui::SetCursorPosX(x0);
-                ImGui::Checkbox("Remove blur", &g_settings.blur_removal);
-                ImGui::SetCursorPosX(x0);
-                ImGui::Checkbox("Hide Hero Mode icon", &g_settings.hide_hero_icon);
-                ImGui::SetCursorPosX(x0);
-                ImGui::SetNextItemWidth(420 * s);
-                static const char *const prompts[] = {"Auto (follow the controller)", "Nintendo", "Xbox", "PlayStation"};
-                ImGui::Combo("Button icons", &g_settings.prompts, prompts, 4);
-                ImGui::SetCursorPosX(x0);
-                ImGui::TextDisabled("More options are in the in-game menu (Esc).");
-                ImGui::PopFont();
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("CONTROLS", true)) page = CONTROLS;
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("COSMETICS", true)) page = COSMETICS;
-                ImGui::PushFont(g_font_small);
-                ImGui::Dummy(ImVec2(0, 12 * s));
-                import_fonts();
-                bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
-                ImGui::SetCursorPosX(x0);
-                ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Game font");
-                ImGui::SetCursorPosX(x0);
-                ImGui::Text("Text: %s    Button icons: %s", fs ? "Nintendo font (imported)" : "substitute (Hiragino Sans)",
-                            fe ? "imported" : "substitute");
-                ImGui::SetCursorPosX(x0);
-                ImGui::PushTextWrapPos(0);
-                ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import: "
-                                    "nintendo_udsg-r_std_003.bfttf (text) and nintendo_ext_003.bfttf (button icons). "
-                                    ".ttf versions with the same names work too.");
-                ImGui::PopTextWrapPos();
-                if (!g_font_msg.empty()) { ImGui::SetCursorPosX(x0); ImGui::Text("%s", g_font_msg.c_str()); }
-                ImGui::PopFont();
-                static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("IMPORT FONTS", true)) SDL_ShowOpenFileDialog(picked_fonts, NULL, win, font_f, 1, NULL, true);
-                if (fs || fe) {
-                    ImGui::SetCursorPosX(x0);
-                    if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
-                }
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
-                    settings_save();  // (B / Esc: back)
-                    page = MAIN;
-                }
-                } else if (page == COSMETICS) {  // tunic / heart colours (also the in-game menu's Cosmetics tab)
-                ImGui::PushFont(g_font_small);
-                const struct { const char *label; int *v; const char *const *names; int n; } rows[] = {
-                    {"Tunic colour", &g_settings.tunic, g_tunic_colours, N_TUNIC_COLOURS},
-                    {"Heart colour", &g_settings.hearts, g_heart_colours, N_HEART_COLOURS}};
-                for (const auto &r : rows) {
-                    ImGui::PushID(r.label);
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::SetNextItemWidth(300 * s);
-                    ImGui::Combo("##c", r.v, r.names, r.n);
-                    ImGui::SameLine();
-                    if (ImGui::Button("Random")) *r.v = (*r.v + 1 + rand() % (r.n - 1)) % r.n;  // (Default included)
-                    ImGui::SameLine();
-                    ImGui::TextUnformatted(r.label);
-                    ImGui::PopID();
-                }
-                ImGui::PopFont();
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("BACK", true) || (!typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                            ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
-                    settings_save();
-                    page = SETTINGS;
-                }
-                } else if (page == CONTROLS) {  // remapping (runtime/ui/controls_ui.mm)
-                ImGui::PushFont(g_font_small);
-                controls_bindings_draw(s);
-                ImGui::PopFont();
-                ImGui::SetCursorPosX(x0);
-                int cap_dev;
-                bind_capture_active(&cap_dev, NULL, NULL);
-                if (menu_item("BACK", true) || (cap_dev < 0 && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                                ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
-                    bind_capture_cancel();
-                    settings_save();
-                    page = SETTINGS;
-                }
-                } else {  // SETUP
+                {  // SETUP: game files (extract / delete) and the user's own Switch fonts
                 pthread_mutex_lock(&g_lock);
                 std::string dump = g_dump, keys = g_keys, job = g_job;
                 bool failed = g_job_failed;
@@ -1134,9 +1116,36 @@ extern "C" void launcher_run(const char *root) {
                     if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
                         g_confirm_delete = false;
                 } else {
+                    ImGui::PushFont(g_font_small);
+                    ImGui::Dummy(ImVec2(0, 12 * s));
+                    import_fonts();
+                    bool fs = have_font(FONT_STD, 4), fe = have_font(FONT_EXT, 2);
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Game font");
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::Text("Text: %s    Button icons: %s", fs ? "Nintendo font (imported)" : "substitute (Hiragino Sans)",
+                                fe ? "imported" : "substitute");
+                    ImGui::SetCursorPosX(x0);
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import: "
+                                        "nintendo_udsg-r_std_003.bfttf (text) and nintendo_ext_003.bfttf (button icons). "
+                                        ".ttf versions with the same names work too.");
+                    ImGui::PopTextWrapPos();
+                    if (!g_font_msg.empty()) { ImGui::SetCursorPosX(x0); ImGui::Text("%s", g_font_msg.c_str()); }
+                    ImGui::PopFont();
+                    static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
+                    ImGui::SetCursorPosX(x0);
+                    if (menu_item("IMPORT FONTS", true)) SDL_ShowOpenFileDialog(picked_fonts, NULL, win, font_f, 1, NULL, true);
+                    if (fs || fe) {
+                        ImGui::SetCursorPosX(x0);
+                        if (menu_item("USE SUBSTITUTE FONT", true)) remove_fonts();
+                    }
                     ImGui::SetCursorPosX(x0);
                     if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) page = MAIN;
+                                                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
+                        settings_save();
+                        page = MAIN;
+                    }
                 }
                 }
                 g_menu_small = false;
@@ -1144,7 +1153,8 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::GetIO().FontGlobalScale = s * 0.5f;
             }
 
-            // status (lower left) and version (lower right)
+            // status (lower left) and version (lower right) - not under the Settings window
+            if (page != SETTINGS) {
             ImGui::PushFont(g_font_small);
             ImGui::SetCursorPos(ImVec2(x0, ds.y - 118 * s));
             if (status.empty()) {
@@ -1209,6 +1219,7 @@ extern "C" void launcher_run(const char *root) {
                 }
             }
             ImGui::PopFont();
+            }
             ImGui::End();
             ImGui::PopStyleColor();
             osk_draw(g_font_menu, s * 0.7f);  // (a text field activated with the controller)
@@ -1255,4 +1266,5 @@ extern "C" void launcher_run(const char *root) {
     ImGui::DestroyContext(ctx);
     ImGui::SetCurrentContext(prev_ctx);
     g_bg = 0;
+    g_start_screen = 0;
 }

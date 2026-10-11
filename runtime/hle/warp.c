@@ -67,7 +67,10 @@ void warp_request(const char *level, const char *locator) {
 
 // True while a save is loaded and Link exists in a level: the game manager's player slot ([gm + 0x4b8]) is
 // null on the boot / title / file-select screens (the level name there is stale), set once gameplay starts.
+int g_start_screen;  // runtime/ui/launcher.mm: the start screen is up - before the first boot nothing is loaded here
+
 int game_in_play(void) {
+    if (g_start_screen) return 0;
     uint64_t gm = LD64(MAIN_BASE + 0x1c97188);
     return gm && LD64(gm + 0x4b8) != 0;
 }
