@@ -450,11 +450,13 @@ static void tab_display(void) {
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)
     // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
-    static const char *res[] = {"Match display", "Dynamic", "1x", "2x", "3x", "4x", "75%", "50%", "25%"};
-    static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, RES_Q75, RES_Q50, RES_Q25};
+    // (Match display in the middle: left from it 75% / 50% / 25%, right Dynamic then 1x-4x; user 2026-10-11)
+    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x", "2x", "3x", "4x"};
+    static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4};
+    enum { RES_MATCH_AT = 3 };
     enum { NRES = sizeof res_mode / sizeof res_mode[0] };
     {
-        int ri = 0;
+        int ri = RES_MATCH_AT;
         for (int i = 0; i < NRES; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
         float sx, sy;
         renderer_get_scale(&sx, &sy);
@@ -465,7 +467,7 @@ static void tab_display(void) {
                                       "%.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
             snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
-        if (opt_choice("Internal resolution", &ri, res, NRES, 0, d)) g_settings.res_mode = res_mode[ri];
+        if (opt_choice("Internal resolution", &ri, res, NRES, RES_MATCH_AT, d, false)) g_settings.res_mode = res_mode[ri];
     }
     {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
 #ifdef __APPLE__

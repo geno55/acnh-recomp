@@ -114,11 +114,14 @@ bool opt_toggle(const char *label, bool *v, bool def, const char *desc) {
     return true;
 }
 
-bool opt_choice(const char *label, int *v, const char *const *names, int n, int def, const char *desc) {
+bool opt_choice(const char *label, int *v, const char *const *names, int n, int def, const char *desc, bool wrap) {
     int cur = *v >= 0 && *v < n ? *v : 0;
     int step = row(label, names[cur], cur != def, desc, true, true);
     if (!step) return false;
-    *v = (cur + (step == 2 ? 1 : step) + n) % n;
+    int nv = cur + (step == 2 ? 1 : step);
+    nv = wrap ? (nv + n) % n : nv < 0 ? 0 : nv >= n ? n - 1 : nv;
+    if (nv == cur) return false;
+    *v = nv;
     return true;
 }
 
