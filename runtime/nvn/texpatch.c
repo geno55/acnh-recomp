@@ -37,7 +37,7 @@
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_FAIRY_MODEL,
-       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_HEART };
+       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -87,11 +87,12 @@ static int role_of(const char *name) {
         {"ItemBottle_00^w", R_BOTTLE}, {"MI_bottle_alb", R_BOTTLE_MODEL},
         // the fairy's colour map (ItemFairy.bfres): boss / mini-boss souls are a fairy drawn evil red (runtime/hle/souls.c)
         {"MI_fairy_alb", R_FAIRY_MODEL},
-        // cosmetics: Link's green tunic (recoloured on upload; the red tunic's map is only its mask, never matched)
+        // cosmetics: Link's tunics (recoloured on upload: green, and with a colour chosen the red / blue too, so the
+        // Color Dungeon's tunics keep it - user 2026-10-11; the red map is also the recolour's mask)
         // and the hearts of Cm_HeartGauge (HUD, file select): Hp_00 = an empty heart (its own draw); each quarter of
         // a full one is one draw of Hp_01 (fill) + Hp_02 (frame, coloured by the layout's material) through the
         // Hp_04 mask; HeartUp = the life-up flash. Their draws are tinted.
-        {"MI_body_alb.0", R_TUNIC}, {"MI_body_alb.1", R_TUNIC_RED},
+        {"MI_body_alb.0", R_TUNIC}, {"MI_body_alb.1", R_TUNIC_RED}, {"MI_body_alb.2", R_TUNIC_BLUE},
         {"Hp_00^w", R_HEART}, {"Hp_01^w", R_HEART}, {"Hp_02^w", R_HEART}, {"HeartUp^w", R_HEART},
         // the Items page's cursor brackets: identified only (hidden while the companion card has the cursor, pets.c)
         {"ItemCursor_", R_ITEM_CURSOR},
@@ -239,13 +240,14 @@ int texpatch_identify(const NvnTexture *t) {
     for (int i = 0; i < g_nrefs; i++) {
         const Ref *r = &g_refs[i];
         // (only the bottle model's and the tunic's maps have mip levels: compared in full, all levels)
-        if (r->w != t->width || r->h != t->height || r->role == R_TUNIC_RED ||
-            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_TUNIC)) continue;
+        bool tunic = r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE;
+        if (r->w != t->width || r->h != t->height ||
+            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || tunic)) continue;
         uint64_t n = r->size < total ? r->size : total;
         if (!memcmp((const void *)(uintptr_t)t->addr, r->data, n)) {
             static int nlog;
             if (nlog++ < 64) LOG("[texpatch] %s (%ux%u fmt %#x) uploaded\n", r->name, r->w, r->h, t->format);
-            if (r->role == R_TUNIC) { g_tunic_layout = t->layout; g_tunic_layout_ok = true; }
+            if (tunic) { g_tunic_layout = t->layout; g_tunic_layout_ok = true; }  // (all three: the same layout)
             return i;
         }
     }
@@ -1000,7 +1002,7 @@ static const int8_t k_sheet_roles[18] = {R_PLUS, R_MINUS, R_A, R_B, 0, 0, R_L, 0
 void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row) {
     if (id < 0 || id >= g_nrefs) return;
     const Ref *r = &g_refs[id];
-    if (r->role == R_TUNIC) { tunic_apply(lv, blocks, w, h, row); return; }
+    if (r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE) { tunic_apply(lv, blocks, w, h, row); return; }
     if (lv || r->w != w || r->h != h) return;
     if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_ITEM_CURSOR ||
         r->role == R_HEART) return;
