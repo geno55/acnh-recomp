@@ -448,10 +448,51 @@ enum Page { MAIN, SETTINGS, SETUP, CONTROLS, COSMETICS };
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
+static float g_menu_gap = 0.35f;  // space under each item, in line heights
 
 // The first PLAY ever (settings.menu_tip_seen): a note on opening the LAS Recomp menu in game (it isn't obvious),
 // OK starts the game. Returns true once OK is pressed.
 static bool g_tip_test;  // (LARECOMP_LAUNCHER_SHOT=<frame>:tip)
+// First PLAY ever, before the menu note: authentic 16:9 or the unlocked (fill the window) aspect ratio.
+static bool aspect_prompt(float s) {
+    bool done = false;
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(fminf(ds.x * 0.8f, 760 * s), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(36 * s, 28 * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 16 * s);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.03f, 0.04f, 0.05f, 0.94f));
+    bool open = ImGui::BeginPopupModal("##aspect", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (open) {
+        ImGui::SetWindowFontScale(1.25f);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted("How would you like to play?");
+        ImGui::Spacing();
+        ImGui::TextDisabled("You can change this any time in Settings.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14 * s));
+        float bw = 300 * s, gap = 20 * s;
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 2 * bw - gap) * 0.5f);
+        int pick = -1;
+        ImGui::SetItemDefaultFocus();
+        if (ImGui::Button("Authentic 16:9", ImVec2(bw, 44 * s))) pick = ASPECT_ORIGINAL;
+        ImGui::SameLine(0, gap);
+        if (ImGui::Button("Unlocked (fill the screen)", ImVec2(bw, 44 * s))) pick = ASPECT_UNLOCKED;
+        if (pick >= 0) {
+            g_settings.aspect = pick;
+            g_settings.aspect_asked = true;
+            settings_save();
+            ImGui::CloseCurrentPopup();
+            done = true;
+        }
+        ImGui::EndPopup();
+    }
+    return done;
+}
+
 static bool menu_tip(float s) {
     bool go = false;
     ImVec2 ds = ImGui::GetIO().DisplaySize;
@@ -508,7 +549,21 @@ static void text_fx(ImDrawList *dl, ImFont *font, float size, ImVec2 p, ImU32 to
     }
 }
 
-static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
+// A four-point sparkle (PLAY's twinkle): k = 0..1 grows and fades it
+static void sparkle(ImDrawList *dl, ImVec2 c, float r, float k, float spin) {
+    if (k <= 0) return;
+    ImVec2 pts[8];
+    for (int i = 0; i < 8; i++) {
+        float a = spin + i * 3.14159265f / 4, rr = (i & 1 ? r * 0.22f : r) * k;
+        pts[i] = ImVec2(c.x + cosf(a) * rr, c.y + sinf(a) * rr);
+    }
+    dl->AddCircleFilled(c, r * 0.55f * k, IM_COL32(255, 230, 150, (int)(60 * k)));  // soft glow
+    dl->AddConvexPolyFilled(pts, 8, IM_COL32(255, 248, 215, (int)(235 * k)));
+}
+
+// split .. split_end: that part of the label in its own colour (PLAY's choice: Vanilla in vanilla cream)
+static bool menu_item(const char *label, bool enabled, bool *hovered = NULL, const char *split = NULL, ImU32 col2 = 0,
+                      const char *split_end = NULL) {
     ImGui::PushFont(g_menu_small ? g_font_small : g_font_menu);
     ImGui::BeginDisabled(!enabled);
     ImVec2 at = ImGui::GetCursorScreenPos();
@@ -520,14 +575,34 @@ static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
     if (hovered) *hovered = hot;
     ImU32 col = !enabled ? IM_COL32(170, 175, 200, 140) : hot ? IM_COL32(255, 214, 64, 255) : IM_COL32(250, 250, 255, 255);
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    if (hot && enabled) {  // a drawn arrow (the fonts we use have no glyph for one: it showed as '?')
-        float h = sz.y * 0.42f, cx = at.x - sz.y * 0.55f, cy = at.y + sz.y * 0.52f;
-        dl->AddTriangleFilled(ImVec2(cx - h * 0.45f, cy - h * 0.6f), ImVec2(cx - h * 0.45f, cy + h * 0.6f),
-                              ImVec2(cx + h * 0.55f, cy), col);
+    if (hot && enabled) {  // a shadow band behind the item (like the version corner's), feathered, with a warm glow
+        float x0 = ImGui::GetWindowPos().x, x1 = at.x + sz.x * 0.75f, x2 = at.x + sz.x + sz.y * 3.5f;
+        float f = sz.y * 0.22f, y0 = at.y - f * 0.4f, y1 = y0 + f, y3 = at.y + sz.y + f * 0.2f, y2 = y3 - f;
+        ImU32 c = IM_COL32(6, 10, 34, 150), g = IM_COL32(255, 190, 80, 34), n = IM_COL32(6, 10, 34, 0), ng = IM_COL32(255, 190, 80, 0);
+        for (int pass = 0; pass < 2; pass++) {  // dark band, then the glow over it
+            ImU32 a = pass ? g : c, z = pass ? ng : n;
+            dl->AddRectFilledMultiColor(ImVec2(x0, y1), ImVec2(x1, y2), a, a, a, a);
+            dl->AddRectFilledMultiColor(ImVec2(x1, y1), ImVec2(x2, y2), a, z, z, a);
+            dl->AddRectFilledMultiColor(ImVec2(x0, y0), ImVec2(x1, y1), z, z, a, a);  // (feathered top / bottom)
+            dl->AddRectFilledMultiColor(ImVec2(x1, y0), ImVec2(x2, y1), z, z, z, a);
+            dl->AddRectFilledMultiColor(ImVec2(x0, y2), ImVec2(x1, y3), a, a, z, z);
+            dl->AddRectFilledMultiColor(ImVec2(x1, y2), ImVec2(x2, y3), a, z, z, z);
+        }
     }
-    text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), at, col, hot && enabled ? IM_COL32(255, 160, 50, 255) : col, label,
-            enabled ? sz.y * 0.05f : 0);
-    ImGui::Dummy(ImVec2(0, sz.y * 0.35f));  // line spacing
+    ImU32 col_b = hot && enabled ? IM_COL32(255, 160, 50, 255) : col;
+    if (split && enabled) {
+        std::string head(label, split - label);
+        text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), at, col, col_b, head.c_str(), sz.y * 0.05f);
+        std::string mid = split_end ? std::string(split, split_end - split) : std::string(split);
+        ImVec2 p2(at.x + ImGui::CalcTextSize(label, split).x, at.y);
+        text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), p2, col2, col2, mid.c_str(), sz.y * 0.05f);
+        if (split_end)
+            text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(at.x + ImGui::CalcTextSize(label, split_end).x, at.y),
+                    col, col, split_end, sz.y * 0.05f);
+    } else
+        text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), at, col, col_b, label, enabled ? sz.y * 0.05f : 0);
+    if (g_menu_gap >= 0) ImGui::Dummy(ImVec2(0, sz.y * g_menu_gap));  // line spacing
+    else ImGui::SetCursorPosY(ImGui::GetCursorPosY() + sz.y * g_menu_gap);  // (tighter than the font's line height)
     ImGui::EndDisabled();
     ImGui::PopFont();
     return clicked;
@@ -673,6 +748,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && !strcmp(pg + 1, "cosmetics")) page = COSMETICS;
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
         if (pg && !strcmp(pg + 1, "tip")) g_settings.menu_tip_seen = false, g_tip_test = true;
+        if (pg && !strcmp(pg + 1, "aspect")) g_settings.aspect_asked = g_settings.menu_tip_seen = false, g_tip_test = true;
     }
 
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
@@ -754,13 +830,13 @@ extern "C" void launcher_run(const char *root) {
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
             }
             {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
-                const float stops[][2] = {{0.0f, 225}, {0.26f, 215}, {0.38f, 165}, {0.48f, 95}, {0.56f, 35}, {0.64f, 0}};
+                const float stops[][2] = {{0.0f, 225}, {0.3f, 215}, {0.44f, 165}, {0.55f, 95}, {0.64f, 35}, {0.74f, 0}};
                 for (int i = 0; i + 1 < (int)(sizeof stops / sizeof stops[0]); i++) {
                     ImU32 a = IM_COL32(6, 10, 34, (int)stops[i][1]), b = IM_COL32(6, 10, 34, (int)stops[i + 1][1]);
                     bg->AddRectFilledMultiColor(ImVec2(ds.x * stops[i][0], 0), ImVec2(ds.x * stops[i + 1][0], ds.y), a, b, b, a);
                 }
-                float y0 = ds.y - 175 * s, y1 = ds.y - 120 * s, y2 = ds.y - 45 * s, y3 = ds.y, x0r = ds.x * 0.55f;
-                ImU32 c0 = IM_COL32(6, 10, 34, 0), c1 = IM_COL32(6, 10, 34, 200);
+                float y0 = ds.y - 190 * s, y1 = ds.y - 135 * s, y2 = ds.y - 40 * s, y3 = ds.y, x0r = ds.x * 0.5f;
+                ImU32 c0 = IM_COL32(6, 10, 34, 0), c1 = IM_COL32(6, 10, 34, 235);
                 bg->AddRectFilledMultiColor(ImVec2(x0r, y0), ImVec2(ds.x, y1), c0, c0, c1, c0);  // (feathered top)
                 bg->AddRectFilledMultiColor(ImVec2(x0r, y1), ImVec2(ds.x, y2), c0, c1, c1, c0);
                 bg->AddRectFilledMultiColor(ImVec2(x0r, y2), ImVec2(ds.x, y3), c0, c1, c0, c0);  // (feathered bottom)
@@ -789,11 +865,25 @@ extern "C" void launcher_run(const char *root) {
             bool typing = typed_before || ui_text_busy();
 
             if (page == MAIN) {
+                {  // the four items close together, the block anchored where QUIT always was (the gap to the status
+                   // line stays)
+                    ImGui::PushFont(g_font_menu);
+                    float h = ImGui::CalcTextSize("A").y, sp = ImGui::GetStyle().ItemSpacing.y;
+                    ImGui::PopFont();
+                    auto pitch = [&](float gap) { return h + 6 + gap * h + (gap >= 0 ? 2 : 1) * sp; };
+                    g_menu_gap = -0.18f;
+                    ImGui::SetCursorPosY(285 * s + 3 * pitch(0.35f) - 3 * pitch(g_menu_gap));
+                }
                 bool hov = false;
                 char label[192];
-                snprintf(label, sizeof label, "PLAY    \xe2\x80\xb9 %s%s \xe2\x80\xba", choice ? "Randomizer Seed: " : "",
+                snprintf(label, sizeof label, "PLAY    \xe2\x80\xb9 %s%s \xe2\x80\xba", choice ? "Rando: " : "",
                          choices[choice].c_str());  // (choice 0 = Vanilla)
                 ImGui::SetCursorPosX(x0);
+                // a long seed name may run past the other items (to 80% of the window); beyond that the line shrinks
+                ImGui::PushFont(g_font_menu);
+                float fit = (ds.x * 0.8f - x0) / ImGui::CalcTextSize(label).x;
+                ImGui::PopFont();
+                if (fit < 1) ImGui::SetWindowFontScale(fit < 0.55f ? 0.55f : fit);
                 // the ‹ › arrows are clickable with the mouse: they cycle Vanilla / seeds instead of starting the game
                 int arrow = 0;
                 {
@@ -811,16 +901,36 @@ extern "C" void launcher_run(const char *root) {
                 }
                 static bool focused_once;
                 if (!focused_once) { ImGui::SetKeyboardFocusHere(); focused_once = true; }
-                bool pressed = menu_item(label, status.empty(), &hov);
+                ImVec2 play_at = ImGui::GetCursorScreenPos();
+                const char *name = strstr(label, "\xe2\x80\xb9") + 4, *name_end = strstr(label, " \xe2\x80\xba");
+                bool pressed = menu_item(label, status.empty(), &hov, choice ? NULL : name, IM_COL32(246, 232, 176, 255),
+                                         name_end);  // ("Vanilla" in vanilla cream; the arrows stay white)
+                if (status.empty()) {  // PLAY twinkles now and then while the game is ready
+                    ImGui::PushFont(g_font_menu);
+                    float w = ImGui::CalcTextSize("PLAY").x, h = ImGui::CalcTextSize("PLAY").y;
+                    ImGui::PopFont();
+                    float t = (float)ImGui::GetTime(), ph = fmodf(t, 3.6f), ph2 = fmodf(t + 0.45f, 3.6f);
+                    float k1 = ph < 0.9f ? sinf(ph / 0.9f * 3.14159265f) : 0, k2 = ph2 < 0.7f ? sinf(ph2 / 0.7f * 3.14159265f) : 0;
+                    ImDrawList *dl = ImGui::GetWindowDrawList();
+                    sparkle(dl, ImVec2(play_at.x + w + h * 0.05f, play_at.y + h * 0.22f), h * 0.2f, k1, t * 0.6f);
+                    sparkle(dl, ImVec2(play_at.x + w - h * 0.32f, play_at.y + h * 0.08f), h * 0.11f, k2 * 0.8f, -t * 0.8f);
+                }
+                ImGui::SetWindowFontScale(1.0f);
                 if (pressed && arrow && ImGui::IsMouseReleased(0)) {  // (a mouse click on an arrow: cycle)
                     choice = (choice + arrow + (int)choices.size()) % (int)choices.size();
                     pressed = false;
                 }
+                // first PLAY ever: the aspect ratio question, then how to reach our menu, then the game
                 if (pressed) {
-                    if (g_settings.menu_tip_seen) play = true;
-                    else ImGui::OpenPopup("##menutip");  // first PLAY ever: how to reach our menu, then the game
+                    if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");
+                    else if (!g_settings.menu_tip_seen) ImGui::OpenPopup("##menutip");
+                    else play = true;
                 }
-                if (g_tip_test) ImGui::OpenPopup("##menutip"), g_tip_test = false;
+                if (g_tip_test) ImGui::OpenPopup(g_settings.aspect_asked ? "##menutip" : "##aspect"), g_tip_test = false;
+                if (aspect_prompt(s)) {
+                    if (g_settings.menu_tip_seen) play = true;
+                    else ImGui::OpenPopup("##menutip");
+                }
                 if (menu_tip(s)) play = true;
                 if (hov && status.empty()) {
                     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft))
@@ -834,6 +944,7 @@ extern "C" void launcher_run(const char *root) {
                 if (menu_item(status.empty() ? "GAME FILES" : "SET UP GAME FILES", !busy)) page = SETUP;
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("QUIT", true)) exit(0);
+                g_menu_gap = 0.35f;
             } else {
                 // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
                 // larger text (ui_scale.h) gets a taller panel: it starts closer to the title, ends closer to the status
@@ -1062,7 +1173,7 @@ extern "C" void launcher_run(const char *root) {
                 ImFont *font = ImGui::GetFont();
                 float fs = ImGui::GetFontSize(), right = ImGui::GetWindowPos().x + ds.x - 60 * s;
                 auto text = [&](ImVec2 p, float size, ImU32 col, const char *t, bool bold) {
-                    for (float d : {2.0f, 1.0f}) dl->AddText(font, size, ImVec2(p.x + d * s, p.y + d * s), IM_COL32(4, 8, 30, 110), t);
+                    for (float d : {2.5f, 1.5f, 0.8f}) dl->AddText(font, size, ImVec2(p.x + d * s, p.y + d * s), IM_COL32(4, 8, 30, 150), t);
                     dl->AddText(font, size, p, col, t);
                     if (bold) dl->AddText(font, size, ImVec2(p.x + 0.7f * s, p.y), col, t);
                 };
@@ -1083,8 +1194,11 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::SetCursorScreenPos(lp);
                     bool click = ImGui::InvisibleButton("update", lsz);
                     bool hover = ImGui::IsItemHovered();
-                    ImU32 col = hover ? IM_COL32(255, 180, 225, 255) : IM_COL32(255, 105, 185, 255);  // the egg's pink
-                    text(lp, fs, col, link.c_str(), true);
+                    // the menu's hover colours (yellow to orange), lighter while the link itself is hovered
+                    ImU32 col = hover ? IM_COL32(255, 238, 150, 255) : IM_COL32(255, 214, 64, 255);
+                    ImU32 col_b = hover ? IM_COL32(255, 196, 110, 255) : IM_COL32(255, 160, 50, 255);
+                    text_fx(dl, font, fs, lp, col, col_b, link.c_str(), 1.5f * s);
+                    text_fx(dl, font, fs, ImVec2(lp.x + 0.7f * s, lp.y), col, col_b, link.c_str(), 0);  // (faux bold)
                     if (hover) {
                         dl->AddLine(ImVec2(lp.x, lp.y + lsz.y), ImVec2(lp.x + lsz.x, lp.y + lsz.y), col, 1.5f * s);
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
