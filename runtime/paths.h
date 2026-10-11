@@ -23,6 +23,7 @@ extern "C" {
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute
+bool rt_dev_mode(void);           // dev / portable mode (rule 2 above): e.g. a source checkout
 
 // A shipped file: `name` next to the executable or in Contents/Resources, else `dev_rel` in the source tree (the
 // starting directory or the executable's parent; NULL = shipped builds only). Absolute path in out; false = none.

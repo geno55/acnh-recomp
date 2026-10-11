@@ -69,9 +69,12 @@ static void save_png(id<MTLTexture> tex, const char *path) {
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
     CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
-    CGImageDestinationAddImage(dest, img, NULL);
-    CGImageDestinationFinalize(dest);
-    CFRelease(dest), CFRelease(url), CGImageRelease(img), CGContextRelease(ctx), CGColorSpaceRelease(cs);
+    if (dest) {  // (NULL when the file can't be created, e.g. its folder isn't there: CFRelease(NULL) traps)
+        CGImageDestinationAddImage(dest, img, NULL);
+        CGImageDestinationFinalize(dest);
+        CFRelease(dest);
+    } else fprintf(stderr, "[launcher] can't write %s\n", path);
+    CFRelease(url), CGImageRelease(img), CGContextRelease(ctx), CGColorSpaceRelease(cs);
 }
 #endif
 
@@ -446,10 +449,12 @@ static std::vector<std::string> list_seeds() {
 // ------------------------------------------------------------------ screen
 static ImFont *g_font_title, *g_font_menu, *g_font_small;
 enum Page { MAIN, SETTINGS, SETUP };  // SETTINGS: the in-game menu's tabs (runtime/ui/menu.mm)
+static int g_refocus = MAIN;  // back on the main page: select the item of the page we came from (controllers)
 
 // A big menu line: gold + a marker when focused / hovered (keyboard, gamepad or mouse), grey when disabled
 static bool g_menu_small;  // sub pages: buttons in the small font
 void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, void (*prelaunch)(float));  // menu.mm
+void menu_tabs_focus(bool first_tab);
 extern int g_tab_request_ext;
 extern "C" void menu_apply_window_requests(void *sdl_window);
 extern "C" int g_start_screen;  // runtime/hle/warp.c: the start screen is up (no game loaded: don't read its memory)
@@ -734,9 +739,19 @@ static void prelaunch_tab(float sc) {
     if (ImGui::Button("Show in Finder")) reveal_folder(g_root);
 #endif
     ImGui::SameLine();
-    if (ImGui::Button("Delete game files")) ImGui::OpenPopup("##delfiles");
+    static bool shot_del = getenv("LARECOMP_LAUNCHER_SHOT") && strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":askdelete");
+    if (ImGui::Button("Delete game files") || shot_del) ImGui::OpenPopup("##delfiles"), shot_del = false;  // (test: :askdelete)
     if (ImGui::BeginPopupModal("##delfiles", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-        ImGui::Text("Delete the extracted game files (%.1f GB)?", gb);
+        ImGui::PushFont(g_font_menu);
+        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Are you sure?");
+        ImGui::PopFont();
+        ImGui::Text("This deletes the extracted game files (%.1f GB).", gb);
+        ImGui::TextDisabled("Saves, seeds and settings are kept. Your dump and keys aren't touched.");
+        if (rt_dev_mode()) {  // (a source checkout: the files are the project's own extracted/)
+            bool abs = !g_root.empty() && (g_root[0] == '/' || (g_root.size() > 1 && g_root[1] == ':'));
+            std::string where = abs ? g_root : std::string(rt_data_root()) + "/" + g_root;
+            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "Dev checkout: this is %s", where.c_str());
+        }
         ImGui::Spacing();
         if (ImGui::Button("Delete", ImVec2(220 * sc, 0))) {
             bool ok = rt_remove_game_files(g_root.c_str());  // (runtime/paths.c: only what the extraction made)
@@ -844,14 +859,14 @@ extern "C" void launcher_run(const char *root) {
         if (seeds[i] == g_settings.rando_seed) choice = (int)i + 1;
     Page page = status.empty() ? MAIN : SETUP;
     bool play = false;
-    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / setup
+    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
 #ifdef __APPLE__
         layer.framebufferOnly = NO;
 #endif
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
-        if (pg && !strncmp(pg + 1, "settings", 8)) page = SETTINGS;
+        if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) page = SETTINGS, menu_tabs_focus(true);
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
@@ -1080,9 +1095,16 @@ extern "C" void launcher_run(const char *root) {
                         ImGui::SetKeyOwner(k, own);
                 }
                 ImGui::SetCursorPosX(x0);
-                if (menu_item("SETTINGS", true)) page = SETTINGS;
+                if (g_refocus == SETTINGS) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;  // (back from Settings: it
+                if (menu_item("SETTINGS", true)) {                                             //  stays selected)
+                    static bool opened;
+                    menu_tabs_focus(!opened);  // (first time this session: Prelaunch; later: the selected tab)
+                    opened = true;
+                    page = SETTINGS;
+                }
                 if (!status.empty() || busy) {  // (once set up, the game files are kept up in Settings > Prelaunch)
                     ImGui::SetCursorPosX(x0);
+                    if (g_refocus == SETUP) ImGui::SetKeyboardFocusHere(), g_refocus = MAIN;
                     if (menu_item("SET UP GAME FILES", !busy)) page = SETUP;
                 }
                 ImGui::SetCursorPosX(x0);
@@ -1127,7 +1149,7 @@ extern "C" void launcher_run(const char *root) {
                 if (back) {
                     bind_capture_cancel();
                     settings_save();
-                    page = MAIN;
+                    page = MAIN, g_refocus = SETTINGS;
                     std::string cur = choices[choice];  // seeds made / renamed / deleted in the Randomizer tab
                     seeds = list_seeds();
                     choices = {"Vanilla"};
@@ -1237,7 +1259,7 @@ extern "C" void launcher_run(const char *root) {
                     if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                                                           ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
                         settings_save();
-                        page = MAIN;
+                        page = MAIN, g_refocus = SETUP;
                     }
                 }
                 }

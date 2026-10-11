@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
@@ -67,12 +68,18 @@ extern "C" void menu_test_open(void) {
     if (getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(getenv("LARECOMP_MENU_TAB")); }
 }
 
+void menu_tabs_focus(bool first_tab);
 static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();
-    if (open) save_editor_on_open();
+    if (open) {
+        save_editor_on_open();
+        static bool opened;  // the controller's cursor: the first tab (Controls) the first time this session, later the
+        menu_tabs_focus(!opened);  // selected one
+        opened = true;
+    }
     else { settings_save(); osk_cancel(); g_text_busy = false; }
 }
 
@@ -267,6 +274,12 @@ static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboo
 static ImFont *g_font, *g_font_big;
 static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
 static int g_tab, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab)
+static int g_focus_tab = -99;  // put the nav cursor on this tab next frame (-100: the selected one; -99: none)
+static int g_focus_frames;
+
+// The start screen's Settings opening: the controller's cursor starts on the first tab the first time in a session,
+// later on the tab that's selected
+void menu_tabs_focus(bool first_tab) { g_focus_tab = first_tab ? -1 : -100, g_focus_frames = 0; }
 int g_tab_request_ext = -1;
 
 static void style_init(void) {
@@ -594,7 +607,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
     static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Difficulty",
                                   "Cosmetics", "Controls"};
-    for (int i = 0; i < 9; i++) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2};  // Controls, Video, Audio, Difficulty, Cosmetics, Randomizer,
+                                                             // Cheats, Warp, Save Editor (ids stay: test hooks use them)
+    for (int i : order) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
     int cur = 0;  // g_tab / g_tab_request hold ids
     for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
     if (!tabs[cur].on) cur = 0;
@@ -618,7 +633,34 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             char lbl[64];
             snprintf(lbl, sizeof lbl, prelaunch ? " %s " : "  %s  ", t.name);  // (ten tabs: tighter, so none is cut short)
             ImGui::BeginDisabled(!t.on);  // (out of the game: Save Editor, Warp, Cheats)
+            // focus (controller / keyboard): the tab lights up a little with a gold bar along its bottom, instead of
+            // ImGui's outline (it sits 4 px outside the tab and the tab bar's clipping could cut its top off on macOS)
+            static int focused_tab = -99;  // (from the frame before: colours go in before the tab is drawn)
+            bool lit = focused_tab == t.id && ImGui::GetCurrentContext()->NavCursorVisible;
+            ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+            if (lit) {
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.19f, 0.27f, 0.22f, 1));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.19f, 0.27f, 0.22f, 1));
+            }
+            if (g_focus_tab == -1 && !prelaunch) g_focus_tab = 8;  // (no Prelaunch in game: Controls, the first tab)
+            bool focus_here = g_focus_tab == t.id || (g_focus_tab == -100 && t.id == g_tab);
             bool open = ImGui::BeginTabItem(lbl, NULL, f);
+            ImGui::PopStyleColor(lit ? 3 : 1);
+            if (focus_here) {  // the controller's cursor starts on this tab (SetKeyboardFocusHere skips tabs: no tab stop)
+                ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+                ImGui::SetNavCursorVisible(true);
+                // a few frames: the page's child window appearing makes ImGui pick its first widget once it's laid out
+                if (++g_focus_frames >= 4) g_focus_tab = -99, g_focus_frames = 0;
+                else g_focus_tab = t.id;
+            }
+            if (lit) {
+                ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                float h = 4 * scale > 2 ? 4 * scale : 2;
+                ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(a.x + 2, b.y - h), ImVec2(b.x - 2, b.y),
+                                                          IM_COL32(236, 194, 84, 255));  // (the menu's gold)
+            }
+            if (ImGui::IsItemFocused()) focused_tab = t.id;
+            else if (focused_tab == t.id) focused_tab = -99;
             ImGui::EndDisabled();
             if (open) {
                 g_tab = t.id;

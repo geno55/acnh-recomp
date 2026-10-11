@@ -74,6 +74,9 @@ static void fail(const char *msg) {
     exit(1);
 }
 
+static bool g_dev;  // the data root is the starting folder because it has extracted/ (a source checkout)
+bool rt_dev_mode(void) { return g_dev; }
+
 void rt_paths_init(void) {
     if (!getcwd(g_start, sizeof g_start)) g_start[0] = 0;
     if (plat_exe_path(g_exe_dir, sizeof g_exe_dir)) {
@@ -84,7 +87,7 @@ void rt_paths_init(void) {
     char root[1024];
     const char *env = getenv("LARECOMP_DATA_ROOT");
     if (env && *env) snprintf(root, sizeof root, "%s", env);
-    else if (is_dir("extracted")) snprintf(root, sizeof root, "%s", g_start);  // dev / portable: as before
+    else if (is_dir("extracted")) snprintf(root, sizeof root, "%s", g_start), g_dev = true;  // dev / portable: as before
     else {
 #ifdef _WIN32
         snprintf(root, sizeof root, "%s", g_exe_dir);
