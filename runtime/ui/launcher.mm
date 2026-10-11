@@ -35,7 +35,6 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include "platform.h"
 #include "paths.h"
-#include "ui/ui_scale.h"
 #include "settings.h"
 #include "input_bind.h"
 void controls_bindings_draw(float scale);  // ui/controls_ui.mm
@@ -965,7 +964,7 @@ extern "C" void launcher_run(const char *root) {
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
-            ImGui::GetIO().FontGlobalScale = s * 0.5f;  // (sub-page panels: x ui_text_scale(), below)
+            ImGui::GetIO().FontGlobalScale = s * 0.5f;
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
             if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
@@ -1123,7 +1122,6 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.09f, 0.08f, 0.96f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * sc);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28 * sc, 24 * sc));
-                ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();
                 ImGui::BeginChild("##settings", ImVec2(w, h), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
                 ImGui::PopStyleColor();
@@ -1156,7 +1154,6 @@ extern "C" void launcher_run(const char *root) {
                     back = true;
                 ImGui::PopFont();
                 ImGui::EndChild();
-                ImGui::GetIO().FontGlobalScale = s * 0.5f;
                 if (back) {
                     bind_capture_cancel();
                     settings_save();
@@ -1171,13 +1168,11 @@ extern "C" void launcher_run(const char *root) {
                 }
             } else {
                 // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
-                // larger text (ui_scale.h) gets a taller panel: it starts closer to the title, ends closer to the status
-                float grow = ui_text_scale() - 1, top = (300 - 50 * grow) * s, bottom = (140 - 25 * grow) * s;
+                float top = 300 * s, bottom = 140 * s;
                 ImGui::SetCursorPos(ImVec2(x0 - 24 * s, top));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.78f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
-                ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();  // only the panel's text: the main menu fits as on macOS
                 ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - top - bottom), ImGuiChildFlags_AlwaysUseWindowPadding,
                                   ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
@@ -1276,7 +1271,6 @@ extern "C" void launcher_run(const char *root) {
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
-                ImGui::GetIO().FontGlobalScale = s * 0.5f;
             }
 
             // status (lower left) and version (lower right) - not under the Settings window
