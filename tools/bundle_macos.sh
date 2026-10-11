@@ -13,6 +13,11 @@ APP="build/LAS Recomp.app"
 DEPS=$PWD/build/deps
 BUNDLE_ID=$(sed -n 's/^#define RT_BUNDLE_ID "\(.*\)"/\1/p' runtime/paths.h)
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
+# CFBundleShortVersionString must be digits: beta_<n> -> 0.9.<n>, v1.2.3 -> 1.2.3
+case "$VERSION" in
+    beta_*) VERSION="0.9.${VERSION#beta_}" ;;
+    v*) VERSION="${VERSION#v}" ;;
+esac
 HACTOOL=$(ls "$DEPS/bin/hactool" tools/hactool/hactool 2>/dev/null | head -1 || true)
 HELPER=build/helper/rando-gen
 [ -x "$EXE" ] || { echo "no $EXE"; exit 1; }
@@ -27,6 +32,8 @@ cp "$HACTOOL" "$C/MacOS/hactool"
 if [ -x "$HELPER/rando-gen" ]; then cp -R "$HELPER" "$C/Resources/rando-gen"; else echo "note: no $HELPER (make rando-helper)"; fi
 cp docs/icon/icon.icns "$C/Resources/icon.icns"
 cp docs/icon/icon_1024.png "$C/Resources/icon.png"  # (window / Dock icon at run time)
+cp third_party/fonts/Baloo2/Baloo2.ttf "$C/Resources/Baloo2.ttf"  # (start screen; OFL, README "License")
+cp third_party/fonts/Baloo2/OFL.txt "$C/Resources/Baloo2-OFL.txt"
 
 # ---- dylibs: copy every non-system dependency, recursively; point all references at @rpath/<name>
 is_system() { case "$1" in /usr/lib/*|/System/*) return 0;; esac; return 1; }

@@ -170,6 +170,8 @@ dist: $(HACTOOL)
 	rm -rf build/dist && mkdir -p "$(DIST)"
 	cp $(WIN_B)/lasrecomp.exe $(HACTOOL) "$(DIST)/"
 	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
+	cp third_party/fonts/Baloo2/Baloo2.ttf "$(DIST)/"  # (start screen font, OFL)
+	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
 	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
 	cp -R build/helper/rando-gen "$(DIST)/"
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/lasrecomp.exe $(HACTOOL) | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \

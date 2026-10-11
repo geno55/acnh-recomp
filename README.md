@@ -171,6 +171,7 @@ none of their files are used):
 - [SDL 3](https://libsdl.org) - windowing, input, audio (zlib license)
 - [FFmpeg](https://ffmpeg.org) - movie playback (LGPL)
 - [Dear ImGui](https://github.com/ocornut/imgui) - overlay menu and start screen (MIT)
+- [Baloo 2](https://github.com/EkType/Baloo2) by Ek Type - the start screen's font (SIL Open Font License 1.1, `third_party/fonts/Baloo2/OFL.txt`)
 - [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) - Windows renderer (MIT)
 - [hactool](https://github.com/SciresM/hactool) by SciresM - game file extraction (ISC)
 - [oead](https://github.com/zeldamods/oead) and [evfl](https://github.com/zeldamods/evfl) - Nintendo file formats, used by LAS-Randomizer
@@ -193,7 +194,7 @@ to play.
 
 LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
 [MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), Dear ImGui (MIT),
-Vulkan Memory Allocator (MIT), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), hactool (ISC), and the seed generator
+Vulkan Memory Allocator (MIT), the Baloo 2 font (SIL OFL 1.1), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), hactool (ISC), and the seed generator
 helper's bundled libraries listed under Credits (oead / evfl / Keystone are GPL 2.0+: the helper is a separate program
 the game runs, and its sources are this repository plus those projects' published sources). The license covers LAS Recomp's code only - it grants
 nothing for Nintendo's game, which you must supply yourself.
@@ -217,6 +218,7 @@ Release builds include these components; their source code for the exact version
 | libiconv (Windows: used by SDL 3) | 1.19 | LGPL 2.1+ | https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz |
 | GCC runtime: libgcc, libstdc++ (Windows) | 16.2.0 | GPL 3.0 with the GCC Runtime Library Exception | https://gcc.gnu.org/ |
 | winpthreads (Windows, mingw-w64) | 14.0.0 | MIT / BSD | https://www.mingw-w64.org/ |
+| Baloo 2 font | variable (google/fonts) | SIL OFL 1.1 | https://github.com/EkType/Baloo2 |
 
 The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`,
 `tools/build_deps_windows.sh` and `tools/rando/rando_gen.spec`. The Windows build takes SDL 3, shaderc, libiconv and the

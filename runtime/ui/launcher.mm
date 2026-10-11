@@ -75,7 +75,82 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
-#define LARECOMP_VERSION "0.12"
+// The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
+// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>.
+#define LARECOMP_VERSION "beta_1"
+
+// ------------------------------------------------------------------ update check
+// The start screen asks GitHub for the project's releases once per launch (a background curl, which macOS and
+// Windows 10+ ship) and offers the best one if it outranks this build: any v1.0.0+ above every beta, betas by
+// number; other tags (the alpha_* ones) are ignored. Offline / no curl / anything unexpected: nothing is shown.
+#define RELEASES_URL "https://api.github.com/repos/peiikai/LASRecomp/releases?per_page=100"
+#define RELEASE_PAGE "https://github.com/peiikai/LASRecomp/releases/tag/"
+
+static long long tag_rank(const std::string &t) {
+    int n, a, b, c;
+    char end;
+    if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1 && n > 0) return n;
+    if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &b, &c, &end) == 3 && a >= 1 && b >= 0 && c >= 0 && b < 4096 && c < 4096)
+        return (1LL << 48) + ((long long)a << 24) + ((long long)b << 12) + c;
+    return -1;
+}
+
+// "Beta 2" / "1.0.0" (with_word: "Version 1.0.0")
+static std::string tag_label(const std::string &t, bool with_word) {
+    int n;
+    char end;
+    if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1) return "Beta " + std::to_string(n);
+    std::string v = t.size() > 1 && t[0] == 'v' ? t.substr(1) : t;
+    return with_word ? "Version " + v : v;
+}
+
+static std::string g_update_tag;  // a newer release's tag (g_update_lock)
+static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void *update_thread(void *) {
+    std::string body;
+    if (const char *t = getenv("LARECOMP_UPDATE_TAGS")) {  // (test) "beta_2,v1.0.0": these releases, no network
+        for (const char *p = t; *p;) {
+            const char *c = strchr(p, ',');
+            body += "\"tag_name\": \"" + std::string(p, c ? c - p : strlen(p)) + "\"\n";
+            p = c ? c + 1 : p + strlen(p);
+        }
+    } else {
+#ifdef _WIN32
+        const char *sr = getenv("SystemRoot");
+        std::string curl = std::string(sr ? sr : "C:\\Windows") + "\\System32\\curl.exe";
+#else
+        std::string curl = "/usr/bin/curl";
+#endif
+        std::string out = std::string(rt_data_root()) + "/cache/releases.json";
+        mkdir((std::string(rt_data_root()) + "/cache").c_str(), 0755);
+        const char *av[] = {curl.c_str(), "-fsSL", "--max-time", "15", "-H", "Accept: application/vnd.github+json",
+                            "-A", "LASRecomp/" LARECOMP_VERSION, RELEASES_URL, NULL};
+        PlatProc p = plat_spawn(av, out.c_str(), false);
+        if (!p || plat_proc_wait(p, true) != 0) { remove(out.c_str()); return NULL; }
+        if (FILE *f = fopen(out.c_str(), "rb")) {
+            char buf[8192];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof buf, f)) > 0 && body.size() < (8u << 20)) body.append(buf, n);
+            fclose(f);
+        }
+        remove(out.c_str());
+    }
+    std::string best;
+    long long best_rank = tag_rank(LARECOMP_VERSION);
+    for (size_t at = 0; (at = body.find("\"tag_name\"", at)) != std::string::npos;) {
+        size_t q1 = body.find('"', body.find(':', at) + 1), q2 = q1 == std::string::npos ? q1 : body.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        std::string tag = body.substr(q1 + 1, q2 - q1 - 1);
+        if (tag_rank(tag) > best_rank) best_rank = tag_rank(tag), best = tag;
+        at = q2;
+    }
+    if (!best.empty()) fprintf(stderr, "[launcher] update available: %s (this build %s)\n", best.c_str(), LARECOMP_VERSION);
+    pthread_mutex_lock(&g_update_lock);
+    g_update_tag = best;
+    pthread_mutex_unlock(&g_update_lock);
+    return NULL;
+}
 
 // ------------------------------------------------------------------ game files
 static std::string g_root;  // extracted game: <root>/exefs, <root>/romfs
@@ -415,6 +490,24 @@ static bool menu_tip(float s) {
     return go;
 }
 
+// Start-screen text: a soft drop shadow, then the text with a top-to-bottom colour gradient (top == bottom: flat)
+static void text_fx(ImDrawList *dl, ImFont *font, float size, ImVec2 p, ImU32 top, ImU32 bottom, const char *t,
+                    float shadow) {
+    if (shadow > 0)
+        for (float d : {shadow, shadow * 0.5f}) dl->AddText(font, size, ImVec2(p.x + d, p.y + d), IM_COL32(4, 8, 30, 110), t);
+    int v0 = dl->VtxBuffer.Size;
+    dl->AddText(font, size, p, top, t);
+    if (top == bottom) return;
+    float y0 = p.y + size * 0.2f, y1 = p.y + size * 0.85f;
+    for (int i = v0; i < dl->VtxBuffer.Size; i++) {
+        float f = (dl->VtxBuffer[i].pos.y - y0) / (y1 - y0);
+        f = f < 0 ? 0 : f > 1 ? 1 : f;
+        ImVec4 a = ImGui::ColorConvertU32ToFloat4(top), b = ImGui::ColorConvertU32ToFloat4(bottom);
+        dl->VtxBuffer[i].col = ImGui::ColorConvertFloat4ToU32(ImVec4(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f,
+                                                                     a.z + (b.z - a.z) * f, a.w + (b.w - a.w) * f));
+    }
+}
+
 static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
     ImGui::PushFont(g_menu_small ? g_font_small : g_font_menu);
     ImGui::BeginDisabled(!enabled);
@@ -425,14 +518,15 @@ static bool menu_item(const char *label, bool enabled, bool *hovered = NULL) {
     bool hot = ImGui::IsItemFocused() || ImGui::IsItemHovered();
     ImGui::PopID();
     if (hovered) *hovered = hot;
-    ImU32 col = !enabled ? IM_COL32(150, 150, 150, 130) : hot ? IM_COL32(250, 205, 90, 255) : IM_COL32(245, 245, 240, 255);
+    ImU32 col = !enabled ? IM_COL32(170, 175, 200, 140) : hot ? IM_COL32(255, 214, 64, 255) : IM_COL32(250, 250, 255, 255);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     if (hot && enabled) {  // a drawn arrow (the fonts we use have no glyph for one: it showed as '?')
         float h = sz.y * 0.42f, cx = at.x - sz.y * 0.55f, cy = at.y + sz.y * 0.52f;
         dl->AddTriangleFilled(ImVec2(cx - h * 0.45f, cy - h * 0.6f), ImVec2(cx - h * 0.45f, cy + h * 0.6f),
                               ImVec2(cx + h * 0.55f, cy), col);
     }
-    dl->AddText(at, col, label);
+    text_fx(dl, ImGui::GetFont(), ImGui::GetFontSize(), at, col, hot && enabled ? IM_COL32(255, 160, 50, 255) : col, label,
+            enabled ? sz.y * 0.05f : 0);
     ImGui::Dummy(ImVec2(0, sz.y * 0.35f));  // line spacing
     ImGui::EndDisabled();
     ImGui::PopFont();
@@ -498,6 +592,12 @@ static bool launcher_pad_event(const SDL_Event &e) {
 // Returns when PLAY is chosen (seed stored in g_settings.rando_seed); QUIT exits.
 extern "C" void launcher_run(const char *root) {
     g_root = root;
+    static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
+    if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
+        update_checked = true;
+        pthread_t t;
+        if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
+    }
     ui_window_init();
     SDL_Window *win = ui_window();
 #ifdef __APPLE__
@@ -518,14 +618,19 @@ extern "C" void launcher_run(const char *root) {
     // fonts belong to this context: back here via "Title screen" (in-place reboot) the previous run's are gone with
     // its context, so load them again (a stale pointer here aborted in PushFont - user, 0.1 RC)
     g_font_small = g_font_menu = g_font_title = NULL;
-    const char *fonts[] = {"fonts/nintendo_udsgr_std_003.ttf", "/System/Library/Fonts/Avenir Next.ttc",
+    // Baloo 2 (OFL, shipped: third_party/fonts/Baloo2) - rounded, game-like; it runs small, hence the sizes
+    char baloo[1024];
+    std::string own = rt_resource("Baloo2.ttf", "third_party/fonts/Baloo2/Baloo2.ttf", baloo, sizeof baloo) ? baloo : "";
+    const char *fonts[] = {getenv("LARECOMP_LAUNCHER_FONT") ? getenv("LARECOMP_LAUNCHER_FONT") : "",  // (test)
+                           own.c_str(), "fonts/nintendo_udsgr_std_003.ttf", "/System/Library/Fonts/Avenir Next.ttc",
                            "/System/Library/Fonts/Helvetica.ttc", "C:/Windows/Fonts/segoeui.ttf"};
-    static const ImWchar ranges[] = {0x20, 0xFF, 0x2039, 0x203A, 0x2713, 0x2713, 0x25B8, 0x25B8, 0};  // + ‹ › ✓ ▸
+    static const ImWchar ranges[] = {0x20, 0xFF, 0x2039, 0x203A, 0x2192, 0x2192, 0x2713, 0x2713, 0x25B8, 0x25B8, 0};  // + ‹ › → ✓ ▸
     for (const char *p : fonts) {
-        if (g_font_menu || !file_exists(p)) continue;
-        g_font_small = io.Fonts->AddFontFromFileTTF(p, 30, NULL, ranges);
-        g_font_menu = io.Fonts->AddFontFromFileTTF(p, 52, NULL, ranges);
-        g_font_title = io.Fonts->AddFontFromFileTTF(p, 92, NULL, ranges);
+        if (g_font_menu || !*p || !file_exists(p)) continue;
+        bool b2 = p == own.c_str() || getenv("LARECOMP_LAUNCHER_FONT");
+        g_font_small = io.Fonts->AddFontFromFileTTF(p, 30 * (b2 ? 1.75f : 1), NULL, ranges);
+        g_font_menu = io.Fonts->AddFontFromFileTTF(p, 52 * (b2 ? 1.85f : 1), NULL, ranges);
+        g_font_title = io.Fonts->AddFontFromFileTTF(p, 92 * (b2 ? 2.3f : 1), NULL, ranges);
     }
     if (!g_font_menu) g_font_small = g_font_menu = g_font_title = io.Fonts->AddFontDefault();
     ImGuiStyle &st = ImGui::GetStyle();
@@ -648,9 +753,18 @@ extern "C" void launcher_run(const char *root) {
                 bg->AddRectFilledMultiColor(ImVec2(0, 0), ds, IM_COL32(18, 34, 40, 255), IM_COL32(40, 70, 64, 255),
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
             }
-            // darken the left side for the menu
-            bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(ds.x * 0.6f, ds.y), IM_COL32(0, 0, 0, 200), IM_COL32(0, 0, 0, 0),
-                                        IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 200));
+            {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
+                const float stops[][2] = {{0.0f, 225}, {0.26f, 215}, {0.38f, 165}, {0.48f, 95}, {0.56f, 35}, {0.64f, 0}};
+                for (int i = 0; i + 1 < (int)(sizeof stops / sizeof stops[0]); i++) {
+                    ImU32 a = IM_COL32(6, 10, 34, (int)stops[i][1]), b = IM_COL32(6, 10, 34, (int)stops[i + 1][1]);
+                    bg->AddRectFilledMultiColor(ImVec2(ds.x * stops[i][0], 0), ImVec2(ds.x * stops[i + 1][0], ds.y), a, b, b, a);
+                }
+                float y0 = ds.y - 175 * s, y1 = ds.y - 120 * s, y2 = ds.y - 45 * s, y3 = ds.y, x0r = ds.x * 0.55f;
+                ImU32 c0 = IM_COL32(6, 10, 34, 0), c1 = IM_COL32(6, 10, 34, 200);
+                bg->AddRectFilledMultiColor(ImVec2(x0r, y0), ImVec2(ds.x, y1), c0, c0, c1, c0);  // (feathered top)
+                bg->AddRectFilledMultiColor(ImVec2(x0r, y1), ImVec2(ds.x, y2), c0, c1, c1, c0);
+                bg->AddRectFilledMultiColor(ImVec2(x0r, y2), ImVec2(ds.x, y3), c0, c1, c0, c0);  // (feathered bottom)
+            }
 
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(ds);
@@ -658,11 +772,17 @@ extern "C" void launcher_run(const char *root) {
             ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
             float x0 = 90 * s;
-            ImGui::SetCursorPos(ImVec2(x0, 170 * s));
+            ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
-            ImGui::TextColored(ImVec4(0.98f, 0.80f, 0.32f, 1), "Link's Awakening");
+            {  // gold to orange, shadowed
+                const char *t = "Link's Awakening";
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
+                        IM_COL32(255, 138, 48, 255), t, 3 * s);
+                ImGui::Dummy(ImGui::CalcTextSize(t));
+            }
             ImGui::PopFont();
-            ImGui::SetCursorPos(ImVec2(x0, 330 * s));
+            ImGui::SetCursorPos(ImVec2(x0, 285 * s));
             // typing in a text field / the on-screen keyboard (osk.h): B / Esc are for it, not "back" (from the frame
             // before too, so the Esc that ends the typing doesn't also leave the page)
             static bool typed_before;
@@ -913,7 +1033,7 @@ extern "C" void launcher_run(const char *root) {
 
             // status (lower left) and version (lower right)
             ImGui::PushFont(g_font_small);
-            ImGui::SetCursorPos(ImVec2(x0, ds.y - 110 * s));
+            ImGui::SetCursorPos(ImVec2(x0, ds.y - 118 * s));
             if (status.empty()) {
                 {  // a drawn check mark (the Switch font has no ✓)
                     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -923,17 +1043,55 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + u * 0.35f, p.y + u * 0.8f), ImVec2(p.x + u * 0.85f, p.y + u * 0.2f), g, u * 0.12f);
                     ImGui::SetCursorPosX(x0 + u * 1.3f);
                 }
-                ImGui::TextColored(ImVec4(0.55f, 0.9f, 0.55f, 1), "Game files ready.");
+                ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1), "Game files ready.");
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextDisabled("Nintendo Switch  \xc2\xb7  v1.0.0");
+                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v1.0.0");
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Extracting game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("Set up the game files to play.");
             }
-            const char *ver = "LAS Recomp " LARECOMP_VERSION;
-            ImGui::SetCursorPos(ImVec2(ds.x - ImGui::CalcTextSize(ver).x - 60 * s, ds.y - 110 * s));
-            ImGui::TextDisabled("%s", ver);
+            if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows
+                const char *b = strrchr(f, '/');
+                ImGui::GetWindowDrawList()->AddText(ImVec2(ImGui::GetWindowPos().x + 20 * s, ImGui::GetWindowPos().y + 16 * s),
+                                                    IM_COL32(255, 255, 255, 255), b ? b + 1 : f);
+            }
+            {  // version, and a newer release when the update check found one (lower right). The background is
+               // always the title movie's still: bright clouds here, under a shadow banner from the right
+                ImDrawList *dl = ImGui::GetWindowDrawList();
+                ImFont *font = ImGui::GetFont();
+                float fs = ImGui::GetFontSize(), right = ImGui::GetWindowPos().x + ds.x - 60 * s;
+                auto text = [&](ImVec2 p, float size, ImU32 col, const char *t, bool bold) {
+                    for (float d : {2.0f, 1.0f}) dl->AddText(font, size, ImVec2(p.x + d * s, p.y + d * s), IM_COL32(4, 8, 30, 110), t);
+                    dl->AddText(font, size, p, col, t);
+                    if (bold) dl->AddText(font, size, ImVec2(p.x + 0.7f * s, p.y), col, t);
+                };
+                std::string ver = tag_label(LARECOMP_VERSION, true);
+                float vs = fs * 1.4f, y = ImGui::GetWindowPos().y + ds.y - 134 * s;
+                ImVec2 vsz = font->CalcTextSizeA(vs, FLT_MAX, 0, ver.c_str());
+                text(ImVec2(right - vsz.x, y), vs, IM_COL32(255, 255, 255, 255), ver.c_str(), false);
+                pthread_mutex_lock(&g_update_lock);
+                std::string upd = g_update_tag;
+                pthread_mutex_unlock(&g_update_lock);
+                if (!upd.empty()) {
+                    const char *arrow = font->FindGlyphNoFallback(0x2192) ? " \xe2\x86\x92" : " \xe2\x96\xb8";
+                    std::string pre = "Update available!  ", link = "DOWNLOAD " + tag_label(upd, false) + arrow;
+                    float wp = font->CalcTextSizeA(fs, FLT_MAX, 0, pre.c_str()).x;
+                    ImVec2 lsz = font->CalcTextSizeA(fs, FLT_MAX, 0, link.c_str());
+                    ImVec2 lp(right - lsz.x, y + vsz.y + 2 * s);
+                    text(ImVec2(lp.x - wp, lp.y), fs, IM_COL32(200, 214, 250, 255), pre.c_str(), false);
+                    ImGui::SetCursorScreenPos(lp);
+                    bool click = ImGui::InvisibleButton("update", lsz);
+                    bool hover = ImGui::IsItemHovered();
+                    ImU32 col = hover ? IM_COL32(255, 180, 225, 255) : IM_COL32(255, 105, 185, 255);  // the egg's pink
+                    text(lp, fs, col, link.c_str(), true);
+                    if (hover) {
+                        dl->AddLine(ImVec2(lp.x, lp.y + lsz.y), ImVec2(lp.x + lsz.x, lp.y + lsz.y), col, 1.5f * s);
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    }
+                    if (click) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
+                }
+            }
             ImGui::PopFont();
             ImGui::End();
             ImGui::PopStyleColor();
