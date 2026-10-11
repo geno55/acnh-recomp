@@ -530,6 +530,41 @@ static void tab_audio(void) {
     opt_end();
 }
 
+// Quit: back to the start screen (in game: the game reboots to it) or out to the desktop. Each asks first (progress
+// since the last save is lost); B / Esc or Cancel backs out.
+extern "C" void rt_request_reboot(int kind);  // runtime/main.c (RT_REBOOT_TITLE = 2: the start screen)
+static void tab_quit(float scale, bool in_game) {
+    static int ask;  // 0: the two choices; 1: start screen?; 2: desktop?
+    if (ask && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+        ask = 0;
+    const char *lost = in_game ? "\n\nProgress since your last save is lost." : "";
+    char d1[200], d2[200];
+    snprintf(d1, sizeof d1, "Leaves the game and goes back to the LAS Recomp start screen.%s", lost);
+    snprintf(d2, sizeof d2, "Closes LAS Recomp.%s", lost);
+    opt_begin("##quit", scale);
+    opt_section("Quit");
+    if (!ask) {
+        if (!in_game) opt_disable_next();  // (already on it)
+        if (opt_action("Quit to Start Screen", "", in_game ? d1 : "You're on the start screen.")) ask = 1;
+        if (opt_action("Quit to Desktop", "", d2)) ask = 2;
+    } else {
+        if (opt_action(ask == 1 ? "Yes, quit to Start Screen" : "Yes, quit to Desktop", "", ask == 1 ? d1 : d2)) {
+            settings_save();
+            if (ask == 1) {
+                rt_request_reboot(2);
+                set_open(false);
+            } else {
+                SDL_Event q = {};
+                q.type = SDL_EVENT_QUIT;
+                SDL_PushEvent(&q);
+            }
+            ask = 0;
+        }
+        if (opt_action("Cancel", "", "Stays where you are.")) ask = 0;
+    }
+    opt_end();
+}
+
 static void tab_about(void) {
     header("Movement");
     toggle("D-pad moves Link", &g_settings.dpad_move);
@@ -631,14 +666,15 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
 static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // (id: the page; -1 = Prelaunch)
     struct Tab { const char *name; int id; bool on; };
-    Tab tabs[10];
+    Tab tabs[11];
     int ntabs = 0;
     if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
     static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
-                                  "Cosmetics", "Controls"};
-    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2};  // Controls, Video, Audio, Gameplay, Cosmetics, Randomizer,
-                                                             // Cheats, Warp, Save Editor (ids stay: test hooks use them)
-    for (int i : order) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+                                  "Cosmetics", "Controls", "Quit"};
+    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2, 9};  // Controls, Video, Audio, Gameplay, Cosmetics, Randomizer,
+                                                                // Cheats, Warp, Save Editor, Quit (ids stay: test hooks)
+    for (int i : order)  // (Quit: in game only - the start screen has its own QUIT, and an eleventh tab cut names short)
+        if (i != 9 || !prelaunch) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
     int cur = 0;  // g_tab / g_tab_request hold ids
     for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
     if (!tabs[cur].on) cur = 0;
@@ -713,6 +749,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 6: difficulty_draw(scale); break;
                 case 7: tab_cosmetics(); break;
                 case 8: tab_about(); break;
+                case 9: tab_quit(scale, in_game); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
