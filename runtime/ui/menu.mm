@@ -646,6 +646,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // keyboard has the controller)
     if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
     bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
+    static int focused_tab = -99;  // the tab the controller's cursor is on (from the frame before; -99: none)
     if (!any_popup && !typing) {
         int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
                  : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
@@ -653,6 +654,8 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             int i = cur;
             do i = (i + step + ntabs) % ntabs; while (!tabs[i].on);
             g_tab_request = tabs[i].id;
+            // the cursor on the tab bar goes along (left behind, A on it switched straight back; user 2026-10-11)
+            if (focused_tab != -99) g_focus_tab = tabs[i].id, g_focus_frames = 0;
         }
     }
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
@@ -664,7 +667,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             ImGui::BeginDisabled(!t.on);  // (out of the game: Save Editor, Warp, Cheats)
             // focus (controller / keyboard): the tab lights up a little with a gold bar along its bottom, instead of
             // ImGui's outline (it sits 4 px outside the tab and the tab bar's clipping could cut its top off on macOS)
-            static int focused_tab = -99;  // (from the frame before: colours go in before the tab is drawn)
+            // (focused_tab: from the frame before - colours go in before the tab is drawn)
             bool lit = focused_tab == t.id && ImGui::GetCurrentContext()->NavCursorVisible;
             ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
             if (lit) {
