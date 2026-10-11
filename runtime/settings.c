@@ -58,7 +58,7 @@ void settings_load(void) {
             int n = atoi(val);
             g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
-                                  (n >= 1 && n <= 8) ? n : RES_MATCH;
+                                  (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
         }
         else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "metalfx") ? UPSCALE_METALFX : UPSCALE_BILINEAR;
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;

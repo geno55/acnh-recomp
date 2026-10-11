@@ -12,7 +12,7 @@ enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 
 typedef struct {
     int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
     bool fullscreen;
-    int res_mode;        // RES_MATCH, 1..8 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
+    int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS only)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect

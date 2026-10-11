@@ -449,22 +449,23 @@ static void tab_display(void) {
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)
-    static const char *res[] = {"Match display", "Dynamic", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x",
-                                "75%", "50%", "25%"};
-    static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, 5, 6, 7, 8, RES_Q75, RES_Q50, RES_Q25};
+    // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
+    static const char *res[] = {"Match display", "Dynamic", "1x", "2x", "3x", "4x", "75%", "50%", "25%"};
+    static const int res_mode[] = {RES_MATCH, RES_DYNAMIC, 1, 2, 3, 4, RES_Q75, RES_Q50, RES_Q25};
+    enum { NRES = sizeof res_mode / sizeof res_mode[0] };
     {
         int ri = 0;
-        for (int i = 0; i < 13; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
+        for (int i = 0; i < NRES; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
         float sx, sy;
         renderer_get_scale(&sx, &sy);
         char d[400];
         int n = snprintf(d, sizeof d, "How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
-                                      "as sharp as your GPU keeps at full speed. 1x-8x: the Switch's 1080p times that. "
+                                      "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that. "
                                       "75%% / 50%% / 25%%: a share of the display, for slower machines.\n\nRendering at "
                                       "%.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
             snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
-        if (opt_choice("Internal resolution", &ri, res, 13, 0, d)) g_settings.res_mode = res_mode[ri];
+        if (opt_choice("Internal resolution", &ri, res, NRES, 0, d)) g_settings.res_mode = res_mode[ri];
     }
 #ifdef __APPLE__
     static const char *ups[] = {"Bilinear", "MetalFX"};
