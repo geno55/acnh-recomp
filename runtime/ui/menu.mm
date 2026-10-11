@@ -34,6 +34,7 @@ extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
+#include "../paths.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -264,6 +265,7 @@ void menu_apply_window_requests(void *win) {
 static bool g_inited;
 static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
+static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
 static int g_tab, g_tab_request = -1;
 int g_tab_request_ext = -1;
 
@@ -324,8 +326,17 @@ static void init(void) {
         if (!g_font) g_font = io.Fonts->AddFontFromFileTTF(p, 34, &cfg);
         if (g_font && !g_font_big) { ImFontConfig b = cfg; b.FontNo = 0; g_font_big = io.Fonts->AddFontFromFileTTF(p, 56, &b); }
     }
+    // the menu window itself: Baloo 2 SemiBold, as on the start screen (shipped, OFL), at its Settings window's sizes; the
+    // FPS counter, overlays and on-screen keyboard keep the fonts above
+    char baloo[1024];
+    if (const char *f = getenv("LARECOMP_MENU_FONT")) strlcpy(baloo, f, sizeof baloo);  // (test) another weight / face
+    if (getenv("LARECOMP_MENU_FONT") || rt_resource("Baloo2-SemiBold.ttf", "third_party/fonts/Baloo2/Baloo2-SemiBold.ttf", baloo, sizeof baloo)) {
+        g_menu_font = io.Fonts->AddFontFromFileTTF(baloo, 39, &cfg);
+        g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg);
+    }
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     if (!g_font_big) g_font_big = g_font;
+    if (!g_menu_font || !g_menu_font_big) g_menu_font = g_font, g_menu_font_big = g_font_big;
     style_init();
 #ifdef __APPLE__
     ImGui_ImplMetal_Init(dev);
@@ -714,6 +725,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
         ImGui::Begin("##menu", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImFont *keep_big = g_font_big;  // (the window in the menu's font; header() uses g_font_big)
+        g_font_big = g_menu_font_big;
+        ImGui::PushFont(g_menu_font);
         ImGui::PushFont(g_font_big);
         ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Link's Awakening");
         ImGui::PopFont();
@@ -744,6 +758,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
+        ImGui::PopFont();
+        g_font_big = keep_big;
         ImGui::End();
         osk_draw(g_font_big, scale);  // (a text field activated with the controller)
     }

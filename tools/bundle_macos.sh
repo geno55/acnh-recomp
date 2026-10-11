@@ -32,7 +32,7 @@ cp "$HACTOOL" "$C/MacOS/hactool"
 if [ -x "$HELPER/rando-gen" ]; then cp -R "$HELPER" "$C/Resources/rando-gen"; else echo "note: no $HELPER (make rando-helper)"; fi
 cp docs/icon/icon.icns "$C/Resources/icon.icns"
 cp docs/icon/icon_1024.png "$C/Resources/icon.png"  # (window / Dock icon at run time)
-cp third_party/fonts/Baloo2/Baloo2.ttf "$C/Resources/Baloo2.ttf"  # (start screen; OFL, README "License")
+cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$C/Resources/Baloo2-SemiBold.ttf"  # (start screen; OFL, README "License")
 cp third_party/fonts/Baloo2/OFL.txt "$C/Resources/Baloo2-OFL.txt"
 
 # ---- dylibs: copy every non-system dependency, recursively; point all references at @rpath/<name>
