@@ -467,6 +467,25 @@ def _missing_string(gen, a):
 
 PATCHES[MISSING_STRING_SITE] = _missing_string
 
+# The Float version (main+0x109fad0, "Float 型の '{0}' というパラメータが見つかりません"): a randomizer item on an
+# instrument pedestal (any non-instrument) runs an action whose Float 'time' is missing - picking it up crashed
+# (bug report 2026-10-11, reproduced on rando/DevInstr1 Tail Cave). A missing Float reads as 0.0 instead: the reader
+# (0x7f3c90) treats time <= 0 as instant.
+MISSING_FLOAT_SITE = 0x700109fb18
+
+
+def _missing_float(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x321c03e0, hex(w)  # mov w0, #0x10 (__cxa_allocate_exception size)
+    # s0 = 0.0 (q0 at Cpu+512), then the function's own epilogue
+    return ('{ __builtin_memset((char *)c + 512, 0, 16);'
+            ' c->x[29] = LD64(c->sp + 48); c->x[30] = LD64(c->sp + 56);'
+            ' c->x[20] = LD64(c->sp + 32); c->x[19] = LD64(c->sp + 40); c->sp += 0x40; return; }'
+            f'  /* {a:#x}: mov w0, #0x10 (missing Float event parameter: return 0.0, no throw) */')
+
+
+PATCHES[MISSING_FLOAT_SITE] = _missing_float
+
 
 # Event actions with no handler: main+0x108e300 runs an event action through the actor's handler map; an entry whose
 # std::function is empty throws std::bad_function_call (0x108edc8), which the same function catches (catch
