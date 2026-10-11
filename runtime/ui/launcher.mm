@@ -21,6 +21,7 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner)
+#include "option_rows.h"
 #include "osk.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
@@ -248,6 +249,36 @@ static int clean_keys(const std::string &src, const std::string &dst) {
     return dropped;
 }
 
+// Extraction progress (the overlay's bar): bytes written so far over the work there is - the dump's secure partition
+// read into .extract (about the dump's size), then the program NCA written out twice (romfs.bin, and romfs/ as files)
+static unsigned long long g_dump_bytes, g_nca_bytes;  // (g_lock)
+static unsigned long long tree_bytes(const std::string &p) {
+    struct stat st;
+    if (stat(p.c_str(), &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return (unsigned long long)st.st_size;
+    unsigned long long n = 0;
+    if (DIR *d = opendir(p.c_str())) {
+        while (struct dirent *e = readdir(d))
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) n += tree_bytes(p + "/" + e->d_name);
+        closedir(d);
+    }
+    return n;
+}
+static float extract_progress(void) {
+    static float last;
+    static int tick;
+    if (tick++ % 30) return last;  // (twice a second: romfs/ is thousands of files)
+    pthread_mutex_lock(&g_lock);
+    unsigned long long dump = g_dump_bytes, nca = g_nca_bytes;
+    pthread_mutex_unlock(&g_lock);
+    if (!dump) return last = 0;
+    unsigned long long done = tree_bytes(g_root + "/.extract") + tree_bytes(g_root + "/romfs.bin") +
+                              tree_bytes(g_root + "/romfs") + tree_bytes(g_root + "/exefs");
+    double total = (double)dump + 2.0 * (double)(nca ? nca : dump);
+    float f = (float)(done / total);
+    return last = f < 0 ? 0 : f > 0.99f ? 0.99f : f > last ? f : last;  // (never backwards)
+}
+
 static void *extract_thread(void *) {
     std::string dump, keys;
     pthread_mutex_lock(&g_lock);
@@ -261,6 +292,9 @@ static void *extract_thread(void *) {
     rt_remove_game_file(g_root.c_str(), ".extract");  // (an interrupted run's)
     mkdir(tmp.c_str(), 0755);
     bool nsp = dump.size() > 4 && !strcasecmp(dump.c_str() + dump.size() - 4, ".nsp");
+    pthread_mutex_lock(&g_lock);
+    g_dump_bytes = tree_bytes(dump), g_nca_bytes = 0;
+    pthread_mutex_unlock(&g_lock);
     set_job("Reading the game dump...");
     if (clean_keys(keys, tmp + "/prod.keys") >= 0) keys = tmp + "/prod.keys";  // (removed with .extract at the end)
     std::vector<std::string> a = {hactool, "-k", keys};
@@ -285,7 +319,10 @@ static void *extract_thread(void *) {
     {
         std::string nca = largest_with(tmp, ".nca");  // the program NCA (game code + data) is by far the largest
         if (nca.empty()) { set_job("No game content found in the dump", true); goto done; }
-        set_job("Extracting game files (a few minutes)...");
+        pthread_mutex_lock(&g_lock);
+        g_nca_bytes = tree_bytes(nca);
+        pthread_mutex_unlock(&g_lock);
+        set_job("Extracting game files...");
         // romfs.bin (raw image) is what the game's file system reads; romfs/ (files) the tools and the movie player use
         std::vector<std::string> b = {hactool, "-k", keys, "--exefsdir=" + g_root + "/exefs", "--romfsdir=" + g_root + "/romfs",
                                       "--romfs=" + g_root + "/romfs.bin"};
@@ -1167,85 +1204,121 @@ extern "C" void launcher_run(const char *root) {
                         if (choices[i] == cur) choice = (int)i;
                 }
             } else {
-                // sub pages: a dark panel (readable over any background), scrolls if it doesn't fit
-                float top = 300 * s, bottom = 140 * s;
-                ImGui::SetCursorPos(ImVec2(x0 - 24 * s, top));
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.78f));
-                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
-                ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - top - bottom), ImGuiChildFlags_AlwaysUseWindowPadding,
-                                  ImGuiWindowFlags_NavFlattened);
+                // SETUP: the game files, in a window like Settings (option rows: runtime/ui/option_rows.h) - choose the
+                // dump and the keys, extract; once set up, delete. Each row's explanation on the right.
+                float sc = ds.y / 1080.0f, w = fminf(ds.x * 0.9f, 1500 * sc), h = ds.y - 2 * 18 * sc;
+                ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetWindowPos(), ImVec2(ImGui::GetWindowPos().x + ds.x,
+                                                          ImGui::GetWindowPos().y + ds.y), IM_COL32(0, 0, 0, 110));
+                ImVec2 wp = ImGui::GetWindowPos();
+                ImGui::SetCursorScreenPos(ImVec2(wp.x + (ds.x - w) * 0.5f, wp.y + (ds.y - h) * 0.5f));
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.09f, 0.08f, 0.96f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * sc);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28 * sc, 24 * sc));
+                ImGui::BeginChild("##setup", ImVec2(w, h), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
                 ImGui::PopStyleColor();
-                g_menu_small = true;
-                float x0 = ImGui::GetCursorPosX();
-                {  // SETUP: game files (extract / delete) and the user's own Switch fonts
+                ImGui::PushFont(g_font_small);
+                ImGui::PushFont(g_font_menu);
+                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Game Files");
+                ImGui::PopFont();
+                bool back = false;
+                if (!busy) {  // close: the drawn X in the corner, as Settings (B / Esc too)
+                    float bx = 44 * sc;
+                    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+                    back = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
+                    ImGui::PopStyleColor();
+                    bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+                    ImU32 col = hot ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255);
+                    float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * sc * 1.5f;
+                    ImDrawList *dl = ImGui::GetWindowDrawList();
+                    if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), IM_COL32(255, 255, 255, 20), 8 * sc);
+                    dl->AddLine(ImVec2(p.x + m, p.y + m), ImVec2(p.x + bx - m, p.y + bx - m), col, t);
+                    dl->AddLine(ImVec2(p.x + bx - m, p.y + m), ImVec2(p.x + m, p.y + bx - m), col, t);
+                }
+                ImGui::Spacing();
+
                 pthread_mutex_lock(&g_lock);
                 std::string dump = g_dump, keys = g_keys, job = g_job;
                 bool failed = g_job_failed;
                 pthread_mutex_unlock(&g_lock);
-                if (keys.empty()) {
+                if (keys.empty()) {  // (the usual place for them: picked up on its own)
                     const char *home = getenv("HOME");
                     std::string def = std::string(home ? home : "") + "/.switch/prod.keys";
                     if (file_exists(def)) { keys = def; pthread_mutex_lock(&g_lock); g_keys = def; pthread_mutex_unlock(&g_lock); }
                 }
-                bool ready = status.empty() && !busy;  // set up: this page only offers to delete them
-                if (!ready) {
-                ImGui::PushFont(g_font_small);
-                ImGui::SetCursorPosX(x0);
-                ImGui::PushTextWrapPos(0);
-                ImGui::TextWrapped("Link's Awakening isn't included. Choose your own dump of the game (v1.0.0, XCI or "
-                                   "NSP) and your console's prod.keys; the game files are extracted once.");
-                ImGui::PopTextWrapPos();
-                ImGui::SetCursorPosX(x0);
-                ImGui::Text("Game dump:  %s", dump.empty() ? "(not chosen)" : dump.c_str());
-                ImGui::SetCursorPosX(x0);
-                ImGui::Text("Keys:       %s", keys.empty() ? "(not chosen)" : keys.c_str());
-                ImGui::PopFont();
-                static const SDL_DialogFileFilter dump_f[] = {{"Switch game dump", "xci;nsp"}};
-                static const SDL_DialogFileFilter keys_f[] = {{"Keys", "keys;txt"}};
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("CHOOSE GAME DUMP", !busy)) SDL_ShowOpenFileDialog(picked, (void *)1, win, dump_f, 1, NULL, false);
-                ImGui::SetCursorPosX(x0);
-                if (menu_item("CHOOSE KEYS", !busy)) SDL_ShowOpenFileDialog(picked, (void *)2, win, keys_f, 1, NULL, false);
-                ImGui::SetCursorPosX(x0);
-                if (menu_item(busy ? "EXTRACTING..." : "EXTRACT", !busy && !dump.empty() && !keys.empty())) {
-                    pthread_mutex_lock(&g_lock);
-                    g_busy = true;
-                    pthread_mutex_unlock(&g_lock);
-                    pthread_t t;
-                    pthread_create(&t, NULL, extract_thread, NULL);
-                    pthread_detach(t);
-                }
-                }
-                if (!job.empty()) {
-                    ImGui::PushFont(g_font_small);
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : ImVec4(0.9f, 0.9f, 0.8f, 1), "%s", job.c_str());
-                    ImGui::PopFont();
-                }
-                // DELETE GAME FILES: frees the extracted copy (runtime/paths.c removes only what the extraction made,
-                // only inside the data root). Saves, seeds, settings and the user's dump / keys stay.
+                bool ready = status.empty() && !busy;  // (set up: the window offers to delete them)
                 static double files_gb = -1;
-                if (ready) {
+                // chosen: "Selected" with a green check (long dump names ran over the label); the path is in the
+                // explanation, and choosing again opens the picker again
+                std::string dump_v = dump.empty() ? "Choose..." : "Selected", keys_v = keys.empty() ? "Choose..." : "Selected";
+                auto check_left_of_value = [&](const std::string &v) {
+                    if (v != "Selected") return;
+                    ImVec2 rb = ImGui::GetItemRectMax(), ra = ImGui::GetItemRectMin();
+                    float fs = ImGui::GetFontSize(), vw = ImGui::CalcTextSize(v.c_str()).x;
+                    float x = rb.x - 16 * sc - vw - fs * 0.95f, cy = (ra.y + rb.y) * 0.5f, u = fs * 0.62f;
+                    ImU32 g = IM_COL32(120, 220, 120, 255);
+                    ImDrawList *dl = ImGui::GetWindowDrawList();
+                    dl->AddLine(ImVec2(x, cy), ImVec2(x + u * 0.35f, cy + u * 0.35f), g, fs * 0.11f);
+                    dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
+                };
+                std::string dump_d = "Your own dump of The Legend of Zelda: Link's Awakening for Nintendo Switch, version "
+                                     "1.0.0, as an XCI or NSP file. The game isn't included with LAS Recomp.";
+                if (!dump.empty()) dump_d += "\n\nChosen: " + dump;
+                std::string keys_d = "Your Switch's prod.keys, dumped from your own console. They unlock the game dump.";
+                if (!keys.empty()) keys_d += "\n\nChosen: " + keys;
+                // the step that's running / its result, under the rows and in the Extract row's explanation
+                const std::string &job_line = job;
+                std::string ex_d = "Unpacks the game files LAS Recomp needs from your dump, once: a few minutes. Your "
+                                   "dump and keys aren't changed.";
+                if (!job.empty()) ex_d += "\n\n" + job;
+
+                // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
+                static int seen_frame = -10, focus_first;  // (not drawn last frame: the window has just opened)
+                if (seen_frame != ImGui::GetFrameCount() - 1) focus_first = 4;
+                seen_frame = ImGui::GetFrameCount();
+                auto first_row = [&] {
+                    if (focus_first > 0 && focus_first--) ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+                };
+                opt_begin("##files", sc);
+                if (!ready) {
+                    opt_section("Your dump of the game");
+                    if (busy) opt_disable_next();
+                    if (opt_action("Game dump", dump_v.c_str(), dump_d.c_str(), true))
+                        SDL_ShowOpenFileDialog(picked, (void *)1, win, (const SDL_DialogFileFilter[]){{"Switch game dump", "xci;nsp"}}, 1, NULL, false);
+                    check_left_of_value(dump_v);
+                    first_row();
+                    if (busy) opt_disable_next();
+                    if (opt_action("Keys", keys_v.c_str(), keys_d.c_str(), true))
+                        SDL_ShowOpenFileDialog(picked, (void *)2, win, (const SDL_DialogFileFilter[]){{"Keys", "keys;txt"}}, 1, NULL, false);
+                    check_left_of_value(keys_v);
+                    opt_section("Set up");
+                    if (busy || dump.empty() || keys.empty()) opt_disable_next();
+                    if (opt_action("Extract game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
+                        pthread_mutex_lock(&g_lock);
+                        g_busy = true;
+                        pthread_mutex_unlock(&g_lock);
+                        pthread_t t;
+                        pthread_create(&t, NULL, extract_thread, NULL);
+                        pthread_detach(t);
+                    }
+                    files_gb = -1;  // (re-measured after an extraction)
+                } else {
+                    // DELETE: frees the extracted copy (runtime/paths.c removes only what the extraction made, only
+                    // inside the data root). Saves, seeds, settings and the user's dump / keys stay.
                     if (files_gb < 0) files_gb = rt_game_files_size(g_root.c_str()) / 1e9;
-                    ImGui::PushFont(g_font_small);
-                    ImGui::SetCursorPosX(x0);
-                    ImGui::PushTextWrapPos(0);
-                    if (!g_confirm_delete)
-                        ImGui::TextWrapped("Game files are set up (%.1f GB, extracted from your dump). Delete them to free "
-                                           "the space; saves, seeds and settings are kept.", files_gb);
-                    else
-                        ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete the extracted game files (%.1f GB)? Saves, seeds "
-                                           "and settings are kept, and your dump and keys aren't touched: you can set "
-                                           "the game files up again from them.", files_gb);
-                    ImGui::PopTextWrapPos();
-                    ImGui::PopFont();
-                    ImGui::SetCursorPosX(x0);
+                    char gb[32];
+                    snprintf(gb, sizeof gb, "%.1f GB", files_gb);
+                    opt_section("Game files");
                     if (!g_confirm_delete) {
-                        if (menu_item("DELETE GAME FILES", true)) g_confirm_delete = true;
+                        if (opt_action("Delete game files", gb, "Frees the space the extracted game files take. Saves, seeds "
+                                       "and settings are kept, and your dump and keys aren't touched: you can set the game "
+                                       "files up again from them.", true))
+                            g_confirm_delete = true;
+                        first_row();
                     } else {
-                        if (menu_item("DELETE", true)) {
+                        if (opt_action("Yes, delete them", gb, "Deletes the extracted game files now.", true)) {
                             bool ok = rt_remove_game_files(g_root.c_str());
                             status = check_game_files(g_root);
                             set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's "
@@ -1253,28 +1326,58 @@ extern "C" void launcher_run(const char *root) {
                             if (!status.empty()) g_bg = 0;
                             g_confirm_delete = false, files_gb = -1;
                         }
-                        ImGui::SetCursorPosX(x0);
-                        if (menu_item("CANCEL", true)) g_confirm_delete = false;
-                    }
-                } else files_gb = -1;  // (re-measured after an extraction)
-                if (g_confirm_delete) {  // (B / Esc: back out of the question first)
-                    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-                        g_confirm_delete = false;
-                } else {
-                    ImGui::SetCursorPosX(x0);
-                    if (menu_item("BACK", !busy) || (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))) {
-                        settings_save();
-                        page = MAIN, g_refocus = SETUP;
+                        if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
                 }
+                if (!job_line.empty()) {  // the current step / result
+                    ImGui::Dummy(ImVec2(0, 14 * sc));
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : busy ? ImVec4(0.93f, 0.76f, 0.33f, 1)
+                                              : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", job_line.c_str());
+                    ImGui::PopTextWrapPos();
                 }
-                g_menu_small = false;
+                opt_end();
+                if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                         ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+                    g_confirm_delete = false;  // (B / Esc: back out of the question first)
+                else if (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                              ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+                    back = true;
+                ImGui::PopFont();
                 ImGui::EndChild();
+                if (back && !busy) {
+                    settings_save();
+                    g_confirm_delete = false;
+                    page = MAIN, g_refocus = SETUP;
+                }
+                static bool test_busy = getenv("LARECOMP_LAUNCHER_SHOT") && strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":extracting");
+                if (busy || test_busy) {  // extracting: everything dimmed, a progress bar in front (input waits)
+                    ImDrawList *fg = ImGui::GetForegroundDrawList();
+                    ImVec2 o = ImGui::GetMainViewport()->Pos;
+                    fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(0, 0, 0, 170));
+                    float f = test_busy ? 0.42f : extract_progress();
+                    const char *title = "Setting up the game files";
+                    float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
+                    ImVec2 ts = g_font_menu->CalcTextSizeA(tfs, FLT_MAX, 0, title);
+                    float pw = fminf(ds.x * 0.6f, 900 * sc), bar_y = 36 * sc + ts.y + 30 * sc;
+                    float ph = bar_y + 24 * sc + 26 * sc + g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, "A").y + 40 * sc;
+                    ImVec2 a(o.x + (ds.x - pw) * 0.5f, o.y + (ds.y - ph) * 0.5f), b(a.x + pw, a.y + ph);
+                    fg->AddRectFilled(a, b, IM_COL32(15, 23, 20, 250), 14 * sc);
+                    fg->AddRect(a, b, IM_COL32(236, 194, 84, 140), 14 * sc, 0, 1.5f * sc);
+                    fg->AddText(g_font_menu, tfs, ImVec2((a.x + b.x - ts.x) * 0.5f, a.y + 36 * sc), IM_COL32(236, 194, 84, 255), title);
+                    ImVec2 ba(a.x + 48 * sc, a.y + bar_y), bb(b.x - 48 * sc, a.y + bar_y + 24 * sc);
+                    fg->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 25), 12 * sc);
+                    if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
+                    char line[200];
+                    snprintf(line, sizeof line, "%s   %d%%", test_busy ? "Extracting game files..." : job.c_str(),
+                             (int)(f * 100));
+                    ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);
+                    fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ls.x) * 0.5f, bb.y + 26 * sc), IM_COL32(220, 216, 205, 255), line);
+                }
             }
 
-            // status (lower left) and version (lower right) - not under the Settings window
-            if (page != SETTINGS) {
+            // status (lower left) and version (lower right) - not under the Settings / Game Files windows
+            if (page == MAIN) {
             ImGui::PushFont(g_font_small);
             ImGui::SetCursorPos(ImVec2(x0, ds.y - 118 * s));
             if (status.empty()) {
