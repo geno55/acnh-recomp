@@ -817,7 +817,7 @@ extern "C" void launcher_run(const char *root) {
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
-            ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();
+            ImGui::GetIO().FontGlobalScale = s * 0.5f;  // (sub-page panels: x ui_text_scale(), below)
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
             if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
@@ -953,6 +953,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.78f));
                 ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
+                ImGui::GetIO().FontGlobalScale = s * 0.5f * ui_text_scale();  // only the panel's text: the main menu fits as on macOS
                 ImGui::BeginChild("##panel", ImVec2(ds.x * 0.58f, ds.y - top - bottom), ImGuiChildFlags_AlwaysUseWindowPadding,
                                   ImGuiWindowFlags_NavFlattened);
                 ImGui::PopStyleVar(2);
@@ -1140,6 +1141,7 @@ extern "C" void launcher_run(const char *root) {
                 }
                 g_menu_small = false;
                 ImGui::EndChild();
+                ImGui::GetIO().FontGlobalScale = s * 0.5f;
             }
 
             // status (lower left) and version (lower right)
