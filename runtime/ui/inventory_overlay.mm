@@ -1,6 +1,7 @@
 // Inventory overlay for randomizer seeds: while the pause menu's Items page is shown, a panel along its bottom
 // lists every dungeon's small keys (count) plus Nightmare Key / Map / Compass / Stone Beak, read live from the
-// game's per-dungeon records, and the trade sequence (found / in hand / traded away). (Randomized keys can be found anywhere, and the game only shows the current
+// game's per-dungeon records (keysanity), and the trade sequence (found / in hand / traded away; keysanity or trade
+// quest gifts). (Randomized keys can be found anywhere, and the game only shows the current
 // dungeon's keys.) With boss / mini-boss souls on, a column right of the item grid shows each dungeon's souls.
 // Pets (runtime/hle/pets.c): the Ghost item sits in the equipment panel's free slot (left of the Secret Medicine),
 // ticked once laid to rest; a companion card left of the panel shows who follows Link and switches it (the page
@@ -95,31 +96,42 @@ static bool companion_card(void) {
     return pets_menu_options(o) >= 2;
 }
 
-// The dungeon keys panel: on with keysanity (the seed's settings.json "keysanity" isn't "off"; keys can be anywhere,
-// so the Items screen shows what each dungeon's are). Read once per seed.
-static bool keys_shown(void) {
+// The seed's settings.json, read once per seed.
+static const char *seed_settings(void) {
     const char *dir = rando_seed_dir();
-    if (!dir) return false;
+    if (!dir) return NULL;
     static std::string seed;
-    static bool on;
+    static char buf[1 << 16];
     if (seed != dir) {
         seed = dir;
-        on = false;
+        buf[0] = 0;
         if (FILE *f = fopen((seed + "/settings.json").c_str(), "rb")) {
-            static char buf[1 << 16];
             size_t n = fread(buf, 1, sizeof buf - 1, f);
             buf[n] = 0;
             fclose(f);
-            const char *k = strstr(buf, "\"keysanity\":");
-            static const char off[] = "\"keysanity\": \"off\"";
-            on = k && strncmp(k, off, sizeof off - 1) != 0;
         }
     }
-    return on;
+    return buf;
+}
+
+// The dungeon keys panel: on with keysanity (the seed's settings.json "keysanity" isn't "off"; keys can be anywhere,
+// so the Items screen shows what each dungeon's are).
+static bool keys_shown(void) {
+    const char *s = seed_settings();
+    const char *k = s ? strstr(s, "\"keysanity\":") : NULL;
+    static const char off[] = "\"keysanity\": \"off\"";
+    return k && strncmp(k, off, sizeof off - 1) != 0;
+}
+
+// The trade sequence row: with keysanity (under the keys) or with the trade quest gifts shuffled ("include-trade-gifts":
+// the trade items can come from anywhere) - then on its own (user 2026-10-11).
+static bool trade_shown(void) {
+    const char *s = seed_settings();
+    return keys_shown() || (s && strstr(s, "\"include-trade-gifts\": true"));
 }
 
 extern "C" bool inventory_overlay_wanted(void) {
-    return (keys_shown() || pets_ghost_state() >= 0 || companion_card()) &&
+    return (trade_shown() || pets_ghost_state() >= 0 || companion_card()) &&
            rando_seed_dir() && items_page_shown();
 }
 
@@ -389,10 +401,13 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     ImVec2 p0(ox + 150 * u, oy + 512 * u), p1(ox + 1130 * u, oy + 630 * u);
     ImDrawList *dl = ImGui::GetForegroundDrawList();
     pets_draw(dl, font, ox, oy, u);
-    if (!keys_shown()) return;
+    bool keys = keys_shown();
+    if (!keys && !trade_shown()) return;
+    float trade_y = p0.y + 84 * u;  // (the trade row: under the keys, or alone in a short panel at the same place)
+    if (!keys) p0.y = trade_y - 8 * u, p1.y = trade_y + 34 * u;
     dl->AddRectFilled(p0, p1, IM_COL32(52, 38, 20, 205), 14 * u);
     dl->AddRect(p0, p1, IM_COL32(214, 176, 92, 230), 14 * u, 0, 2.5f * u);
-    int n = (int)(sizeof kDungeons / sizeof kDungeons[0]);
+    int n = keys ? (int)(sizeof kDungeons / sizeof kDungeons[0]) : 0;
     float cw = (p1.x - p0.x) / n;
     float fs = 30 * u;
     for (int k = 0; k < n; k++) {
@@ -420,7 +435,7 @@ extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font) {
     // trade sequence: items Link has lit, the one in the trade slot outlined, traded-away ones dark with a tick
     if (!g_trade_loaded) load_trade_flags();
     int held = LD8(TRADE_SLOT);
-    float tw = (p1.x - p0.x - 16 * u) / 14, ty = p0.y + 84 * u, th = 26 * u, tfs = 17 * u;
+    float tw = (p1.x - p0.x - 16 * u) / 14, ty = trade_y, th = 26 * u, tfs = 17 * u;
     for (int i = 0; i < 14; i++) {
         bool done = flag_set(g_trade_done[i]) && held != i + 1;
         bool got = !done && (flag_set(g_trade_flag[i]) || held == i + 1);
