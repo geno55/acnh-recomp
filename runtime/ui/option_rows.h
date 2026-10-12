@@ -37,3 +37,6 @@ void opt_disable_next(void);
 // rows after this sit one step in (+1) or back out (-1): options that belong to the row above
 void opt_indent(int step);
 void opt_end(void);
+// the next page's first row takes the controller's cursor (Down on the tab bar: ImGui's own pick across the nested
+// panes was unreliable - some tabs went to a row further down, some nowhere). Cleared by the next opt_begin / call.
+void opt_focus_first(bool on);

@@ -694,6 +694,11 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             if (focused_tab != -99) g_focus_tab = tabs[i].id, g_focus_frames = 0;
         }
     }
+    // Down with the cursor on the tab bar: the page's first row (option rows; other pages keep ImGui's own pick)
+    bool down_from_tab = focused_tab != -99 && ImGui::GetCurrentContext()->NavCursorVisible && !any_popup &&
+                         (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickDown) ||
+                          ImGui::IsKeyPressed(ImGuiKey_DownArrow));
+    opt_focus_first(down_from_tab);
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
         for (int k = 0; k < ntabs; k++) {
             const Tab &t = tabs[k];
@@ -735,6 +740,20 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 ImGui::Spacing();
                 ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
                                   ImGuiWindowFlags_NavFlattened);
+                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
+                // (option-row pages: opt_focus_first)
+                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
+                    opt_focus_first(false);
+                    ImGui::SetKeyboardFocusHere();
+                    ImGui::SetNavCursorVisible(true);
+                }
+                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
+                // (option-row pages: opt_focus_first)
+                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
+                    opt_focus_first(false);
+                    ImGui::SetKeyboardFocusHere();
+                    ImGui::SetNavCursorVisible(true);
+                }
                 switch (t.id) {
                 case -1: prelaunch(scale); break;
                 case 0: tab_display(); break;
@@ -758,6 +777,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             }
         }
         g_tab_request = -2;
+        opt_focus_first(false);  // (a page without option rows: nothing took it)
         ImGui::EndTabBar();
     }
 }

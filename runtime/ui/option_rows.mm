@@ -19,11 +19,16 @@ static const ImU32 kGold = IM_COL32(236, 194, 84, 255);
 static bool g_next_disabled;
 void opt_disable_next(void) { g_next_disabled = true; }
 static int g_indent;
+static bool g_focus_req, g_take_first;  // (opt_focus_first: requested / this page's first row takes it)
+void opt_focus_first(bool on) { g_focus_req = on; }
 static bool g_held;  // the last row's left / right has been held a while (steppers go faster)
 void opt_indent(int step) { g_indent = g_indent + step < 0 ? 0 : g_indent + step; }
 
 void opt_begin(const char *id, float scale) {
     g_scale = scale;
+    g_take_first = g_focus_req;
+    g_focus_req = false;
+    if (g_take_first) ImGui::NavMoveRequestCancel();  // (this frame's Down goes to the first row instead)
     g_indent = 0;
     g_desc_hover.clear(), g_desc_focus.clear();
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -51,6 +56,12 @@ static int row(const char *label, const std::string &value, bool changed, const 
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the row's own border shows the selection)
     bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImGui::PopStyleColor();
+    if (g_take_first) {  // (opt_focus_first)
+        g_take_first = false;
+        ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+        ImGui::SetNavCursorVisible(true);
+        ImGui::SetScrollHereY(0);
+    }
     bool off = g_next_disabled;  // (greyed out: still selectable, so its description shows, but it can't change)
     g_next_disabled = false;
     bool hov = ImGui::IsItemHovered(), foc = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
