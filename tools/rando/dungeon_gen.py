@@ -51,6 +51,64 @@ BOSS_TYPES = set(range(0x51, 0x70)) | {0x220}  # bosses / mini-bosses, environme
 COLS, ROWS = 8, 8  # A-H, rows 01-08 (side-view rooms of a level sit further east, x >= 135)
 
 
+# The dungeon map (pause menu) draws a room on its floor's page: a paper of 8 x 8 cells (81.5 x 64.75 layout units,
+# 652 x 518, centred) shifted per floor by ui/Game.arc anim/Dg_DgnMap_Dgn_<NN> (pane N_MapPosition_00; NN =
+# UiDungeonArea mAnimFloorIndex: Key Cavern 1F +160 shows columns A-F, B1 -240 D-H). A room in a cell outside its
+# floor's window was drawn off the paper (user's Madness seed, Key Cavern 07H). A cell without a row of its own gets
+# the entrance's (_dungeon_map_rooms).
+MAP_CELL_W, MAP_CELL_H = 81.5, 64.75
+MAP_TOL = 20.0  # layout units a cell may hang over the edge (every vanilla floor shifts rows by -16)
+
+
+@functools.lru_cache(None)
+def map_shifts(romfs):
+    """{mAnimFloorIndex: (x, y)}: each floor page's shift of the room grid (layout units, y up)."""
+    import oead
+    raw = open(os.path.join(romfs, 'region_common', 'ui', 'Game.arc'), 'rb').read()
+    sarc = oead.Sarc(oead.yaz0.decompress(raw) if raw[:4] == b'Yaz0' else raw)
+    out = {}
+    for f in sarc.get_files():
+        m = re.match(r'anim/Dg_DgnMap_Dgn_(\d+)\.bflan$', f.name)
+        if not m:
+            continue
+        b = bytes(f.data)
+        p = b.find(b'N_MapPosition_00')
+        t = b.find(b'FLPA', p) if p >= 0 else -1
+        if t < 0:
+            continue
+        xy = [0.0, 0.0]
+        for i in range(b[t + 4]):  # FLPA anim infos: target 0 = translate x, 1 = y; first key's value
+            io = t + struct.unpack_from('<I', b, t + 8 + i * 4)[0]
+            target, dtype, nkeys, koff = b[io + 1], b[io + 2], *struct.unpack_from('<H2xI', b, io + 4)
+            if target < 2 and nkeys:
+                xy[target] = struct.unpack_from('<f', b, io + koff + 4)[0]
+        out[int(m.group(1))] = tuple(xy)
+    return out
+
+
+@functools.lru_cache(None)
+def map_anims(romfs):
+    """{room name: mAnimFloorIndex} (UiDungeonArea.gsheet)."""
+    from RandomizerCore.Tools import oead_tools
+    sheet = oead_tools.readSheet(os.path.join(romfs, 'region_common', 'datasheets', 'UiDungeonArea.gsheet'))
+    return {str(v['mLeaName']): int(v['mAnimFloorIndex']) for v in sheet['values']}
+
+
+def map_shift(romfs, level, cell):
+    """The map page shift of the floor `cell` is drawn on (a new cell: the entrance's floor)."""
+    anims = map_anims(romfs)
+    anim = anims.get(cell, anims.get(ENTRANCES.get(level, ''), 0))
+    return map_shifts(romfs).get(anim, (0.0, 0.0))
+
+
+def on_map(romfs, level, c, r):
+    """Cell (c, r) is drawn on its floor's map paper."""
+    sx, sy = map_shift(romfs, level, cell_name(level, c, r))
+    x0, y0 = c * MAP_CELL_W - 326 + sx, 259 - r * MAP_CELL_H + sy
+    return x0 >= -326 - MAP_TOL and x0 + MAP_CELL_W <= 326 + MAP_TOL and y0 >= -259 - MAP_TOL and \
+        y0 + MAP_CELL_H <= 259 + MAP_TOL
+
+
 def movable(v):
     if BOSS_TYPES & set(v.get('types', [])):
         return False
@@ -206,7 +264,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     taken = {cell_pos(n) for n in offgrid if re.match(r'.*_\d\d[A-Z]$', n)}
 
     def inside(c, r):
-        return 0 <= c < COLS and 1 <= r <= ROWS and (c, r) not in taken
+        return 0 <= c < COLS and 1 <= r <= ROWS and (c, r) not in taken and (not romfs or on_map(romfs, level, c, r))
 
     for attempt in range(tries):
         rng = random.Random(f'{seed}-{level}-{attempt}')
@@ -980,7 +1038,7 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 taken = {cell_pos(k) for k in L}
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
                 free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
-                              if (c, r) not in taken and (c, r) not in reserved]
+                              if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
                     ok = True
@@ -1054,6 +1112,12 @@ def write_all(romfs, out, layouts, jumps=None):
     for lv, L in layouts.items():
         write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,
               jumps=None if jumps is None else [j for j in jumps if j[0] == lv])
+    # each cell's map page shift (level, cell, x, y): the Chaos letters draw only the open floor's doorways
+    # (runtime/ui/chaos_overlay.mm)
+    with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'dungeon_map.tsv'), 'w') as f:
+        for lv, L in layouts.items():
+            for cell in sorted(L):
+                f.write('%s\t%s\t%g\t%g\n' % (lv, cell.rsplit('_', 1)[1], *map_shift(romfs, lv, cell)))
     if shared.next_g > 2048:  # flags past the game's 2048: the runtime extends the bitfield for this seed
         with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'flags_ext'), 'a') as f:
             f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
