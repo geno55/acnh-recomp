@@ -38,7 +38,11 @@ MINIBOSS_KITS = {  # (no AreaEventBox: it plays the arena intro - camera, music 
 }
 
 
-def add_miniboss_kit(room_data, mi, arena):
+KIT_KEY_TAG = 0x6B  # (copied kit actors get their own keys: the game keeps one actor per key, so copies sharing the
+#                    arena's key spawned once among all loaded screens - one Smasher in a load had its ball)
+
+
+def add_miniboss_kit(room_data, mi, arena, room_name=''):
     """Appends the kit actors of room_data.actors[mi]'s mini-boss (copied from its arena room, same offsets) and links
     them as in the arena; rails (section 2: params, rail, point - a global point index too) of every kit actor are
     copied with their points (a rail-riding mini-boss's rail is then fitted to the room: fit_rail)."""
@@ -49,8 +53,12 @@ def add_miniboss_kit(room_data, mi, arena):
     src = arena.actors[src_i]
     take = [src_i] + [i for i, x in enumerate(arena.actors) if x.type in MINIBOSS_KITS[act.type][1]]
     newidx = {src_i: mi}
+    import zlib
     for i in take[1:]:
         a = copy.deepcopy(arena.actors[i])
+        a.key = (KIT_KEY_TAG << 56) | ((zlib.crc32(room_name.encode()) & 0xFFFFFF) << 32) | \
+            ((len(room_data.actors) & 0xFFFF) << 16) | (a.key & 0xFFFF)
+        a.name = a.name.split(b'-')[0] + b'-%016X' % a.key
         a.posX, a.posY, a.posZ = act.posX + (a.posX - src.posX), act.posY + (a.posY - src.posY), act.posZ + (a.posZ - src.posZ)
         a.roomID = act.roomID
         room_data.actors.append(a)
@@ -229,7 +237,7 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 act.rotY = 0
                 act.scaleX = act.scaleY = act.scaleZ = 1.0
                 if mini in MINIBOSS_KITS and enemy_settings.get('arena'):
-                    add_miniboss_kit(room_data, e, enemy_settings['arena'](MINIBOSS_KITS[mini][0]))
+                    add_miniboss_kit(room_data, e, enemy_settings['arena'](MINIBOSS_KITS[mini][0]), file[:-4])
                 edited_room = True
                 continue
 
