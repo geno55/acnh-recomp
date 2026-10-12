@@ -253,7 +253,16 @@ build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
 	$(RANDO_VPY) -m pip install -q -r third_party/LAS-Randomizer/requirements.txt pyinstaller==6.22.3
 	touch $@
 
-.PHONY: dmg all gen gen-objs runtime-objs hactool deps deps-windows app dist rando-helper
+# Linux: build/dist/LAS_Recomp-<version>-<arch>.AppImage, built in Ubuntu 22.04 containers (podman) with SDL3, LGPL
+# FFmpeg, shaderc, hactool and the seed generator helper inside; the Vulkan loader and GPU drivers are the system's.
+# `make appimage` (ARCH: this machine's, or aarch64 cross-compiled), `make appimages` both. See docs/linux.md.
+appimage:
+	tools/linux/appimage.sh $(ARCH)
+appimages:
+	tools/linux/appimage.sh x86_64
+	tools/linux/appimage.sh aarch64
+
+.PHONY: dmg all gen gen-objs runtime-objs hactool deps deps-windows app dist rando-helper appimage appimages
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
