@@ -243,3 +243,7 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
     return remove(path);
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
+
+// End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
+// while the game's threads still submitted work.
+void plat_terminate(void) { _exit(0); }

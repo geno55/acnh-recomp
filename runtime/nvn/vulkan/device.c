@@ -625,7 +625,7 @@ static void quick_exit_handler(void) {
     if (trace) LOG("[vk] exit: terminating\n");
     fflush(stdout);
     fflush(stderr);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     plat_terminate();
 #endif
 }
