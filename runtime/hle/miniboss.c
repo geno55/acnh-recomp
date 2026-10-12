@@ -21,8 +21,10 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 // per class: vtable, its state machine's change(sm, state) (+0xd current state, +0xe previous; states 0x30 apart
 // from +0x40: ctx, enter, exec, exit member functions), the state machine's offset in the actor, idle state, fight
 // state, position offset (x y z floats: the spawn point), rest state (0xff: none) - one it stays in after a move
-// that ends its fight in its own room (Blaino's knock-out): woken again like idle
-typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest; } Kind;
+// that ends its fight in its own room (Blaino's knock-out): woken again like idle, then (0: none) - a state it goes
+// on to a few frames after waking (Master Stalfos: 13 shows him, 1 is his fight), at_once: woken as soon as he's
+// loaded, wherever Link is (an idle Master Stalfos is invisible)
+typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest, then, at_once; } Kind;
 static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b80e90, MAIN_BASE + 0x3bfc60, 0xff0, 0x260, 0, 1, "Hinox", 0xff},  // 0x53: 10 = request HinoxStart
     // (found 2026-10-12 with tools placing each one on Field_13D: LARECOMP_MB_SCAN_NAME / _FORCE)
@@ -32,6 +34,8 @@ static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a (heads for Link: GOHMA_*)
     {MAIN_BASE + 0x1b91408, MAIN_BASE + 0x4ec6c0, 0x11a0, 0x260, 10, 1, "Blaino", 5},          // 0x5f (5: after a knock-out)
     {MAIN_BASE + 0x1b82f70, MAIN_BASE + 0x3e59a0, 0xff0, 0x260, 0, 3, "Cue Ball", 0xff},       // 0x58 (+ a rail fitted)
+    // 0x59: 12 = hidden until his room's event (AreaEventBox - not copied: intro, music) drops him in; 13 shows him
+    {MAIN_BASE + 0x1b8ea08, MAIN_BASE + 0x4b9be0, 0x1230, 0x260, 12, 13, "Master Stalfos", 0xff, 1, 1},
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
@@ -341,12 +345,18 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         if (!strcmp(k->name, "Cue Ball")) cueball_tick(c, s, k, frame);
         if (!strcmp(k->name, "Avalaunch")) avalaunch_tick(c, s, k, frame);
         uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
+        if (k->then && s->woken && st == k->fight && frame - s->woken_at >= 2) set_state(c, s, k, k->then);
+        if (ENV("LARECOMP_LOG_MB_Y") && frame % 5 == 0 && s->woken && LD64(s->obj + 0x80)) {  // (RE: height by state)
+            const float *q = (const float *)(uintptr_t)(LD64(s->obj + 0x80) + 0x80);
+            LOG("[mb-y] f%llu %s %llx st %u at %.2f %.2f %.2f\n", (unsigned long long)frame, k->name,
+                (unsigned long long)s->obj, st, q[0], q[1], q[2]);
+        }
         // first wake from idle; again from its rest state (a while after the last wake: it went there itself)
         bool again = s->woken && k->rest != 0xff && st == k->rest && frame - s->woken_at > 180;
         if (s->woken ? !again : st != k->idle) continue;
         const float *p = (const float *)(uintptr_t)(s->obj + k->pos);
         float dx = p[0] - lp[0], dz = p[2] - lp[2];
-        if (dx * dx + dz * dz > WAKE_DIST * WAKE_DIST) continue;
+        if (!k->at_once && dx * dx + dz * dz > WAKE_DIST * WAKE_DIST) continue;
         s->woken = 1;
         s->woken_at = frame;
         uint64_t saved[31], sp = c->sp;

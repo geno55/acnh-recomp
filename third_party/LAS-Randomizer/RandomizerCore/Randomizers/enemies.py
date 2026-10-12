@@ -22,10 +22,10 @@ FIELD_MINIBOSSES = {
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 # Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
 # (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
-# Mini-bosses that roll around their spot (Avalaunch: spokes out from it and back) only where it isn't cramped: at most
+# Mini-bosses that need room (Avalaunch rolls spokes out from its spot; Master Stalfos is big and solid) only where it isn't cramped: at most
 # NEEDS_ROOM_BLOCKED of the 5 x 5 tiles around it blocked (the screen's grid, original room; bushes and trees count;
 # beyond the screen's edge isn't checked). Typical spots have 5 - 8, cramped ones 10 - 17.
-NEEDS_ROOM = {0x60}
+NEEDS_ROOM = {0x60, 0x59}  # (Avalaunch, Master Stalfos)
 NEEDS_ROOM_BLOCKED = 8
 
 

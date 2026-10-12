@@ -138,6 +138,37 @@ def _gohma_arrived(gen, a):
             f'  /* {a:#x}: ldr q0, [x19, #0x1600] (Gohma: no track end on the Field) */')
 
 
+# Master Stalfos' body collision (CharaBodyCollision, main+0x1841c0 from his constructor) blocks Link - in his arena,
+# fine; on the Field Link couldn't damage-boost past him as past the other mini-bosses. Its flag (x6 -> sp+0x328) off
+# there (seeds, level Field).
+MSTALFOS_BODY_SITE = 0x70004b47c8  # mov w8, #1
+
+
+def _mstalfos_body(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x320003e8, hex(w)  # mov w8, #1
+    return ('{ extern int rt_gohma_free(void); c->x[8] = rt_gohma_free() ? 0 : 1; }'
+            f'  /* {a:#x}: mov w8, #1 (Master Stalfos body collision flag: off on the Field) */')
+
+
+PATCHES[MSTALFOS_BODY_SITE] = _mstalfos_body
+
+# Master Stalfos' jump (state 4 exec) sets its vertical speed to 6 * sin(phase) - height: an arc from his arena's floor
+# (height 0). On the Field the ground is higher - he dropped through it. There the arc starts from his takeoff height
+# (his movement component [+0x1160] + 0x28c, stored as the jump starts); in the arena that is 0 anyway.
+MSTALFOS_JUMP_SITE = 0x70004bde08  # fsub s0, s0, s1
+
+
+def _mstalfos_jump(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1e213800, hex(w)  # fsub s0, s0, s1
+    return ('{ extern int rt_gohma_free(void); float a_, b_; memcpy(&a_, &c->v[0], 4); memcpy(&b_, &c->v[1], 4); '
+            'if (rt_gohma_free()) a_ += *(const float *)(uintptr_t)(LD64(c->x[19] + 0x1160) + 0x28c); '
+            '__uint128_t r_ = 0; a_ -= b_; memcpy(&r_, &a_, 4); c->v[0] = r_; }'
+            f'  /* {a:#x}: fsub s0, s0, s1 (Master Stalfos jump: arc from his takeoff height on the Field) */')
+
+
+PATCHES[MSTALFOS_JUMP_SITE] = _mstalfos_jump
 for _a in GOHMA_HEADING_SITES:
     PATCHES[_a] = _gohma_heading
 PATCHES[GOHMA_ARRIVED_SITE] = _gohma_arrived
