@@ -146,7 +146,8 @@ void plat_exec(char *const argv[]) {
 
 // ---- diagnostics
 // Exported symbols only (the Makefile links with -rdynamic); frames in the generated code are left to the caller,
-// which maps them to guest functions (runtime/dispatch.c).
+// which maps them to guest functions (runtime/dispatch.c). Static runtime functions come out as the nearest guest
+// function, so backtrace lines also give the offset in the executable (addr2line -fe lasrecomp <offset>).
 const char *plat_symbol(uint64_t pc, uint64_t *offset) {
     Dl_info di = {0};
     if (!dladdr((void *)(uintptr_t)pc, &di) || !di.dli_sname) return NULL;
@@ -168,16 +169,21 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch
 void plat_print_backtrace(void) {
     void *bt[64];
     int n = backtrace(bt, 64);
+    Dl_info self = {0};
+    dladdr((void *)plat_print_backtrace, &self);
     for (int i = 0; i < n; i++) {
         uint64_t pc = (uint64_t)(uintptr_t)bt[i], off = 0;
         Dl_info di = {0};
+        if (!dladdr(bt[i], &di)) di.dli_fname = NULL;
+        bool ours = di.dli_fbase && di.dli_fbase == self.dli_fbase;
         const char *s = plat_symbol(pc, &off);
-        if (!s) s = rt_host_fn_name(pc, &off);
-        if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
-        else if (dladdr(bt[i], &di) && di.dli_fname)
-            fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, strrchr(di.dli_fname, '/') ?
-                    strrchr(di.dli_fname, '/') + 1 : di.dli_fname, (unsigned long long)(pc - (uint64_t)(uintptr_t)di.dli_fbase));
-        else fprintf(stderr, "  #%-2d %016llx\n", i, (unsigned long long)pc);
+        if (!s && ours) s = rt_host_fn_name(pc, &off);
+        const char *mod = di.dli_fname ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
+        uint64_t moff = pc - (uint64_t)(uintptr_t)di.dli_fbase;
+        if (s && ours) fprintf(stderr, "  #%-2d %016llx %s+%llx (lasrecomp+%llx)\n", i, (unsigned long long)pc, s,
+                               (unsigned long long)off, (unsigned long long)moff);
+        else if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s)\n", i, (unsigned long long)pc, s, (unsigned long long)off, mod);
+        else fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, mod, (unsigned long long)moff);
     }
 }
 
