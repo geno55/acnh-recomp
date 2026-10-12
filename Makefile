@@ -1,12 +1,30 @@
 # LAS Recomp build
 # macOS: Homebrew clang/SDL3/FFmpeg, Metal renderer.
 # Windows: MSYS2 UCRT64 shell (see docs/BUILD-windows.md), clang + Vulkan renderer.
+# Linux: clang + Vulkan renderer, x86-64 or aarch64 (see docs/linux.md).
 UNAME := $(shell uname -s)
 comma := ,
 ifneq ($(filter MINGW% MSYS% CYGWIN% Windows_NT,$(UNAME) $(OS)),)
 PLATFORM := windows
+else ifeq ($(UNAME),Linux)
+PLATFORM := linux
 else
 PLATFORM := macos
+endif
+
+# Linux: ARCH (x86_64 / aarch64, default this machine's) picks the target, separately from PLATFORM. The generated code
+# differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
+# cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
+GEN      ?= generated
+ifeq ($(PLATFORM),linux)
+HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
+ARCH     ?= $(HOSTARCH)
+ifneq ($(ARCH),$(HOSTARCH))
+CROSS    := --target=$(ARCH)-linux-gnu $(if $(SYSROOT),--sysroot=$(SYSROOT))
+GEN      := generated-$(ARCH)
+B        ?= build/$(ARCH)
+endif
+GENSIMD  := --simd $(if $(filter aarch64,$(ARCH)),asm,c)
 endif
 
 # B: build dir. MACOS_MIN: oldest macOS to run on (default: this one). DEPS: prefix with SDL3 / FFmpeg instead of
@@ -15,17 +33,17 @@ B         ?= build
 MACOS_MIN ?=
 DEPS      ?=
 MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
-CC       := clang $(MINFLAG)
-CXX      := clang++ $(MINFLAG)
+CC       := clang $(MINFLAG) $(CROSS)
+CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -Iruntime
 
-GEN_SRC  := $(wildcard generated/main/*.c) $(wildcard generated/sdk/*.c)
+GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c)
 # no generated code yet (make gen): link a stub, the start screen works
 ifeq ($(strip $(GEN_SRC)),)
 GEN_SRC  := tools/nogen_stub.c
 endif
-GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst generated/%,%,$(GEN_SRC)))
+GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC)))
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
 RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
@@ -46,6 +64,22 @@ BACKEND_SRC := $(wildcard runtime/nvn/*.m)
 BACKEND_OBJ := $(patsubst runtime/%.m,$(B)/rt/%.o,$(BACKEND_SRC))
 IMGUI_OBJ += $(B)/imgui/imgui_impl_metal.o
 UIFLAGS  := -fobjc-arc
+else ifeq ($(PLATFORM),linux)
+EXE      := $(B)/lasrecomp
+DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
+ifeq ($(ARCH),x86_64)
+GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
+endif
+GENFLAGS += $(GENARCH)
+OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
+SHADERC  ?= -lshaderc  # (Debian / Ubuntu's libshaderc.so; a shaderc built from source: -lshaderc_shared)
+# -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+            -lvulkan $(SHADERC) -lpthread -ldl -lm
+BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
+BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
+IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
+UIFLAGS  := -x c++  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
 else
 EXE      := $(B)/lasrecomp.exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
@@ -69,7 +103,7 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 
 all: $(EXE)
 
-$(B)/obj/%.o: generated/%.c runtime/cpu.h
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
@@ -120,12 +154,12 @@ $(B)/imgui/imgui_impl_metal.o: $(IMGUI)/backends/imgui_impl_metal.mm
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -fobjc-arc -c $< -o $@
 
-# Python: tools/venv (macOS: bin/python, Windows: Scripts/python.exe)
+# Python: tools/venv (macOS, Linux: bin/python, Windows: Scripts/python.exe)
 PY := $(firstword $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
 gen:
-	cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../generated/sdk --hle ../runtime/hle/hle_symbols.txt
-	cd tools && ../$(PY) gen.py main ../extracted/exefs/main 0x7000000000 ../generated/main
+	cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD)
+	cd tools && ../$(PY) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD)
 
 gen-objs: $(GEN_OBJ)
 
