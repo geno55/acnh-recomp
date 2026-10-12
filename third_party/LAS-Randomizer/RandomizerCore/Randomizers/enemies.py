@@ -22,6 +22,29 @@ FIELD_MINIBOSSES = {
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 # Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
 # (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
+# Mini-bosses that roll around their spot (Avalaunch: spokes out from it and back) only where it isn't cramped: at most
+# NEEDS_ROOM_BLOCKED of the 5 x 5 tiles around it blocked (the screen's grid, original room; bushes and trees count;
+# beyond the screen's edge isn't checked). Typical spots have 5 - 8, cramped ones 10 - 17.
+NEEDS_ROOM = {0x60}
+NEEDS_ROOM_BLOCKED = 8
+
+
+def roomy(room, act, most_blocked):
+    import math
+    try:
+        i, tiles = room.grid.info, room.grid.tilesdata
+    except AttributeError:
+        return True
+    cx, cz = math.floor((act.posX - i.x_coord) / i.tile_size), math.floor((act.posZ - i.z_coord) / i.tile_size)
+    blocked = 0
+    for z in range(cz - 2, cz + 3):
+        for x in range(cx - 2, cx + 3):
+            if 0 <= x < i.room_width and 0 <= z < i.room_height:
+                t = tiles[z * i.room_width + x]
+                blocked += bool(t.flags1['containscollision'] or t.flags1['deepwaterlava'] or t.flags3['iswaterlava'])
+    return blocked <= most_blocked
+
+
 MINIBOSS_CHANCE = 0.08
 import os as _os
 if _os.environ.get('LARECOMP_ALL_MINIBOSSES'):  # (test: every room with a randomized land enemy gets one)
@@ -194,11 +217,14 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
             
             mini = None
             fits = sorted(FIELD_MINIBOSSES) if enemy_type == 'land' else sorted(ANY_TERRAIN_MINIBOSSES)
+            if _ONLY:
+                fits = [int(_ONLY, 16)]
+            if folder == 'Field' and enemy_settings.get('arena') and any(m in NEEDS_ROOM for m in fits) \
+                    and not roomy(enemy_settings['arena'](file[:-4]), act, NEEDS_ROOM_BLOCKED):
+                fits = [m for m in fits if m not in NEEDS_ROOM]
             if (enemy_settings.get('minibosses') and fits and folder == 'Field'
                     and (_ONLY or (not room_has_miniboss and random.random() < MINIBOSS_CHANCE))):
                 mini = random.choice(fits)
-                if _ONLY:
-                    mini = int(_ONLY, 16)
                 room_has_miniboss = True
                 new_enemy = mini
 
