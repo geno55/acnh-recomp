@@ -23,6 +23,8 @@ FIELD_MINIBOSSES = {
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 # Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
 # (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
+# Out (user 2026-10-12): Grim Creeper 0x5D - placed on the Field he is never created (his class is built once at level
+# load; the placements only get a stub), and his fight is his room's script (bats, doors, AreaEventBox).
 # Mini-bosses that need room (Avalaunch rolls spokes out from its spot; Master Stalfos is big; Moblin Chief charges) only
 # where it isn't cramped: at most NEEDS_ROOM[type] of the 5 x 5 tiles around it blocked (the screen's grid, original
 # room; bushes and trees count; near the screen's edge, the same share of the tiles on it). Typical spots have 5 - 8,

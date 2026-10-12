@@ -749,7 +749,7 @@ extern "C" void rando_tab_draw(float scale) {
     if (!g_opts.randomize_enemies) opt_disable_next();
     opt_toggle("Include mini-bosses", &g_opts.enemy_minibosses, false,
                "Some overworld enemies become mini-bosses: Hinox, Armos Knight, Dodongo Snake, Giant Buzz Blob, Smasher, "
-               "Avalaunch, Rolling Bones, Cue Ball, Blaino or Master Stalfos.");
+               "Avalaunch, Rolling Bones, Cue Ball, Blaino, Master Stalfos or Moblin Chief.");
     opt_indent(-1);
     opt_toggle("Boss souls", &g_opts.boss_souls, false,
                "Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the boss "
