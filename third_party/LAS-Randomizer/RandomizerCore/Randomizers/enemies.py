@@ -18,15 +18,16 @@ FIELD_MINIBOSSES = {
     0x5F: [],              # Blaino (his knock-out punch: Link falls back down - runtime)
     0x58: [1, 0],          # Cue Ball (circles a rail fitted to the room)
     0x59: [],              # Master Stalfos (starts by himself)
+    0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
 }
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 # Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
 # (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
-# Mini-bosses that need room (Avalaunch rolls spokes out from its spot; Master Stalfos is big and solid) only where it isn't cramped: at most
-# NEEDS_ROOM_BLOCKED of the 5 x 5 tiles around it blocked (the screen's grid, original room; bushes and trees count;
-# beyond the screen's edge isn't checked). Typical spots have 5 - 8, cramped ones 10 - 17.
-NEEDS_ROOM = {0x60, 0x59}  # (Avalaunch, Master Stalfos)
-NEEDS_ROOM_BLOCKED = 8
+# Mini-bosses that need room (Avalaunch rolls spokes out from its spot; Master Stalfos is big; Moblin Chief charges) only
+# where it isn't cramped: at most NEEDS_ROOM[type] of the 5 x 5 tiles around it blocked (the screen's grid, original
+# room; bushes and trees count; near the screen's edge, the same share of the tiles on it). Typical spots have 5 - 8,
+# cramped ones 10 - 17.
+NEEDS_ROOM = {0x60: 8, 0x59: 8, 0x52: 6}  # (most blocked of 25: Avalaunch, Master Stalfos, Moblin Chief - he charges)
 
 
 def roomy(room, act, most_blocked):
@@ -36,13 +37,14 @@ def roomy(room, act, most_blocked):
     except AttributeError:
         return True
     cx, cz = math.floor((act.posX - i.x_coord) / i.tile_size), math.floor((act.posZ - i.z_coord) / i.tile_size)
-    blocked = 0
+    blocked = seen = 0
     for z in range(cz - 2, cz + 3):
         for x in range(cx - 2, cx + 3):
             if 0 <= x < i.room_width and 0 <= z < i.room_height:
                 t = tiles[z * i.room_width + x]
+                seen += 1
                 blocked += bool(t.flags1['containscollision'] or t.flags1['deepwaterlava'] or t.flags3['iswaterlava'])
-    return blocked <= most_blocked
+    return blocked * 25 <= most_blocked * seen  # (near the screen's edge: the same share of the tiles on it)
 
 
 MINIBOSS_CHANCE = 0.08
@@ -219,9 +221,9 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
             fits = sorted(FIELD_MINIBOSSES) if enemy_type == 'land' else sorted(ANY_TERRAIN_MINIBOSSES)
             if _ONLY:
                 fits = [int(_ONLY, 16)]
-            if folder == 'Field' and enemy_settings.get('arena') and any(m in NEEDS_ROOM for m in fits) \
-                    and not roomy(enemy_settings['arena'](file[:-4]), act, NEEDS_ROOM_BLOCKED):
-                fits = [m for m in fits if m not in NEEDS_ROOM]
+            if folder == 'Field' and enemy_settings.get('arena') and any(m in NEEDS_ROOM for m in fits):
+                room = enemy_settings['arena'](file[:-4])
+                fits = [m for m in fits if m not in NEEDS_ROOM or roomy(room, act, NEEDS_ROOM[m])]
             if (enemy_settings.get('minibosses') and fits and folder == 'Field'
                     and (_ONLY or (not room_has_miniboss and random.random() < MINIBOSS_CHANCE))):
                 mini = random.choice(fits)

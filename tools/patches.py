@@ -169,6 +169,20 @@ def _mstalfos_jump(gen, a):
 
 
 PATCHES[MSTALFOS_JUMP_SITE] = _mstalfos_jump
+
+# Moblin Chief deletes himself in his init (main+0x1f8af0) unless a story bit is set (player status +0xac bit 7 - his
+# hideout's time); on the Field (seeds) that check is skipped. The defeated check before it stays.
+MCHIEF_STORY_SITE = 0x70001f8b30  # tbnz w8, #7, 0x70001f8b58
+
+
+def _mchief_story(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x37380148, hex(w)  # tbnz w8, #7, +0x28
+    return ('{ extern int rt_gohma_free(void); if (rt_gohma_free() || ((c->x[8] >> 7) & 1)) goto L_70001f8b58; }'
+            f'  /* {a:#x}: tbnz w8, #7 (Moblin Chief: no story check on the Field) */')
+
+
+PATCHES[MCHIEF_STORY_SITE] = _mchief_story
 for _a in GOHMA_HEADING_SITES:
     PATCHES[_a] = _gohma_heading
 PATCHES[GOHMA_ARRIVED_SITE] = _gohma_arrived
