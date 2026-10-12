@@ -261,8 +261,11 @@ appimage:
 appimages:
 	tools/linux/appimage.sh x86_64
 	tools/linux/appimage.sh aarch64
+# release check of the x86-64 AppImage: start screen, into the game, warps to the overworld and every dungeon
+smoketest:
+	tools/linux/smoketest.sh
 
-.PHONY: dmg all gen gen-objs runtime-objs hactool deps deps-windows app dist rando-helper appimage appimages
+.PHONY: dmg all gen gen-objs runtime-objs hactool deps deps-windows app dist rando-helper appimage appimages smoketest
 
 build/test_shaders: tools/test_shaders.m runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
 	clang -O1 -fobjc-arc -framework Metal -framework Foundation -o $@ tools/test_shaders.m runtime/nvn/maxwell/translate.c
