@@ -100,6 +100,48 @@ def _warp_request(gen, a):
 for _a in WARP_REQUEST_SITES:
     PATCHES[_a] = _warp_request
 
+# Blaino's knock-out: Link flies up and a countdown (main+0xd97df0, +0xb8) starts MightPunchCrashOut - fade, then a
+# restart warp to his ring's start. On the Field there's no ring: no event (runtime/hle/miniboss.c), Link falls back.
+CRASHOUT_SITE = 0x7000d97e2c
+
+
+def _crashout(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb900b81f, hex(w)  # str wzr, [x0, #0xb8]
+    return ('{ extern int rt_crashout_skip(void); ST32(c->x[0] + 0xb8, 0); if (rt_crashout_skip()) goto L_7000d97ea4; }'
+            f'  /* {a:#x}: str wzr, [x0, #0xb8] (Blaino knock-out: no crash-out event on the Field) */')
+
+
+PATCHES[CRASHOUT_SITE] = _crashout
+
+# Gohma on the Field (seeds): its moves walk / charge along a track - a heading of +-90 degrees (+0x15ec / +0x15f0,
+# the shared movement controller at +0x15c0 turns to it and the mover moves it, walls and all) toward a track end,
+# snapping onto the end when there (main+0x399550). The Field has no track: the heading points at Link and there is
+# no end - each move runs until its own timer (runtime/hle/miniboss.c).
+GOHMA_HEADING_SITES = (0x70003996e4, 0x700039a2c4)  # str w8, [x19, #0x15ec] (then the same to +0x15f0)
+GOHMA_ARRIVED_SITE = 0x700039957c  # ldr q0, [x19, #0x1600] (the track end, against Gohma's spot)
+
+
+def _gohma_heading(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb915ee68, hex(w)  # str w8, [x19, #0x15ec]
+    return ('{ extern uint32_t rt_gohma_heading(uint64_t, uint32_t); '
+            'c->x[8] = rt_gohma_heading(c->x[19], (uint32_t)c->x[8]); ST32(c->x[19] + 0x15ec, (uint32_t)c->x[8]); }'
+            f'  /* {a:#x}: str w8, [x19, #0x15ec] (Gohma: heading at Link on the Field) */')
+
+
+def _gohma_arrived(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x3dc58260, hex(w)  # ldr q0, [x19, #0x1600]
+    return ('{ extern int rt_gohma_free(void); if (rt_gohma_free()) { c->x[0] = 0; goto L_70003995c0; } '
+            'memcpy(&c->v[0], (const void *)(uintptr_t)(c->x[19] + 0x1600), 16); }'
+            f'  /* {a:#x}: ldr q0, [x19, #0x1600] (Gohma: no track end on the Field) */')
+
+
+for _a in GOHMA_HEADING_SITES:
+    PATCHES[_a] = _gohma_heading
+PATCHES[GOHMA_ARRIVED_SITE] = _gohma_arrived
+
 
 # Generated dungeons (runtime/hle/chamber.c): every level jump goes through the request processor main+0x81ba80
 # (x0 = request); its prologue reports the request so jumps into Tail Cave can be redirected.

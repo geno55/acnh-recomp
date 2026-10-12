@@ -16,23 +16,24 @@ FIELD_MINIBOSSES = {
     0x60: [],              # Avalaunch
     0x51: ['RolaStart'],   # Rolling Bones (with its spike bar)
     0x5A: [],              # Gohma
-    0x5F: [],              # Blaino (his knock-out punch sends Link back to the screen's start)
+    0x5F: [],              # Blaino (his knock-out punch: Link falls back down - runtime)
     0x58: [1, 0],          # Cue Ball (circles a rail fitted to the room)
     0x59: [],              # Master Stalfos (starts by himself)
 }
+ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 MINIBOSS_CHANCE = 0.08
+import os as _os
+if _os.environ.get('LARECOMP_ALL_MINIBOSSES'):  # (test: every room with a randomized land enemy gets one)
+    MINIBOSS_CHANCE = 1.0
+_ONLY = _os.environ.get('LARECOMP_ONLY_MINIBOSS')  # (test: hex type - every randomized Field enemy becomes it, any terrain)
 # Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
 # copied from it next to the mini-boss (same offsets, linked both ways as there): Smasher's iron ball (without it the
-# game crashes spawning him), Rolling Bones' spike bar, and the room's AreaEventBox. The runtime wakes them
+# game crashes spawning him), Rolling Bones' spike bar, Cue Ball's rail. The runtime wakes them
 # (runtime/hle/miniboss.c). Needs enemy_settings['arena'] (room name -> leb.Room of the original game).
-MINIBOSS_KITS = {
-    0x5C: ('Lv06FaceShrine_05F', (0x1E4, 0x191)),
-    0x60: ('Lv10ClothesDungeon_06E', (0x191,)),
-    0x51: ('Lv01TailCave_06G', (0x11A, 0x191)),
-    0x5A: ('Lv05CatfishsMaw_05D', (0x191,)),
-    0x5F: ('Lv08TurtleRock_03H', (0x191,)),
-    0x58: ('Lv04AnglersTunnel_03E', (0x191,)),
-    0x59: ('Lv05CatfishsMaw_05F', (0x191,)),
+MINIBOSS_KITS = {  # (no AreaEventBox: it plays the arena intro - camera, music - which the overworld doesn't want)
+    0x5C: ('Lv06FaceShrine_05F', (0x1E4,)),  # Smasher's iron ball
+    0x51: ('Lv01TailCave_06G', (0x11A,)),    # Rolling Bones' spike bar
+    0x58: ('Lv04AnglersTunnel_03E', ()),     # Cue Ball (its rail)
 }
 
 
@@ -183,9 +184,12 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 restr.remove(act.type)
             
             mini = None
-            if (enemy_settings.get('minibosses') and FIELD_MINIBOSSES and folder == 'Field' and enemy_type == 'land'
-                    and not room_has_miniboss and random.random() < MINIBOSS_CHANCE):
-                mini = random.choice(sorted(FIELD_MINIBOSSES))
+            fits = sorted(FIELD_MINIBOSSES) if enemy_type == 'land' else sorted(ANY_TERRAIN_MINIBOSSES)
+            if (enemy_settings.get('minibosses') and fits and folder == 'Field'
+                    and (_ONLY or (not room_has_miniboss and random.random() < MINIBOSS_CHANCE))):
+                mini = random.choice(fits)
+                if _ONLY:
+                    mini = int(_ONLY, 16)
                 room_has_miniboss = True
                 new_enemy = mini
 

@@ -29,14 +29,14 @@ static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b86e58, MAIN_BASE + 0x4301d0, 0x1110, 0x260, 0, 1, "Smasher", 0xff},       // 0x5c (+ iron ball)
     {MAIN_BASE + 0x1badc60, MAIN_BASE + 0x6d4f40, 0xff0, 0x260, 0, 1, "Avalaunch", 0xff},      // 0x60
     {MAIN_BASE + 0x1ba32c8, MAIN_BASE + 0x61f250, 0xff0, 0x260, 0, 1, "Rolling Bones", 0xff},  // 0x51 (+ spike bar)
-    {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a
+    {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a (heads for Link: GOHMA_*)
     {MAIN_BASE + 0x1b91408, MAIN_BASE + 0x4ec6c0, 0x11a0, 0x260, 10, 1, "Blaino", 5},          // 0x5f (5: after a knock-out)
     {MAIN_BASE + 0x1b82f70, MAIN_BASE + 0x3e59a0, 0xff0, 0x260, 0, 3, "Cue Ball", 0xff},       // 0x58 (+ a rail fitted)
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
 
-typedef struct { uint64_t obj, first, last, woken_at; int kind, woken; } Seen;
+typedef struct { uint64_t obj, first, last, woken_at; int kind, woken; float px, pz; int stuck; uint64_t flip_at; } Seen;
 static Seen g_seen[32];
 RT_ON_RESET(miniboss_reset) { memset(g_seen, 0, sizeof g_seen); }
 extern uint64_t renderer_present_count(void);
@@ -136,7 +136,7 @@ void rt_mb_seen(uint64_t o) {
         if (g_seen[i].obj == o) { g_seen[i].last = f; return; }
         if (free_i < 0 && (!g_seen[i].obj || f - g_seen[i].last > 120)) free_i = i;
     }
-    if (free_i >= 0) g_seen[free_i] = (Seen){o, f, f, 0, k, 0};
+    if (free_i >= 0) g_seen[free_i] = (Seen){o, f, f, 0, k, 0, 0, 0, 0, 0};
 }
 
 // LARECOMP_MB_FORCE=<frame>:<sm offset hex>:<state>[:<change fn main offset hex>] (RE, with LARECOMP_MB_SCAN_NAME):
@@ -181,18 +181,143 @@ static void force_tick(Cpu *c, uint64_t frame) {
         (unsigned long long)sm, state);
 }
 
+// Gohma on the Field (tools/patches.py GOHMA_*): its moves head for Link (angle units: 2^31 = pi, 0 = +z) - or, with
+// a wall that way, the nearest open direction - and have no track end. Its arena's walls are the track ends; here the
+// screen's walls (rando/<seed>/roam.tsv, tools/rando/roam.py) end a move the way its own timer does (gohma_walls).
+// g_link: Link's spot (miniboss_tick).
+static float g_link[3];
+static bool g_have_link;
+
+typedef struct { float x0, z0, ts; int w, h; char cells[96]; } WallScreen;
+static WallScreen *g_walls;
+static int g_nwalls = -1;
+RT_ON_RESET(walls_reset) { free(g_walls), g_walls = NULL, g_nwalls = -1; }
+
+static void walls_load(void) {
+    extern const char *rando_seed_dir(void);
+    g_nwalls = 0;
+    const char *dir = rando_seed_dir();
+    char path[1024];
+    if (!dir) return;
+    snprintf(path, sizeof path, "%s/roam.tsv", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    g_walls = calloc(512, sizeof *g_walls);
+    char cells[128];
+    WallScreen w;
+    while (g_nwalls < 512 && fscanf(f, "%f\t%f\t%f\t%d\t%d\t%127s", &w.x0, &w.z0, &w.ts, &w.w, &w.h, cells) == 6)
+        if (w.w * w.h <= (int)sizeof w.cells && (int)strlen(cells) == w.w * w.h)
+            memcpy(w.cells, cells, (size_t)(w.w * w.h)), g_walls[g_nwalls++] = w;
+    fclose(f);
+}
+
+#define GOHMA_BODY 1.0f  // (half its width)
+static bool wall_at(float x, float z) {  // (Gohma's body around (x, z) touches a wall or the island's edge)
+    if (g_nwalls < 0) walls_load();
+    if (!g_nwalls) return false;
+    for (int k = 0; k < 5; k++) {
+        float px = x + (k == 1 ? GOHMA_BODY : k == 2 ? -GOHMA_BODY : 0), pz = z + (k == 3 ? GOHMA_BODY : k == 4 ? -GOHMA_BODY : 0);
+        bool open = false;
+        for (int i = 0; i < g_nwalls && !open; i++) {
+            const WallScreen *r = &g_walls[i];
+            int cx = (int)floorf((px - r->x0) / r->ts), cz = (int)floorf((pz - r->z0) / r->ts);
+            if (cx >= 0 && cx < r->w && cz >= 0 && cz < r->h) open = r->cells[cz * r->w + cx] == '.';
+        }
+        if (!open) return true;
+    }
+    return false;
+}
+int rt_gohma_free(void) {
+    extern const char *rando_seed_dir(void);
+    uint64_t ps = LD64(PLAYER_STATUS_PTR);
+    return rando_seed_dir() && ps && !strcmp((const char *)(uintptr_t)ps, "Field");
+}
+
+uint32_t rt_gohma_heading(uint64_t gohma, uint32_t track) {
+    uint64_t comp = LD64(gohma + 0x80);
+    if (!rt_gohma_free() || !g_have_link || !comp) return track;
+    const float *p = (const float *)(uintptr_t)(comp + 0x80);
+    float dx = g_link[0] - p[0], dz = g_link[2] - p[2];
+    if (dx * dx + dz * dz < 0.01f) return track;
+    float a = atan2f(dx, dz);
+    for (int t = 0; t < 8; t++) {  // (toward Link, else the nearest open way: 45 degree steps either side)
+        float b = a + (t + 1) / 2 * 0.7853982f * (t % 2 ? 1 : -1);
+        if (!wall_at(p[0] + sinf(b) * 1.5f, p[2] + cosf(b) * 1.5f)) { a = b; break; }
+    }
+    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Gohma at %.1f %.1f heads %.0f deg (Link %.1f %.1f)\n", p[0], p[2], a * 57.29578f, g_link[0], g_link[2]);
+    return (uint32_t)(int32_t)(a * (2147483648.0f / 3.14159265f));
+}
+
+// Each frame: a wall just ahead on Gohma's heading ends its move (its timer +0x15a4 reaches its limit +0x15a6, so its
+// own next state follows), and this frame's step is dropped so it doesn't push in.
+static void gohma_walls(uint64_t gohma) {
+    uint64_t comp = LD64(gohma + 0x80);
+    if (!comp) return;
+    const float *p = (const float *)(uintptr_t)(comp + 0x80);
+    float speed = *(float *)(uintptr_t)(gohma + 0x15e4);
+    if (speed <= 0) return;
+    float a = (float)*(int32_t *)(uintptr_t)(gohma + 0x15ec) * (3.14159265f / 2147483648.0f);
+    float ahead = speed + 0.1f;
+    if (!wall_at(p[0] + sinf(a) * ahead, p[2] + cosf(a) * ahead)) return;
+    *(float *)(uintptr_t)(gohma + 0x15e4) = 0;
+    *(int16_t *)(uintptr_t)(gohma + 0x15a4) = *(int16_t *)(uintptr_t)(gohma + 0x15a6);
+    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Gohma at %.1f %.1f: wall ahead, move ends\n", p[0], p[2]);
+}
+
+// Cue Ball on the Field rolls the loop of four corners fitted to its screen (enemies.py fit_rail): state 2 rolls to
+// its first corner, state 7 to the next, state 8 turns there - the next corner one step along its direction (+0x1731: 0 forward, else
+// back; corners at +0x1410, the one it heads for +0x1760). Here something in its way (a bush) would hold it forever:
+// stuck a moment, or now and then at random, it turns back - its own turn with its direction flipped.
+static void cueball_tick(Cpu *c, Seen *s, const Kind *k, uint64_t frame) {
+    uint64_t comp = LD64(s->obj + 0x80);
+    if (!comp) return;
+    const float *p = (const float *)(uintptr_t)(comp + 0x80);
+    uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
+    float dx = p[0] - s->px, dz = p[2] - s->pz;
+    s->px = p[0], s->pz = p[2];
+    if (!s->flip_at) s->flip_at = frame + 180 + (uint32_t)(s->obj >> 4) % 360;
+    if (ENV("LARECOMP_LOG_CUE") && frame % 30 == 0)
+        LOG("[cue] f%llu %llx st %u at %.2f %.2f moved %.3f dir %u corner %u\n", (unsigned long long)frame,
+            (unsigned long long)s->obj, st, p[0], p[2], sqrtf(dx * dx + dz * dz), *(uint8_t *)(uintptr_t)(s->obj + 0x1731),
+            *(uint8_t *)(uintptr_t)(s->obj + 0x1760));
+    if (st != 7 && st != 2) { s->stuck = 0; return; }  // (2: rolling to its first corner, 7: to the next)
+    s->stuck = dx * dx + dz * dz < 0.0004f ? s->stuck + 1 : 0;
+    bool stuck = s->stuck >= 20, bored = st == 7 && frame >= s->flip_at;
+    if (!stuck && !bored) return;
+    s->stuck = 0;
+    s->flip_at = frame + 180 + (uint32_t)(frame * 2654435761u >> 8) % 360;  // (3 - 9 s)
+    *(uint8_t *)(uintptr_t)(s->obj + 0x1731) ^= 1;
+    uint64_t saved[31], sp = c->sp;
+    memcpy(saved, c->x, sizeof saved);
+    c->x[0] = s->obj + k->sm;
+    c->x[1] = 8;
+    guest_call(c, k->chg);
+    memcpy(c->x, saved, sizeof saved);
+    c->sp = sp;
+    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Cue Ball at %.1f %.1f turns back (%s)\n", p[0], p[2], stuck ? "stuck" : "random");
+}
+
+// Blaino's knock-out (tools/patches.py CRASHOUT_SITE): on the Field Link just falls back down - no fade, no restart
+// warp (its start only exists in his ring).
+int rt_crashout_skip(void) { return rt_gohma_free(); }
+
 void miniboss_tick(Cpu *c, uint64_t frame) {
     if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_tick(frame);
     force_tick(c, frame);
+    extern const char *rando_seed_dir(void);
+    if (!rando_seed_dir()) return;  // (only seeds put mini-bosses on the Field)
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     if (!ps || strcmp((const char *)(uintptr_t)ps, "Field")) return;  // (dungeon arenas start their own)
     uint64_t pc = doorjump_player(frame);
     if (!pc) return;
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
+    memcpy(g_link, lp, sizeof g_link), g_have_link = true;
     for (int i = 0; i < 32; i++) {
         Seen *s = &g_seen[i];
         if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
         const Kind *k = &g_kinds[s->kind];
+        if (!strcmp(k->name, "Gohma")) gohma_walls(s->obj);
+        if (!strcmp(k->name, "Cue Ball")) cueball_tick(c, s, k, frame);
         uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
         // first wake from idle; again from its rest state (a while after the last wake: it went there itself)
         bool again = s->woken && k->rest != 0xff && st == k->rest && frame - s->woken_at > 180;
