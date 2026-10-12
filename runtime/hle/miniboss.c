@@ -268,33 +268,54 @@ static void gohma_walls(uint64_t gohma) {
 // its first corner, state 7 to the next, state 8 turns there - the next corner one step along its direction (+0x1731: 0 forward, else
 // back; corners at +0x1410, the one it heads for +0x1760). Here something in its way (a bush) would hold it forever:
 // stuck a moment, or now and then at random, it turns back - its own turn with its direction flipped.
+static void set_state(Cpu *c, const Seen *s, const Kind *k, int state) {  // (its own state change)
+    uint64_t saved[31], sp = c->sp;
+    memcpy(saved, c->x, sizeof saved);
+    c->x[0] = s->obj + k->sm;
+    c->x[1] = (uint64_t)state;
+    guest_call(c, k->chg);
+    memcpy(c->x, saved, sizeof saved);
+    c->sp = sp;
+}
+
+// Stuck a moment (moved under 0.02 a frame for 20 frames) or due for a change (every 3 - 9 s): tracked per mini-boss.
+static bool stuck_or_due(Seen *s, const float *p, bool moving, uint64_t frame) {
+    float dx = p[0] - s->px, dz = p[2] - s->pz;
+    s->px = p[0], s->pz = p[2];
+    if (!s->flip_at) s->flip_at = frame + 180 + (uint32_t)(s->obj >> 4) % 360;
+    if (!moving) { s->stuck = 0; return false; }
+    s->stuck = dx * dx + dz * dz < 0.0004f ? s->stuck + 1 : 0;
+    if (s->stuck < 20 && frame < s->flip_at) return false;
+    s->stuck = 0;
+    s->flip_at = frame + 180 + (uint32_t)(frame * 2654435761u >> 8) % 360;
+    return true;
+}
+
+// Avalaunch rolls out from its spawn point on a random spoke (state 2) and back to it (state 3). Now and then - or
+// stuck - it switches: out turns back home early, home heads out on a new spoke.
+static void avalaunch_tick(Cpu *c, Seen *s, const Kind *k, uint64_t frame) {
+    uint64_t comp = LD64(s->obj + 0x80);
+    if (!comp) return;
+    const float *p = (const float *)(uintptr_t)(comp + 0x80);
+    uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
+    if (!stuck_or_due(s, p, st == 2 || st == 3, frame)) return;
+    set_state(c, s, k, st == 2 ? 3 : 2);
+    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Avalaunch at %.1f %.1f switches (%s)\n", p[0], p[2], st == 2 ? "home" : "out");
+}
+
 static void cueball_tick(Cpu *c, Seen *s, const Kind *k, uint64_t frame) {
     uint64_t comp = LD64(s->obj + 0x80);
     if (!comp) return;
     const float *p = (const float *)(uintptr_t)(comp + 0x80);
     uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
-    float dx = p[0] - s->px, dz = p[2] - s->pz;
-    s->px = p[0], s->pz = p[2];
-    if (!s->flip_at) s->flip_at = frame + 180 + (uint32_t)(s->obj >> 4) % 360;
-    if (ENV("LARECOMP_LOG_CUE") && frame % 30 == 0)
-        LOG("[cue] f%llu %llx st %u at %.2f %.2f moved %.3f dir %u corner %u\n", (unsigned long long)frame,
-            (unsigned long long)s->obj, st, p[0], p[2], sqrtf(dx * dx + dz * dz), *(uint8_t *)(uintptr_t)(s->obj + 0x1731),
-            *(uint8_t *)(uintptr_t)(s->obj + 0x1760));
-    if (st != 7 && st != 2) { s->stuck = 0; return; }  // (2: rolling to its first corner, 7: to the next)
-    s->stuck = dx * dx + dz * dz < 0.0004f ? s->stuck + 1 : 0;
-    bool stuck = s->stuck >= 20, bored = st == 7 && frame >= s->flip_at;
-    if (!stuck && !bored) return;
-    s->stuck = 0;
-    s->flip_at = frame + 180 + (uint32_t)(frame * 2654435761u >> 8) % 360;  // (3 - 9 s)
+    // (2: rolling to its first corner - only stuck turns it there; 7: to the next corner)
+    bool due_ok = st == 7;
+    int was_stuck = s->stuck;
+    if (!stuck_or_due(s, p, st == 7 || st == 2, frame)) return;
+    if (!due_ok && was_stuck < 19) { s->flip_at = 0; return; }  // (state 2: a random turn waits for the loop)
     *(uint8_t *)(uintptr_t)(s->obj + 0x1731) ^= 1;
-    uint64_t saved[31], sp = c->sp;
-    memcpy(saved, c->x, sizeof saved);
-    c->x[0] = s->obj + k->sm;
-    c->x[1] = 8;
-    guest_call(c, k->chg);
-    memcpy(c->x, saved, sizeof saved);
-    c->sp = sp;
-    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Cue Ball at %.1f %.1f turns back (%s)\n", p[0], p[2], stuck ? "stuck" : "random");
+    set_state(c, s, k, 8);
+    if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Cue Ball at %.1f %.1f turns back\n", p[0], p[2]);
 }
 
 // Blaino's knock-out (tools/patches.py CRASHOUT_SITE): on the Field Link just falls back down - no fade, no restart
@@ -318,6 +339,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         const Kind *k = &g_kinds[s->kind];
         if (!strcmp(k->name, "Gohma")) gohma_walls(s->obj);
         if (!strcmp(k->name, "Cue Ball")) cueball_tick(c, s, k, frame);
+        if (!strcmp(k->name, "Avalaunch")) avalaunch_tick(c, s, k, frame);
         uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
         // first wake from idle; again from its rest state (a while after the last wake: it went there itself)
         bool again = s->woken && k->rest != 0xff && st == k->rest && frame - s->woken_at > 180;
