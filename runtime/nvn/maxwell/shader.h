@@ -41,6 +41,8 @@ typedef struct {
     uint8_t rt_kind[8];     // fragment outputs: 0 float, 1 signed int, 2 unsigned int
     bool depth_minus_one;   // NVN depth mode [-1,1]: remap clip z
     bool flip_y;            // lower-left window origin
+    bool flip_x;            // mirror the image left to right (mirror mode's scene composite). (In the padding
+                            // after flip_y: keys without it hash as before - shader caches stay valid.)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
 } ShaderKey;

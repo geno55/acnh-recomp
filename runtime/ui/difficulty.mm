@@ -69,6 +69,10 @@ extern "C" void difficulty_draw(float scale) {
                           "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power. Randomizer seeds "
                           "made with this option always have it on."))
         settings_save();
+    if (opt_toggle("Mirror mode", &g_settings.mirror_mode, false,
+                   "The world is mirrored left to right, and left and right swap on the stick and d-pad. The HUD and "
+                   "menus stay as they are."))
+        settings_save();
     opt_section("Difficulty");
     static const char *const names[] = {"Half", "Default", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
     static const float mult[] = {0.5f, 1, 2, 3, 4, 5, 6, 7, 8};

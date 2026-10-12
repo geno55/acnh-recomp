@@ -888,8 +888,9 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) { Prog *fp = (__bridge Prog *)prog_tab[slot].prog; return fp->failed ? nil : fp; }
-    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@", p->stages[0].code_addr, p->stages[1].code_addr,
-                     [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8]];
+    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@%s", p->stages[0].code_addr, p->stages[1].code_addr,
+                     [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8],
+                     vkey->flip_x ? "/mirror" : ""];  // (NSData's description elides the middle of the key's bytes)
     Prog *pr = cache[key];
     if (pr) {
         prog_tab[slot].key = h;
@@ -1616,6 +1617,23 @@ static void draw(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || !pr->ready) { stat_skipped++; return; }
+    {   // mirror mode (runtime/hle/mirror.c): the scene's composite into the window image is drawn mirrored - the
+        // unblended full-screen draw sampling an image the window's size (the window images also serve as scratch
+        // targets earlier in the frame: those draws sample smaller images; the HUD after it blends)
+        extern bool mirror_draw(bool composite);
+        bool composite = false;
+        if (st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0]) && !(st.color_state[0] & 1) &&
+            r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
+            st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height && pr->fi->ntex) {
+            NvnTexture *t0 = shader_texture_object(1, &pr->fi->tex[0]);
+            composite = t0 && t0->width == st.rt.color[0]->width && t0->height == st.rt.color[0]->height;
+        }
+        if (mirror_draw(composite)) {  // (the vertex flip mirrors a composite drawn with uvs, the fragment one a
+            vkey.flip_x = fkey.flip_x = true;  // composite reading pixel positions; get_program keys on vkey)
+            pr = get_program(st.program, &vkey, &fkey);
+            if (!pr || !pr->ready) { stat_skipped++; return; }
+        }
+    }
     {   // Interiors/dungeons draw a 16:9 backdrop quad over the still-rendered overworld: frames that
         // draw it are presented cropped to 16:9 (see backend_present).
         static uint64_t last_fs, last_hash;
@@ -1846,6 +1864,7 @@ static void draw(CmdRec *r, bool indexed) {
 
     // rasterizer
     uint8_t cull = st.poly[0];
+    if (vkey.flip_x) cull = 0;  // (mirror mode's composite: one full-screen quad, either winding)
     [enc setCullMode:cull == 1 ? MTLCullModeFront : cull == 2 ? MTLCullModeBack : MTLCullModeNone];
     bool ccw = st.poly[1] == 1;
     [enc setFrontFacingWinding:(ccw != vkey.flip_y) ? MTLWindingCounterClockwise : MTLWindingClockwise];
@@ -1954,9 +1973,10 @@ static void draw(CmdRec *r, bool indexed) {
     }
     apply_scissor();
     if (pr->fi->uses_rscale) {  // [0] = render target scale, [1 + i] = scale of texture i
-        float rs[65][4] = {{vp_sx, vp_sy, vp_ox, vp_oy}};
+        float rs[66][4] = {{vp_sx, vp_sy, vp_ox, vp_oy}};
         for (int i = 0; i < pr->fi->ntex && i < 64; i++) { rs[1 + i][0] = tex_sc[1][i][0]; rs[1 + i][1] = tex_sc[1][i][1]; }
-        [enc setFragmentBytes:rs length:(NSUInteger)(1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
+        if (fkey.flip_x) rs[65][0] = (float)st.rt.color[0]->width;  // (mirror mode: the composite's width, guest pixels)
+        [enc setFragmentBytes:rs length:(NSUInteger)(fkey.flip_x ? 66 : 1 + pr->fi->ntex) * 16 atIndex:RSCALE_BUFFER_INDEX];
     }
     if (st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && !(st.ubuf[0][2].addr & 3)) {  // cut bushes' items
         extern void pot_item_draw(float *m);                                                 // (runtime/hle/pot_glow.c)
