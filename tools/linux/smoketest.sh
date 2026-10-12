@@ -38,9 +38,30 @@ import sys
 from PIL import Image, ImageStat
 print(1 if sum(ImageStat.Stat(Image.open(sys.argv[1]).convert('L')).mean) < 12 else 0)" "$1"; }
 
+# The AppImage runtime starts the game as a child process: each run gets a process group of its own (setsid), so
+# stopping it stops the game too - nothing it uses (the seed) is deleted while it still runs.
+start_app() {  # VAR=value...: the AppImage in the data folder, with those settings
+    (cd "$O/root" && exec env "$@" setsid "$APP" </dev/null >/dev/null 2>&1) &
+    APP_PG=$!
+}
+app_alive() { ps -e -o pgid=,stat= | awk -v g="$APP_PG" '$1 == g && $2 !~ /^Z/ {f = 1} END {exit !f}'; }
+stop_app() {
+    kill -TERM -- -"$APP_PG" 2>/dev/null
+    for i in $(seq 1 20); do app_alive || break; sleep 0.5; done
+    app_alive && kill -KILL -- -"$APP_PG" 2>/dev/null
+    while app_alive; do sleep 0.5; done
+    wait "$APP_PG" 2>/dev/null
+}
+wait_app() {  # seconds: status 0 = the game ended by itself in time, else it is stopped
+    for i in $(seq 1 "$1"); do app_alive || { wait "$APP_PG" 2>/dev/null; return 0; }; sleep 1; done
+    stop_app
+    return 1
+}
+
 # ---- 1. start screen
 # (no terminal: the app logs to lasrecomp.log in its data folder, runtime/platform/linux.c)
-LARECOMP_LAUNCHER_SHOT=150 LARECOMP_SHOT_PATH="$O/shots/00_start_screen.png" timeout -s KILL 90 "$APP" </dev/null >/dev/null 2>&1
+start_app LARECOMP_LAUNCHER_SHOT=150 LARECOMP_SHOT_PATH="$O/shots/00_start_screen.png"
+wait_app 90
 mv "$O/root/lasrecomp.log" "$O/start_screen.log" 2>/dev/null
 if [ -f "$O/shots/00_start_screen.png" ] && [ "$(dark "$O/shots/00_start_screen.png")" = 0 ] &&
    ! grep -qE '\*\*\* |FATAL' "$O/start_screen.log"; then
@@ -78,9 +99,9 @@ for i in "${!WARPS[@]}"; do
 done
 IFS=: read -r _ lvl0 loc0 <<< "${WARPS[0]}"
 LAST=$((START + (${#WARPS[@]} - 1) * STEP + WAIT + 60))
-(cd "$O/root" && LARECOMP_NO_LAUNCHER=1 LARECOMP_INPUT="${IN%,}" LARECOMP_WARP_ON_LOAD="$lvl0:$loc0" \
-    LARECOMP_WARP_AT="${AT%,}" LARECOMP_SHOT_AT="${SHOTS%,}" LARECOMP_WINDOW_SHOT=$LAST LARECOMP_EXIT_AFTER_SHOT=1 \
-    timeout -s KILL 600 "$APP" </dev/null >/dev/null 2>&1)
+start_app LARECOMP_NO_LAUNCHER=1 LARECOMP_INPUT="${IN%,}" LARECOMP_WARP_ON_LOAD="$lvl0:$loc0" \
+    LARECOMP_WARP_AT="${AT%,}" LARECOMP_SHOT_AT="${SHOTS%,}" LARECOMP_WINDOW_SHOT=$LAST LARECOMP_EXIT_AFTER_SHOT=1
+wait_app 600
 rc=$?
 mv "$O/root/lasrecomp.log" "$O/game.log" 2>/dev/null
 L=$O/game.log
@@ -100,7 +121,7 @@ for i in "${!WARPS[@]}"; do
     else report PASS "$name ($lvl / $loc)"; fi
 done
 if grep -qE '\*\*\* |FATAL' "$L"; then report FAIL "crash: $(grep -m1 -E '\*\*\* |FATAL' "$L")"
-elif [ $rc -ne 0 ]; then report FAIL "game session ended with status $rc (killed after 10 min?)"
+elif [ $rc -ne 0 ]; then report FAIL "game session didn't end by itself (stopped after 10 min)"
 else report PASS "no crash, clean exit"; fi
 fps=$(grep -oE '[0-9.]+ fps' "$L" | awk '{s += $1; n++; if ($1 < m || !m) m = $1} END {if (n) printf "%.1f avg, %.1f min", s / n, m}')
 echo "frame rate (2 s samples): $fps" | tee -a "$O/report.txt"
@@ -113,22 +134,20 @@ SEED=SmokeSeed
 rm -rf "$O/root/build/frames" "$O/root/build"/frame_*.png
 rm -rf "$O/save" && cp -R "$SAVE" "$O/save"  # (the warps above saved in the dungeons: start from the house again)
 IN=$(for f in $(seq 600 100 40000); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + 50)); done)
-(cd "$O/root" && LARECOMP_NO_LAUNCHER=1 LARECOMP_INPUT="${IN%,}" LARECOMP_MENU_AT=7000 LARECOMP_MENU_TAB=3 \
-    LARECOMP_RANDO_GEN_TEST=$SEED LARECOMP_RANDO_GEN_SHOTS="$O/shots/17_seed" LARECOMP_SCREENSHOT_EVERY=120 \
-    exec "$APP" </dev/null >/dev/null 2>&1) &
-PID=$!
+start_app LARECOMP_NO_LAUNCHER=1 LARECOMP_INPUT="${IN%,}" LARECOMP_MENU_AT=7000 LARECOMP_MENU_TAB=3 \
+    LARECOMP_RANDO_GEN_TEST=$SEED LARECOMP_RANDO_GEN_SHOTS="$O/shots/17_seed" LARECOMP_SCREENSHOT_EVERY=120
 L=$O/root/lasrecomp.log
 in_seed() {  # after the switch: the seed active, then the renderer reports a level (not the title screen, "-")
     sed -n "/\[rando\] seed \"$SEED\" active/,\$p" "$L" 2>/dev/null | grep -qE ' level [A-Za-z0-9_]+ \('
 }
 for i in $(seq 1 300); do  # (10 minutes: generation takes about a minute)
-    kill -0 $PID 2>/dev/null || break
+    app_alive || break
     if in_seed; then sleep 5; break; fi
     sleep 2
 done
 last=$(ls "$O/root/build"/frame_*.png 2>/dev/null | tail -1)
 [ -n "$last" ] && cp "$last" "$O/shots/19_seed_in_game.png"
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
+stop_app  # (before the seed is deleted: the game reads its files whenever a level loads)
 mv "$L" "$O/seed.log" 2>/dev/null
 L=$O/seed.log
 cp "$O/root/rando/$SEED/generate.log" "$O/seed_generate.log" 2>/dev/null
