@@ -15,12 +15,13 @@ FIELD_MINIBOSSES = {
     0x5C: [],              # Smasher (with its iron ball)
     0x60: [],              # Avalaunch
     0x51: ['RolaStart'],   # Rolling Bones (with its spike bar)
-    0x5A: [],              # Gohma
     0x5F: [],              # Blaino (his knock-out punch: Link falls back down - runtime)
     0x58: [1, 0],          # Cue Ball (circles a rail fitted to the room)
     0x59: [],              # Master Stalfos (starts by himself)
 }
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
+# Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
+# (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
 MINIBOSS_CHANCE = 0.08
 import os as _os
 if _os.environ.get('LARECOMP_ALL_MINIBOSSES'):  # (test: every room with a randomized land enemy gets one)
