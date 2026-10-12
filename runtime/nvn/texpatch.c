@@ -37,7 +37,7 @@
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_FAIRY_MODEL,
-       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART };
+       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART, R_POWDER_MODEL };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -93,6 +93,9 @@ static int role_of(const char *name) {
         // a full one is one draw of Hp_01 (fill) + Hp_02 (frame, coloured by the layout's material) through the
         // Hp_04 mask; HeartUp = the life-up flash. Their draws are tinted.
         {"MI_body_alb.0", R_TUNIC}, {"MI_body_alb.1", R_TUNIC_RED}, {"MI_body_alb.2", R_TUNIC_BLUE},
+        // the Magic Powder sack's colour map (ItemMagicPowder.bfres; after the tunic's: same name prefix): held up as
+        // the Bomb Bag, tinted bomb blue then (runtime/hle/escape.c bomb_bag_tint)
+        {"MI_body_alb", R_POWDER_MODEL},
         {"Hp_00^w", R_HEART}, {"Hp_01^w", R_HEART}, {"Hp_02^w", R_HEART}, {"HeartUp^w", R_HEART},
         // the Items page's cursor brackets: identified only (hidden while the companion card has the cursor, pets.c)
         {"ItemCursor_", R_ITEM_CURSOR},
@@ -166,8 +169,8 @@ static void load_refs(void) {
     size_t len;
     uint8_t *f;
     static const char *const models[] = {"region_common/actor/ItemBottle.bfres", "region_common/actor/Playerlink.bfres",
-                                         "region_common/actor/ItemFairy.bfres"};
-    for (int m = 0; m < 3; m++)
+                                         "region_common/actor/ItemFairy.bfres", "region_common/actor/ItemMagicPowder.bfres"};
+    for (int m = 0; m < 4; m++)
         if ((f = read_all(models[m], &len))) {  // (their textures: one BNTX inside)
             for (size_t i = 0; i + 8 < len; i += 4)
                 if (!memcmp(f + i, "BNTX\0\0\0\0", 8)) { scan_bntx(f + i, len - i, false); break; }
@@ -185,7 +188,8 @@ static void load_refs(void) {
 
 int texpatch_bottle_kind(int id) {
     if (id < 0 || id >= g_nrefs) return 0;
-    return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : g_refs[id].role == R_FAIRY_MODEL ? 3 : 0;
+    return g_refs[id].role == R_BOTTLE ? 1 : g_refs[id].role == R_BOTTLE_MODEL ? 2 : g_refs[id].role == R_FAIRY_MODEL ? 3
+         : g_refs[id].role == R_POWDER_MODEL ? 4 : 0;
 }
 
 int texpatch_heart_kind(int id) {
@@ -241,8 +245,8 @@ int texpatch_identify(const NvnTexture *t) {
         const Ref *r = &g_refs[i];
         // (only the bottle model's and the tunic's maps have mip levels: compared in full, all levels)
         bool tunic = r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE;
-        if (r->w != t->width || r->h != t->height ||
-            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || tunic)) continue;
+        if (r->w != t->width || r->h != t->height || (r->role != R_POWDER_MODEL &&
+            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || tunic))) continue;
         uint64_t n = r->size < total ? r->size : total;
         if (!memcmp((const void *)(uintptr_t)t->addr, r->data, n)) {
             static int nlog;
@@ -1004,7 +1008,8 @@ void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h
     const Ref *r = &g_refs[id];
     if (r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE) { tunic_apply(lv, blocks, w, h, row); return; }
     if (lv || r->w != w || r->h != h) return;
-    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_ITEM_CURSOR ||
+    if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_POWDER_MODEL ||
+        r->role == R_ITEM_CURSOR ||
         r->role == R_HEART) return;
     if (r->role == R_HERO) {  // fully transparent (BC5 blocks of zeros)
         if (hide_hero()) for (uint32_t y = 0; y < (h + 3) / 4; y++) memset(blocks + y * row, 0, (w + 3) / 4 * 16);

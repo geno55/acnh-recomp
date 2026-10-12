@@ -580,6 +580,8 @@ def main():
         with open(os.path.join(out_dir, f'digs_{settings["seed"]}.txt'), 'w') as f:
             f.write('Digs:\n' + '\n'.join(lines) + '\n')
         print('digs placed:', len(lines), flush=True)
+    import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
+    print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)

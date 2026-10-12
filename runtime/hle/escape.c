@@ -148,7 +148,19 @@ RT_ON_RESET(escape_reset) { on = -1; }  // (seed switch: the next seed may diffe
 // (last of the bottom row, 436, -67) and the HUD button holding item slot 0xf (Y at 476, 296; X at 571, 310; Y / X =
 // PlayerStatus +0xa2 / +0xa3); the model only while Tarin hands it over (Marin & Tarin's house, not owned yet - the
 // get sequence runs before AddItem). Tint (translate.c): rgb = mix(rgb, t0.rgb * lum^t1.w + t1.rgb * lum, t0.w).
+// The Bomb Bag (tools/rando/bomb_bag_text.py): found bombs are held up as the Magic Powder sack while the flow keeps
+// GlobalFlags 431 (unused0431) set; the sack is drawn bomb blue then. LARECOMP_BOMB_BAG_TINT=1: always (test).
+#define BOMB_BAG_FLAG 431
+static void bomb_bag_tint(float tint[8]) {
+    const uint8_t *fl = (const uint8_t *)(uintptr_t)(MAIN_BASE + 0x1CBB220 + 0x5DC0);  // (live save: GlobalFlags)
+    if (!((fl[BOMB_BAG_FLAG >> 3] >> (BOMB_BAG_FLAG & 7)) & 1) && !getenv("LARECOMP_BOMB_BAG_TINT")) return;
+    // ltint (translate.c): colour.rgb, mix, glow.rgb, luminance power - the bombs' deep navy, lit
+    static const float navy[8] = {0.10f, 0.24f, 1.30f, 1.0f, 0.0f, 0.01f, 0.06f, 1.45f};
+    memcpy(tint, navy, sizeof navy);
+}
+
 void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]) {
+    if (kind == 4) { bomb_bag_tint(tint); return; }  // (the Magic Powder sack's map)
     if (kind == 3) {  // (the fairy's model map: boss / mini-boss souls, runtime/hle/souls.c)
         extern void souls_fairy_tint(const float *m, uint32_t m_size, float tint[8]);
         souls_fairy_tint(ui, ui_size, tint);
