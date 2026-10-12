@@ -31,6 +31,7 @@ static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1ba32c8, MAIN_BASE + 0x61f250, 0xff0, 0x260, 0, 1, "Rolling Bones", 0xff},  // 0x51 (+ spike bar)
     {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a
     {MAIN_BASE + 0x1b91408, MAIN_BASE + 0x4ec6c0, 0x11a0, 0x260, 10, 1, "Blaino", 5},          // 0x5f (5: after a knock-out)
+    {MAIN_BASE + 0x1b82f70, MAIN_BASE + 0x3e59a0, 0xff0, 0x260, 0, 3, "Cue Ball", 0xff},       // 0x58 (+ a rail fitted)
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
