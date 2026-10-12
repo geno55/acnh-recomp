@@ -1857,7 +1857,9 @@ class ModsProcess(QtCore.QThread):
         enemy_settings = {
             'types': self.settings['randomize-enemies'],
             'sizes':self.settings['randomize-enemy-sizes'],
-            'minibosses': self.settings.get('enemy-minibosses', False)  # LARecomp
+            'minibosses': self.settings.get('enemy-minibosses', False),  # LARecomp
+            # (LARecomp: a mini-boss's dungeon room, for what stands with it there - enemies.MINIBOSS_KITS)
+            'arena': lambda name: leb.Room(open(f'{self.rom_path}/region_common/level/{name.rsplit("_", 1)[0]}/{name}.leb', 'rb').read()),
         }
 
         levels_path = f'{self.rom_path}/region_common/level'

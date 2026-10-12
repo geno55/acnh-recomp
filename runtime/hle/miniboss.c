@@ -24,6 +24,11 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; } Kind;
 static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b80e90, MAIN_BASE + 0x3bfc60, 0xff0, 0x260, 0, 1, "Hinox"},  // 0x53: 10 = request HinoxStart
+    // (found 2026-10-12 with tools placing each one on Field_13D: LARECOMP_MB_SCAN_NAME / _FORCE / _CHG_LOG)
+    {MAIN_BASE + 0x1b86e58, MAIN_BASE + 0x4301d0, 0x1110, 0x260, 0, 1, "Smasher"},       // 0x5c (needs its iron ball)
+    {MAIN_BASE + 0x1badc60, MAIN_BASE + 0x6d4f40, 0xff0, 0x260, 0, 1, "Avalaunch"},      // 0x60
+    {MAIN_BASE + 0x1ba32c8, MAIN_BASE + 0x61f250, 0xff0, 0x260, 0, 1, "Rolling Bones"},  // 0x51 (needs its spike bar)
+    {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma"},        // 0x5a
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
@@ -39,8 +44,15 @@ static void log_new_vtable(uint64_t o, uint64_t vt) {  // LARECOMP_MB_LOG (RE): 
     for (int i = 0; i < n; i++)
         if (vts[i] == vt) return;
     if (n < 512) vts[n++] = vt;
-    LOG("[mb] new class vtable main+%#llx (actor %llx, +0x100 main+%#llx)\n", (unsigned long long)(vt - MAIN_BASE),
-        (unsigned long long)o, (unsigned long long)(LD64(vt + 0x100) - MAIN_BASE));
+    char name[40] = "";  // (the actor's level name, "EnemyRola-<key>", when it keeps one at +0x398 like item actors)
+    for (uint64_t off = 0; off < 0x3000 && !name[0]; off += 8) {
+        const char *nm = (const char *)(uintptr_t)(o + off);
+        if (memcmp(nm, "Enemy", 5) && memcmp(nm, "Obj", 3) && memcmp(nm, "Npc", 3)) continue;
+        for (int i = 0; i < 39 && nm[i] >= 0x20 && nm[i] < 0x7f; i++) name[i] = nm[i], name[i + 1] = 0;
+        snprintf(name + strlen(name), sizeof name - strlen(name), "@%llx", (unsigned long long)off);
+    }
+    LOG("[mb] new class vtable main+%#llx (actor %llx, +0x100 main+%#llx) %s\n", (unsigned long long)(vt - MAIN_BASE),
+        (unsigned long long)o, (unsigned long long)(LD64(vt + 0x100) - MAIN_BASE), name);
 }
 
 // LARECOMP_MB_SCAN=<vtable offsets, hex, comma-separated> (RE): finds the state machines inside actors of those classes
@@ -61,7 +73,11 @@ static void scan_seen(uint64_t o, uint64_t vt) {
     }
     int k = 0;
     while (k < g_scan_nv && g_scan_vt[k] != vt) k++;
-    if (k == g_scan_nv) return;
+    // LARECOMP_MB_SCAN_NAME=<text>: (also) actors whose level name (+0x18, "EnemyOctorok-<key>") contains it - a
+    // placed test actor keeps the name of the one it replaced; classes share base vtables
+    const char *want = ENV("LARECOMP_MB_SCAN_NAME");
+    bool named = want && strstr((const char *)(uintptr_t)(o + 0x18), want);
+    if (k == g_scan_nv && !named) return;
     int fr = -1;
     for (int i = 0; i < 8; i++) {
         if (g_scan_obj[i] == o) return;
@@ -77,8 +93,9 @@ static void scan_seen(uint64_t o, uint64_t vt) {
             g_scan_last[fr][n - 1] = *(uint8_t *)(uintptr_t)(o + off + 0xd);
             LOG("[mb-scan] actor %llx (main+%#llx): state machine at +%#llx, state %u\n", (unsigned long long)o,
                 (unsigned long long)(vt - MAIN_BASE), (unsigned long long)off, g_scan_last[fr][n - 1]);
-            for (int s = 0; s < 24; s++) {
+            for (int s = 0; s < 24; s++) {  // (entries: ctx, then enter / exec / exit member pointers, 16 bytes each)
                 uint64_t e = o + off + 0x40 + s * 0x30, f1 = LD64(e + 8), f2 = LD64(e + 0x18), f3 = LD64(e + 0x28);
+                if (!code_ptr(f1) && !code_ptr(f2) && code_ptr(LD64(e + 0x10))) f1 = LD64(e + 0x10), f2 = LD64(e + 0x20), f3 = 0;
                 if (code_ptr(f1) || code_ptr(f2) || code_ptr(f3))
                     LOG("[mb-scan]   state %d: enter %llx exec %llx exit %llx\n", s, (unsigned long long)f1,
                         (unsigned long long)f2, (unsigned long long)f3);
@@ -90,7 +107,7 @@ static void scan_tick(uint64_t frame) {
     for (int i = 0; i < 8; i++) {
         uint64_t o = g_scan_obj[i];
         if (!o) continue;
-        int alive = 0;
+        int alive = ENV("LARECOMP_MB_SCAN_NAME") && strstr((const char *)(uintptr_t)(o + 0x18), ENV("LARECOMP_MB_SCAN_NAME"));
         for (int k = 0; k < g_scan_nv; k++) alive |= LD64(o) == g_scan_vt[k];
         if (!alive) { g_scan_obj[i] = 0; continue; }
         for (int j = 0; j < 8 && g_scan_sm[i][j]; j++) {
@@ -106,7 +123,7 @@ static void scan_tick(uint64_t frame) {
 void rt_mb_seen(uint64_t o) {
     uint64_t vt = LD64(o);
     if (ENV("LARECOMP_MB_LOG")) log_new_vtable(o, vt);
-    if (ENV("LARECOMP_MB_SCAN")) scan_seen(o, vt);
+    if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_seen(o, vt);
     int k = 0;
     while (k < NKINDS && g_kinds[k].vt != vt) k++;
     if (k == NKINDS) return;
@@ -119,8 +136,51 @@ void rt_mb_seen(uint64_t o) {
     if (free_i >= 0) g_seen[free_i] = (Seen){o, f, f, k, 0};
 }
 
+// LARECOMP_MB_FORCE=<frame>:<sm offset hex>:<state>[:<change fn main offset hex>] (RE, with LARECOMP_MB_SCAN_NAME):
+// at that frame the scanned actor's state machine changes to that state (default change: Hinox's, main+0x3bfc60)
+static uint64_t scan_latest(void) {  // (the newest scanned actor: a reloaded room leaves stale copies in the list)
+    for (int i = 7; i >= 0; i--)
+        if (g_scan_obj[i]) return g_scan_obj[i];
+    return 0;
+}
+
+static void force_tick(Cpu *c, uint64_t frame) {
+    static long at = -2;
+    static uint64_t sm, chg;
+    static int state;
+    if (at == -2) {
+        at = -1;
+        const char *e = ENV("LARECOMP_MB_FORCE");
+        unsigned long long smo = 0, ch = 0x3bfc60;
+        if (e && sscanf(e, "%ld:%llx:%d:%llx", &at, &smo, &state, &ch) >= 3) sm = smo, chg = MAIN_BASE + ch;
+        else at = -1;
+    }
+    static long zat = -2;  // LARECOMP_MB_ZONE=<frame>: the dungeon zone manager's room-entry call on the scanned actor
+    if (zat == -2) zat = ENV("LARECOMP_MB_ZONE") ? atol(ENV("LARECOMP_MB_ZONE")) : -1;
+    if (zat >= 0 && (long)frame == zat && scan_latest()) {
+        uint64_t saved[31], sp = c->sp;
+        memcpy(saved, c->x, sizeof saved);
+        c->x[0] = scan_latest();
+        guest_call(c, MAIN_BASE + 0x29520);
+        memcpy(c->x, saved, sizeof saved);
+        c->sp = sp;
+        LOG("[mb-zone] f%llu actor %llx: zone entry call\n", (unsigned long long)frame, (unsigned long long)scan_latest());
+    }
+    if (at < 0 || (long)frame != at || !scan_latest()) return;
+    uint64_t saved[31], sp = c->sp;
+    memcpy(saved, c->x, sizeof saved);
+    c->x[0] = scan_latest() + sm;
+    c->x[1] = (uint64_t)state;
+    guest_call(c, chg);
+    memcpy(c->x, saved, sizeof saved);
+    c->sp = sp;
+    LOG("[mb-force] f%llu actor %llx sm +%#llx -> state %d\n", (unsigned long long)frame, (unsigned long long)scan_latest(),
+        (unsigned long long)sm, state);
+}
+
 void miniboss_tick(Cpu *c, uint64_t frame) {
-    if (ENV("LARECOMP_MB_SCAN")) scan_tick(frame);
+    if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_tick(frame);
+    force_tick(c, frame);
     uint64_t ps = LD64(PLAYER_STATUS_PTR);
     if (!ps || strcmp((const char *)(uintptr_t)ps, "Field")) return;  // (dungeon arenas start their own)
     uint64_t pc = doorjump_player(frame);
@@ -142,6 +202,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         guest_call(c, k->chg);
         memcpy(c->x, saved, sizeof saved);
         c->sp = sp;
-        LOG("[miniboss] f%llu %s woken (Link %.1f away)\n", (unsigned long long)frame, k->name, sqrtf(dx * dx + dz * dz));
+        LOG("[miniboss] f%llu %s woken (Link %.1f away; it stood at %.1f %.1f)\n", (unsigned long long)frame, k->name,
+            sqrtf(dx * dx + dz * dz), p[0], p[2]);
     }
 }

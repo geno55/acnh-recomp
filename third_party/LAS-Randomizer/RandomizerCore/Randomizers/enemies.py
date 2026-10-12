@@ -15,8 +15,44 @@ FIELD_MINIBOSSES = {
     0x56: [],              # Dodongo Snake (bombs)
     0x5B: [],              # Armos Knight
     0x61: [],              # Giant Buzz Blob (Magic Powder, then sword)
+    0x5C: [],              # Smasher (with its iron ball)
+    0x60: [],              # Avalaunch
+    0x51: ['RolaStart'],   # Rolling Bones (with its spike bar)
+    0x5A: [],              # Gohma
 }
 MINIBOSS_CHANCE = 0.08
+# Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
+# copied from it next to the mini-boss (same offsets, linked both ways as there): Smasher's iron ball (without it the
+# game crashes spawning him), Rolling Bones' spike bar, and the room's AreaEventBox. The runtime wakes them
+# (runtime/hle/miniboss.c). Needs enemy_settings['arena'] (room name -> leb.Room of the original game).
+MINIBOSS_KITS = {
+    0x5C: ('Lv06FaceShrine_05F', (0x1E4, 0x191)),
+    0x60: ('Lv10ClothesDungeon_06E', (0x191,)),
+    0x51: ('Lv01TailCave_06G', (0x11A, 0x191)),
+    0x5A: ('Lv05CatfishsMaw_05D', (0x191,)),
+}
+
+
+def add_miniboss_kit(room_data, mi, arena):
+    """Appends the kit actors of room_data.actors[mi]'s mini-boss (copied from its arena room) and links them."""
+    import copy
+    act = room_data.actors[mi]
+    src_i = next(i for i, x in enumerate(arena.actors) if x.type == act.type)
+    src = arena.actors[src_i]
+    links = []
+    for i, x in enumerate(arena.actors):
+        if x.type not in MINIBOSS_KITS[act.type][1]:
+            continue
+        a = copy.deepcopy(x)
+        a.posX, a.posY, a.posZ = act.posX + (x.posX - src.posX), act.posY + (x.posY - src.posY), act.posZ + (x.posZ - src.posZ)
+        a.roomID = act.roomID
+        a.relationships.section_1, a.relationships.x = [], 0
+        a.relationships.section_2, a.relationships.z = [], 0
+        room_data.actors.append(a)
+        n = len(room_data.actors) - 1
+        a.relationships.section_3, a.relationships.y = [mi], 1
+        links.append([[b'', b''], n])
+    act.relationships.section_1, act.relationships.x = links, len(links)
 
 
 
@@ -105,6 +141,8 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 act.relationships.e = 1
                 act.rotY = 0
                 act.scaleX = act.scaleY = act.scaleZ = 1.0
+                if mini in MINIBOSS_KITS and enemy_settings.get('arena'):
+                    add_miniboss_kit(room_data, e, enemy_settings['arena'](MINIBOSS_KITS[mini][0]))
                 edited_room = True
                 continue
 
