@@ -511,7 +511,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
             uint64_t out_sz = (uint64_t)out_row * l.hb * l.d;
             id<MTLBuffer> staging = [dev newBufferWithBytes:data length:out_sz options:MTLResourceStorageModeShared];
             free(lin);
-            MTLSize size = MTLSizeMake(l.w, l.h, l.d);
+            // the copy stays inside the texture's level: one allocated at the internal resolution (16:9, render
+            // target sized - the save slots' screenshots on the title screen) can still be filled from the CPU, and its
+            // full-size data overran the scaled texture (a GPU fault on Windows: runtime/nvn/vulkan/textures.c)
+            NSUInteger lw = MAX(b->tex.width >> lv, 1), lh = MAX(b->tex.height >> lv, 1), ld = MAX(b->tex.depth >> lv, 1);
+            MTLSize size = MTLSizeMake(MIN((NSUInteger)l.w, lw), MIN((NSUInteger)l.h, lh), MIN((NSUInteger)l.d, ld));
             NSUInteger slice = layer;
             [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:out_row
                  sourceBytesPerImage:(NSUInteger)out_row * l.hb sourceSize:size toTexture:b->tex

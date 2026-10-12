@@ -150,15 +150,16 @@ static char dl_ring[64][128];
 static unsigned dl_n;
 static int dl_on = -1;
 static void dl_note(const char *fmt, ...) {
-    if (dl_on < 0) dl_on = getenv("LARECOMP_VK_DEVLOST_TRACE") != NULL;
+    if (dl_on < 0) dl_on = getenv("LARECOMP_VK_DEVLOST_TRACE") ? atoi(getenv("LARECOMP_VK_DEVLOST_TRACE")) : 0;
     if (!dl_on) return;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(dl_ring[dl_n++ & 63], sizeof dl_ring[0], fmt, ap);
     va_end(ap);
 }
+void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
 void vk_devlost_dump(void) {
-    if (dl_on != 1) return;
+    if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
     for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
 }
@@ -643,6 +644,7 @@ static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v :
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
+    if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
@@ -2341,8 +2343,10 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
     vk_end_pass();
+    if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each copy its own submission, waited on)
     gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
-    dl_note("copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
+    dl_note("copy texture %ux%u f%#x -> %ux%u f%#x (%p -> %p)", st_->width, st_->height, st_->format, dt->width, dt->height,
+            dt->format, (void *)st_, (void *)dt);
     TexBackend *s = vk_tex(st_, false), *d = vk_tex(dt, true);
     renderer_mark_gpu_owned(dt);
     if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height) renderer_texture_mark_presented(st_);
@@ -2405,6 +2409,8 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
                       .dstSubresource = {depth ? (da & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : da) : da, dlv, dly, 1},
                       .dstOffsets = {{dx0, dy0, 0}, {dx0 + dw, dy0 + dh, 1}}};
     bool linear = (flags & 1) && !depth && !rt_kind(st_->format);
+    dl_note("  blit %p lv%u/%u %ux%u (%d,%d %dx%d) -> %p lv%u/%u %ux%u (%d,%d %dx%d) %s", (void *)s->image, slv, s->levels, s->width,
+            s->height, sx0, sy0, sw, sh, (void *)d->image, dlv, d->levels, d->width, d->height, dx0, dy0, dw, dh, linear ? "linear" : "nearest");
     vkCmdBlitImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 }
 
