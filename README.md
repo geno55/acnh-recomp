@@ -9,12 +9,15 @@
 > As with anything on the internet, you run the code at your own discretion.
 
 **LAS Recomp** is a static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch, 2019) into a
-native Windows and macOS application.
+native Windows, macOS and Linux application.
 
 > [!NOTE]
 > Currently supported platforms:
 > - macOS - Apple Silicon only, Metal graphics backend + MetalFX
 > - Windows - x86-64 only, Vulkan graphics backend
+> - Linux - x86-64, Vulkan graphics backend (AppImage)
+> - Linux aarch64 (ARM) - **experimental**: built but untested on real hardware; reports welcome
+>   ([docs/linux.md](docs/linux.md) lists what to include)
 
 ![Mabe Village in a 21:9 window: the unlocked aspect ratio shows more of the island](docs/ultrawide.jpg)
 
@@ -47,7 +50,7 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
 ## Features
 
 **Runs natively**
-- **This is not emulation.** Runs natively on Windows and macOS using static recompilation of the Switch code.
+- **This is not emulation.** Runs natively on Windows, macOS and Linux using static recompilation of the Switch code.
 - Unlocked aspect ratio: wider (or taller) windows show more of the island, up to ultrawide; houses and dungeons
   keep their framing. The original 16:9 framing is one option away.
 - Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts.
@@ -112,7 +115,7 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
 
 ## Building from source
 
-Both platforms need your own v1.0.0 dump and keys: build first, then use the start screen's game-file setup to
+Every platform needs your own v1.0.0 dump and keys: build first, then use the start screen's game-file setup to
 extract them into `extracted/` (`exefs/`, `romfs/` and `romfs.bin`), or extract them yourself with
 [hactool](https://github.com/SciresM/hactool) (`make hactool` builds it). `make gen` then recompiles the game code
 from your own `extracted/exefs` into `generated/`; without it the build runs the start screen only.
@@ -144,9 +147,23 @@ Requirements: Windows 10+ x86-64, a CPU with AVX2 and a GPU with Vulkan 1.3. Mor
 4. Package: `make deps-windows` (once: LGPL FFmpeg), `make rando-helper RANDO_PY="<path to python.org Python 3.12>"`
    (MSYS2's Python has no oead wheel), then `make dist` -> `build/dist/LAS Recomp-<version>-windows.zip`.
 
+### Linux
+
+Requirements: x86-64 with AVX2 (or aarch64, experimental), a GPU with Vulkan 1.3, clang, SDL 3, FFmpeg, shaderc and
+Vulkan Memory Allocator from your distribution, Python 3.12. Packages, cross builds and details in
+[docs/linux.md](docs/linux.md).
+
+1. Build: `make -j` -> `build/lasrecomp`. Set up your game files (above), then `make gen` and `make -j` again.
+2. Run: `./build/lasrecomp extracted`.
+3. Package: `make appimage` (this machine's arch; `ARCH=aarch64` cross-compiles) or `make appimages` (both) ->
+   `build/dist/LAS_Recomp-<version>-<arch>.AppImage`, built in Ubuntu 22.04 containers (podman). `make smoketest`
+   checks the x86-64 AppImage before a release.
+
 Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
 - Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
+- Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`); the log is `lasrecomp.log` there when started
+  without a terminal.
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 
@@ -172,11 +189,11 @@ none of their files are used):
 - [FFmpeg](https://ffmpeg.org) - movie playback (LGPL)
 - [Dear ImGui](https://github.com/ocornut/imgui) - overlay menu and start screen (MIT)
 - [Baloo 2](https://github.com/EkType/Baloo2) by Ek Type - the start screen's font (SIL Open Font License 1.1, `third_party/fonts/Baloo2/OFL.txt`)
-- [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) - Windows renderer (MIT)
+- [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) - Windows and Linux renderer (MIT)
 - [SMAA](https://github.com/iryoku/smaa) by Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and Diego
   Gutierrez - the anti-aliasing option (MIT, `third_party/smaa/LICENSE.txt`)
-- [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) - the Windows upscaler option,
-  ported to GLSL (MIT)
+- [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) - the Windows and Linux upscaler
+  option, ported to GLSL (MIT)
 - [hactool](https://github.com/SciresM/hactool) by SciresM - game file extraction (ISC)
 - [oead](https://github.com/zeldamods/oead) and [evfl](https://github.com/zeldamods/evfl) - Nintendo file formats, used by LAS-Randomizer
 - [PyInstaller](https://pyinstaller.org) - packs the seed generator into a standalone helper (GPL 2.0+ with the
@@ -214,11 +231,11 @@ Release builds include these components; their source code for the exact version
 | evfl (seed generator) | 1.2.0 | GPL 2.0+ | https://github.com/zeldamods/evfl/releases/tag/v1.2.0 |
 | quicktex (seed generator) | 0.2.1 | LGPL 3.0 | https://github.com/drewcassidy/quicktex/releases/tag/v0.2.1 |
 | PyInstaller (packs the seed generator) | 6.22.3 | GPL 2.0+ with bootloader exception | https://github.com/pyinstaller/pyinstaller/releases/tag/v6.22.3 |
-| CPython (seed generator) | 3.12.14 (macOS), 3.12.10 (Windows) | PSF | https://github.com/python/cpython/releases/tag/v3.12.14, https://github.com/python/cpython/releases/tag/v3.12.10 |
-| FFmpeg (LGPL configuration, macOS and Windows builds) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
-| SDL 3 | 3.4.18 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18 |
-| hactool | 1.4.0 (macOS), 1.4.0-13-g1d64a83 (Windows) | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0, https://github.com/SciresM/hactool/tree/1d64a83 |
-| shaderc (Windows: GLSL to SPIR-V) | 2026.4 | Apache 2.0 | https://github.com/google/shaderc |
+| CPython (seed generator) | 3.12.14 (macOS), 3.12.10 (Windows), 3.12.15 (Linux) | PSF | https://github.com/python/cpython/releases/tag/v3.12.14, https://github.com/python/cpython/releases/tag/v3.12.10, https://github.com/python/cpython/releases/tag/v3.12.15 |
+| FFmpeg (LGPL configuration, macOS, Windows and Linux builds) | 9.0.2 | LGPL 2.1+ | https://ffmpeg.org/releases/ |
+| SDL 3 | 3.4.18 (macOS, Windows), 3.4.16 (Linux) | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.18, https://github.com/libsdl-org/SDL/releases/tag/release-3.4.16 |
+| hactool | 1.4.0 (macOS), 1.4.0-13-g1d64a83 (Windows, Linux) | ISC | https://github.com/SciresM/hactool/releases/tag/1.4.0, https://github.com/SciresM/hactool/tree/1d64a83 |
+| shaderc (Windows, Linux: GLSL to SPIR-V; Linux: with glslang, SPIRV-Tools inside) | 2026.4 (Windows), 2026.3 (Linux) | Apache 2.0 | https://github.com/google/shaderc |
 | libiconv (Windows: used by SDL 3) | 1.19 | LGPL 2.1+ | https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz |
 | GCC runtime: libgcc, libstdc++ (Windows) | 16.2.0 | GPL 3.0 with the GCC Runtime Library Exception | https://gcc.gnu.org/ |
 | winpthreads (Windows, mingw-w64) | 14.0.0 | MIT / BSD | https://www.mingw-w64.org/ |
@@ -226,5 +243,5 @@ Release builds include these components; their source code for the exact version
 | SMAA (shader and lookup textures, built in) | 2013 (repository master) | MIT | https://github.com/iryoku/smaa |
 
 The exact build scripts that fetch and build these (with checksums) are in this repository: `tools/build_deps_macos.sh`,
-`tools/build_deps_windows.sh` and `tools/rando/rando_gen.spec`. The Windows build takes SDL 3, shaderc, libiconv and the
+`tools/build_deps_windows.sh`, `tools/linux/build_deps.sh` and `tools/rando/rando_gen.spec`. The Windows build takes SDL 3, shaderc, libiconv and the
 compiler runtime from MSYS2's UCRT64 packages (https://packages.msys2.org, which links each package's source).
