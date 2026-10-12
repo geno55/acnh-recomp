@@ -115,10 +115,8 @@ static void load_fonts(void) {
                          "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", "C:/Windows/Fonts/YuGothR.ttc",
                          "C:/Windows/Fonts/YuGothM.ttc", "/System/Library/Fonts/Supplemental/Arial.ttf",
                          "C:/Windows/Fonts/arial.ttf",
-                         // Linux: Noto Sans CJK, else DejaVu Sans (Debian / Ubuntu, Arch, Fedora paths)
-                         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-                         "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+                         // Linux: DejaVu Sans (Debian / Ubuntu, Arch, Fedora). Not Noto Sans CJK: CFF outlines,
+                         // which the game's font engine crashes on (it wants TrueType)
                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
                          "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
