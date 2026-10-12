@@ -791,6 +791,8 @@ static void prelaunch_tab(float sc) {
     if (gb < 0) gb = rt_game_files_size(g_root.c_str()) / 1e9;
 #ifdef _WIN32
     if (ImGui::Button("Show in Explorer")) reveal_folder(g_root);
+#elif defined(__linux__)
+    if (ImGui::Button("Open folder")) reveal_folder(g_root);
 #else
     if (ImGui::Button("Show in Finder")) reveal_folder(g_root);
 #endif

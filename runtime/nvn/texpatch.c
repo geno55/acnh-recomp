@@ -506,7 +506,8 @@ static void load_font(void) {  // a bold system font for the letters (none of th
     static const char *const paths[] = {
         "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/Library/Fonts/Arial Bold.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/segoeuib.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
     };
     for (unsigned i = 0; i < sizeof paths / sizeof *paths && !g_font_ok; i++) {
         FILE *f = fopen(paths[i], "rb");

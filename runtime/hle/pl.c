@@ -114,7 +114,13 @@ static void load_fonts(void) {
                          "fonts/nintendo_udsgr_std_003.ttf", "fonts/nintendo_udsgr_std_003.bfttf",
                          "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc", "C:/Windows/Fonts/YuGothR.ttc",
                          "C:/Windows/Fonts/YuGothM.ttc", "/System/Library/Fonts/Supplemental/Arial.ttf",
-                         "C:/Windows/Fonts/arial.ttf"};
+                         "C:/Windows/Fonts/arial.ttf",
+                         // Linux: Noto Sans CJK, else DejaVu Sans (Debian / Ubuntu, Arch, Fedora paths)
+                         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                         "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+                         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i]) load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
