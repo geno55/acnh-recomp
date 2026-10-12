@@ -7,6 +7,8 @@
 
 #ifdef _WIN32
 #include "platform/win_compat.h"
+#elif defined(__linux__)
+#include "platform/linux_compat.h"
 #endif
 
 #ifdef __cplusplus
