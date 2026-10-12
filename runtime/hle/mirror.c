@@ -24,3 +24,14 @@ bool mirror_draw(bool composite) {
 bool mirror_input(void) {
     return g_settings.mirror_mode && g_world_frame != ~0ull && renderer_present_count() - g_world_frame <= 2;
 }
+
+
+// The in-world action prompt ("Lift", "Read", "Talk"... - Cm_HUD's L_Interact_00) sits at its target's spot on screen.
+// tools/patches.py PROMPT_POS_SITE: the HUD writes the prompt pane's translation (x right of the centre) each time it
+// places it; in mirror mode, with the mirrored world on screen, x is mirrored - the prompt itself reads as ever.
+#include <string.h>
+#include "../hle.h"
+float rt_prompt_x(uint64_t pane, float x) {
+    if (!mirror_input() || memcmp((const char *)(uintptr_t)(pane + 0xB0), "L_Interact_00", 14)) return x;
+    return -x;
+}

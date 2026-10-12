@@ -581,3 +581,20 @@ def _no_handler(gen, a):
 
 for _a in NO_HANDLER_SITES:
     PATCHES[_a] = _no_handler
+
+
+# Mirror mode: the HUD update places the in-world action prompt (main+0xeaa800: stp s2, s0, [x8, #0x30] = the
+# pane's translation x, y from the target's screen spot); x is mirrored there for that pane (runtime/hle/mirror.c).
+PROMPT_POS_SITE = 0x7000eab138
+
+
+def _prompt_pos(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x2d060102, hex(w)  # stp s2, s0, [x8, #0x30]
+    return ('{ extern float rt_prompt_x(uint64_t pane, float x); float px_, py_; memcpy(&px_, &c->v[2], 4); '
+            'memcpy(&py_, &c->v[0], 4); px_ = rt_prompt_x(c->x[8], px_); '
+            'memcpy((void *)(uintptr_t)(c->x[8] + 0x30), &px_, 4); memcpy((void *)(uintptr_t)(c->x[8] + 0x34), &py_, 4); }'
+            f'  /* {a:#x}: stp s2, s0, [x8, #0x30] (action prompt spot: mirror mode) */')
+
+
+PATCHES[PROMPT_POS_SITE] = _prompt_pos
