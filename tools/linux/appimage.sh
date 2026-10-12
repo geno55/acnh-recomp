@@ -29,8 +29,14 @@ if [ "$ARCH" = aarch64 ]; then
     if [ ! -f "$S/.ok" ]; then  # the arm64 image's files: headers and libraries to cross-compile against
         rm -rf "$S" && mkdir -p "$S"
         c=$(podman create --arch arm64 "$ARM")
-        podman export "$c" | tar -x -C "$S" --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' 2>/dev/null || true
+        # (anchored: only the top-level pseudo filesystems, not e.g. usr/include/<triple>/sys)
+        podman export "$c" | tar -x -C "$S" --anchored --exclude='dev/*' --exclude='proc/*' --exclude='sys/*' 2>/dev/null || true
         podman rm -f "$c" >/dev/null
+        # absolute symlinks (libm.so -> /lib/aarch64-linux-gnu/libm.so.6) would point into this machine's root:
+        # relative, so they stay inside the sysroot
+        find "$S" -type l -lname '/*' | while read -r l; do
+            ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$S$(readlink "$l")")" "$l"
+        done
         touch "$S/.ok"
     fi
     run "$ARM" tools/linux/rando_helper.sh aarch64
