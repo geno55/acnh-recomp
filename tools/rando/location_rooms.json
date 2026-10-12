@@ -763,8 +763,8 @@
   "cond": "flippers & fishing-hook"
  },
  "kanalet-moat-north": {
-  "room": null,
-  "level": null,
+  "room": "Field_04I",
+  "level": "Field",
   "region": "river",
   "subtype": "underwater",
   "cond": "flippers"
@@ -840,8 +840,8 @@
   "cond": "(feather | rooster) & bracelet"
  },
  "taltal-sunken": {
-  "room": null,
-  "level": null,
+  "room": "Field_02M",
+  "level": "Field",
   "region": "taltal-east-1",
   "subtype": "underwater",
   "cond": "flippers"

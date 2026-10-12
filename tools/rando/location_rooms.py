@@ -13,6 +13,10 @@ for tab in ('CHEST_ROOMS', 'SMALL_KEY_ROOMS', 'GOLDEN_LEAF_ROOMS', 'INSTRUMENT_R
     for k, v in getattr(data, tab).items():
         if isinstance(v, (list, tuple)): v = v[0]
         rooms[k] = v
+sys.path.insert(0, HERE)
+import underwater  # (the sunken seashells: no LAS table has their rooms)
+for k, (_, r, _) in underwater.SPOTS.items():
+    rooms.setdefault(k, r)
 out = {}
 for k, v in logic.items():
     if v.get('type') != 'item': continue

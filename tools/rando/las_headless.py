@@ -581,6 +581,11 @@ def main():
         with open(os.path.join(out_dir, f'digs_{settings["seed"]}.txt'), 'w') as f:
             f.write('Digs:\n' + '\n'.join(lines) + '\n')
         print('digs placed:', len(lines), flush=True)
+    import underwater  # sunken heart pieces / seashells: their randomized item, its model, still dived for
+    from RandomizerCore.Tools import event_tools as _uw_ev, leb as _uw_leb
+    from RandomizerCore.Randomizers import item_get as _uw_get, data as _uw_data
+    print('underwater:', ', '.join(underwater.apply(mods, out_dir, romfs, _uw_leb, _uw_ev, _ot, _uw_get, _uw_data)),
+          flush=True)
     import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
@@ -589,6 +594,7 @@ def main():
         s['excluded-locations'] = sorted(s['excluded-locations'])
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
+        s['underwater-items'] = True  # (runtime: the sunken heart-piece actors don't hide for an owned heart piece)
         json.dump(s, f, indent=1)
     stage('Building the check tracker', 0.99)
     import tracker

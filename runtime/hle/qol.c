@@ -118,6 +118,33 @@ int rt_tunic_upgrades(void) {
 }
 RT_ON_RESET(tunic_up_reset) { g_tunic_up = -1; }
 
+// Underwater checks (tools/rando/underwater.py, settings.json "underwater-items"): the sunken heart-piece actors hold
+// randomized items and hide by their own flag, so their "do you own this heart piece already?" check is skipped
+// (tools/patches.py UNDERWATER_OWNED_SITE). Item actors keep their name at +0x398 ("ItemHeartPiece-<id>").
+static int g_underwater = -1;  // (per seed)
+int rt_underwater_items(void) {
+    if (g_underwater < 0) {
+        g_underwater = 0;
+        const char *dir = rando_seed_dir();
+        char p[512];
+        FILE *f = dir ? (snprintf(p, sizeof p, "%s/settings.json", dir), fopen(p, "rb")) : NULL;
+        if (f) {
+            static char buf[1 << 16];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            g_underwater = strstr(buf, "\"underwater-items\": true") != NULL;
+        }
+        LOG("[qol] underwater items: %s\n", g_underwater ? "ON" : "off");
+    }
+    return g_underwater;
+}
+
+int rt_underwater_skip_owned(uint64_t actor) {
+    return rt_underwater_items() && actor && !memcmp((const void *)(uintptr_t)(actor + 0x398), "ItemHeartPiece-", 15);
+}
+RT_ON_RESET(underwater_reset) { g_underwater = -1; }
+
 int rt_buff_replace(int allow) {
     // LARECOMP_BUFF_PRIME=1 (test): every roll finds the Guardian Acorn counter full; =2: and every row allows buffs
     // (grass then drops Acorns unless the option is on)

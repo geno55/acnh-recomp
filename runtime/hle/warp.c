@@ -557,7 +557,68 @@ static void pane_scan_tick(uint64_t frame) {
     LOG("[pane] scan done (%d objects)\n", nseen);
 }
 
+// LARECOMP_ACTOR_SCAN=<frame>:<vtable main offset hex>[:<off>=<hex byte>,...] (test): from that frame (every 60 frames,
+// 10 times) log every object whose first word is that vtable (main + offset) with a dump of its first 0x400 bytes in
+// 16-byte rows that aren't all zero; pokes write bytes into each once (after the first log). Underwater items research.
+static void actor_scan_tick(uint64_t frame) {
+    static long at = -2, vt;
+    static int left = 10, poked;
+    static char pokes[256];
+    if (at == -2) {
+        at = -1;
+        const char *e = getenv("LARECOMP_ACTOR_SCAN");
+        if (e && sscanf(e, "%ld:%lx", &at, &vt) == 2) {
+            const char *p = strchr(strchr(e, ':') + 1, ':');
+            if (p) strlcpy(pokes, p + 1, sizeof pokes);
+        } else at = -1;
+    }
+    if (at < 0 || (long)frame < at || !left || (frame - at) % 60) return;
+    left--;
+    extern int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
+    uint64_t ra[64], rs[64];
+    int nr = kernel_data_regions(ra, rs, 64), n = 0;
+    const char *byname = getenv("LARECOMP_ACTOR_NAME");  // (instead: objects whose name at +0x398 starts with this)
+    size_t bl = byname ? strlen(byname) : 0;
+    for (int r = 0; r < nr; r++)
+        for (uint64_t k = 0; k + 0x400 <= rs[r]; k += byname ? 4 : 8) {
+            uint64_t o = ra[r] + k;
+            static long name_at = -1;  // LARECOMP_ACTOR_NAME_AT=<hex>: where the name sits (default 0x398; -1 anywhere)
+            if (name_at == -1) name_at = getenv("LARECOMP_ACTOR_NAME_AT") ? strtol(getenv("LARECOMP_ACTOR_NAME_AT"), NULL, 16) : 0x398;
+            if (byname ? memcmp((const void *)(uintptr_t)(o + (name_at >= 0 ? name_at : 0)), byname, bl) != 0
+                       : LD64(o) != MAIN_BASE + (uint64_t)vt)
+                continue;
+            if (byname) LOG("[actorscan] by name: vtable main+%llx\n", (unsigned long long)(LD64(o) - MAIN_BASE));
+            n++;
+            LOG("[actorscan] f%llu obj %llx\n", (unsigned long long)frame, (unsigned long long)o);
+            int back = getenv("LARECOMP_ACTOR_BACK") ? (int)strtol(getenv("LARECOMP_ACTOR_BACK"), NULL, 0) : 0;
+            for (int q = -back; q < 0x400; q += 16) {
+                const uint8_t *b = (const uint8_t *)(uintptr_t)(o + q);
+                int z = 1;
+                for (int i = 0; i < 16; i++) z &= !b[i];
+                if (z) continue;
+                char line[80];
+                int m = 0;
+                for (int i = 0; i < 16; i++) m += snprintf(line + m, sizeof line - m, "%02x%s", b[i], i % 4 == 3 ? " " : "");
+                LOG("[actorscan]   %c%03x %s\n", q < 0 ? '-' : '+', q < 0 ? -q : q, line);
+            }
+            if (pokes[0] && !poked) {
+                for (const char *p = pokes; *p;) {
+                    unsigned off, val;
+                    if (sscanf(p, "%x=%x", &off, &val) == 2 && off < 0x1200) {
+                        *(volatile uint8_t *)(uintptr_t)(o + off) = (uint8_t)val;
+                        LOG("[actorscan]   poked +%x = %#x\n", off, val);
+                    }
+                    while (*p && *p != ',') p++;
+                    if (*p) p++;
+                }
+            }
+        }
+    if (pokes[0] && n) poked = 1;
+    LOG("[actorscan] f%llu %d objects with vtable main+%lx\n", (unsigned long long)frame, n, vt);
+}
+
 void give_item_tick(Cpu *c, uint64_t frame) {
+    actor_scan_tick(frame);
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)

@@ -509,6 +509,56 @@ for _a in TUNIC_CLEAR_SITES:
     PATCHES[_a] = _tunic_clear
 
 
+# Underwater checks (tools/rando/underwater.py; LAS 0.5 dev build's main+0x8c45b8 patch): the item actor's "should I
+# appear?" (main+0x8c4510) asks the inventory whether Link owns its item (bl HasItem(item +0x2e8, 1, index +0xbc)). The
+# sunken heart-piece actors hold randomized items now and hide by their own flag (Npc.gsheet layout condition), so for
+# heart-piece actors in seeds made with it the answer is "not owned" (runtime/hle/qol.c rt_underwater_skip_owned).
+UNDERWATER_OWNED_SITE = 0x70008c45b8
+
+
+def _underwater_owned(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x9400351e, hex(w)  # bl 0x8d1a30 (HasItem)
+    return ('{ extern int rt_underwater_skip_owned(uint64_t); if (rt_underwater_skip_owned(c->x[20])) c->x[0] = 0; '
+            'else { extern void f_70008d1a30(Cpu *); c->x[30] = 0x70008c45bcull; f_70008d1a30(c); } }'
+            f'  /* {a:#x}: bl HasItem (sunken heart pieces: their own flag decides) */')
+
+
+PATCHES[UNDERWATER_OWNED_SITE] = _underwater_owned
+
+# ...and their item models show underwater. Water is opaque here (its depth hides what's below): what's seen below the
+# surface is a second, low-resolution view the water samples, holding only models whose materials have the shader option
+# under_water - the heart piece's do, other items' don't. Model setup (main+0xff53d8 loop over a material's options)
+# reads it at 0xff54b4; in underwater-item seeds every material counts as under_water (as LAS-Randomizer's 0.5 dev
+# build does: its exlaunch mod writes mov w27, #1 here).
+UNDERWATER_VIEW_SITE = 0x7000ff54c0
+
+
+def _underwater_view(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f07fb, hex(w)  # cset w27, ne (under_water != 0)
+    return ('{ extern int rt_underwater_items(void); c->x[27] = (rt_underwater_items() || COND_NE(c)) ? 1u : 0u; }'
+            f'  /* {a:#x}: cset w27, ne (under_water: forced on for sunken items) */')
+
+
+PATCHES[UNDERWATER_VIEW_SITE] = _underwater_view
+
+# ...and picking one up gives only its own item (its event): the heart-piece actor's pickup (main+0x855a0, x19 = the
+# actor) would also add a heart piece (bl 0x89b960; LAS-Randomizer's 0.5 dev build NOPs it).
+UNDERWATER_PICKUP_SITE = 0x70000856e4
+
+
+def _underwater_pickup(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x9420589f, hex(w)  # bl 0x89b960
+    return ('{ extern int rt_underwater_skip_owned(uint64_t); if (!rt_underwater_skip_owned(c->x[19])) '
+            '{ extern void f_700089b960(Cpu *); c->x[30] = 0x70000856e8ull; f_700089b960(c); } }'
+            f'  /* {a:#x}: bl 0x89b960 (adds the heart piece: skipped for sunken items) */')
+
+
+PATCHES[UNDERWATER_PICKUP_SITE] = _underwater_pickup
+
+
 # Event actions with no handler: main+0x108e300 runs an event action through the actor's handler map; an entry whose
 # std::function is empty throws std::bad_function_call (0x108edc8), which the same function catches (catch
 # std::exception, landing pad 0x108f1c8 -> 0x108ef3c) to abort the event. Common.bfevfl's OcarinaWarpOut (every Manbo's
