@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 #include <algorithm>
 

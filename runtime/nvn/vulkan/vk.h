@@ -10,7 +10,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
+#if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
+#else
+#include <vk_mem_alloc.h>  // (Debian / Ubuntu libvulkan-memory-allocator-dev)
+#endif
 
 #include "../nvn.h"
 #include "../maxwell/shader.h"

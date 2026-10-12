@@ -1,5 +1,6 @@
 // Guest address -> recompiled function lookup, and host (HLE) function registry.
 #include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
