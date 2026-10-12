@@ -181,14 +181,32 @@ static std::string check_game_files(const std::string &root) {
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_dump, g_keys;  // picked files
 static std::string g_job;           // current extraction step / result for the status line
+static std::string g_job_hint;      // a failure: what to do about it (shown under it)
 static bool g_busy, g_job_failed;
 static bool g_confirm_delete;       // game-files page: "Delete the extracted game files?" shown
 
-static void set_job(const std::string &s, bool failed = false) {
+static void set_job(const std::string &s, bool failed = false, const std::string &hint = "") {
     pthread_mutex_lock(&g_lock);
     g_job = s;
     g_job_failed = failed;
+    g_job_hint = hint;
     pthread_mutex_unlock(&g_lock);
+}
+
+// Extraction failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-5>, screenshots)
+enum { FAIL_READ = 1, FAIL_NO_GAME, FAIL_EXTRACT, FAIL_VERSION, FAIL_MISSING };
+static void set_failure(int k) {
+    static const char *const head[] = {"", "Couldn't read the game dump", "No game found in the dump",
+                                       "Extraction didn't finish", "Wrong version of the game", "Game files incomplete"};
+    static const char *const hint[] = {
+        "",
+        "Check that the keys are your own console's prod.keys, from a Switch updated at least as far as the game, and "
+        "that the dump file copied completely.",
+        "Choose the dump of the game itself (the XCI, or the base game's NSP), not an update or DLC file.",
+        "Make sure there's about 12 GB free and try again. The details are in extract.log in LAS Recomp's data folder.",
+        "LAS Recomp needs version 1.0.0 of the game: a cartridge dump, or the base game's NSP without updates.",
+        "Some files are missing after extracting. Try Extract again; if it happens again, dump the game again."};
+    if (k >= 1 && k <= 5) set_job(head[k], true, hint[k]);
 }
 
 static int run(const std::vector<std::string> &args, const std::string &log) {
@@ -304,7 +322,7 @@ static void *extract_thread(void *) {
     } else {
         a.insert(a.end(), {"-t", "xci", "--securedir=" + tmp, dump});
     }
-    if (run(a, log)) { set_job("Could not read the dump (keys correct?)", true); goto done; }
+    if (run(a, log)) { set_failure(FAIL_READ); goto done; }
     if (nsp) {  // NSP content is title-key encrypted: the (encrypted) key is in the ticket at 0x180
         std::string tik = largest_with(tmp, ".tik");
         FILE *f = tik.empty() ? NULL : fopen(tik.c_str(), "rb");
@@ -318,7 +336,7 @@ static void *extract_thread(void *) {
     }
     {
         std::string nca = largest_with(tmp, ".nca");  // the program NCA (game code + data) is by far the largest
-        if (nca.empty()) { set_job("No game content found in the dump", true); goto done; }
+        if (nca.empty()) { set_failure(FAIL_NO_GAME); goto done; }
         pthread_mutex_lock(&g_lock);
         g_nca_bytes = tree_bytes(nca);
         pthread_mutex_unlock(&g_lock);
@@ -328,11 +346,12 @@ static void *extract_thread(void *) {
                                       "--romfs=" + g_root + "/romfs.bin"};
         if (!titlekey.empty()) b.push_back("--titlekey=" + titlekey);
         b.push_back(nca);
-        if (run(b, log)) { set_job("Extraction failed (see " + log + ")", true); goto done; }
+        if (run(b, log)) { set_failure(FAIL_EXTRACT); goto done; }
     }
     {
         std::string why = check_game_files(g_root);
-        set_job(why.empty() ? "Game files ready." : why, !why.empty());
+        if (why.empty()) set_job("Game files ready.");
+        else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
     }
 done:
     rt_remove_game_file(g_root.c_str(), ".extract");  // the dump's secure partition (~6 GB): only the NCA was needed
@@ -904,6 +923,7 @@ extern "C" void launcher_run(const char *root) {
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) page = SETTINGS, menu_tabs_focus(true);
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
+        if (pg && !strncmp(pg + 1, "fail", 4)) page = SETUP, set_failure(atoi(pg + 5));  // (the failure messages)
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
         if (pg && !strcmp(pg + 1, "tip")) g_settings.menu_tip_seen = false, g_tip_test = true;
@@ -1036,7 +1056,7 @@ extern "C" void launcher_run(const char *root) {
             float x0 = 90 * s;
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
-            if (page != SETTINGS) {  // gold to orange, shadowed (not beside the Settings window)
+            if (page == MAIN) {  // gold to orange, shadowed (not behind the Settings / Game Files windows)
                 const char *t = "LAS Recompiled";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
@@ -1240,7 +1260,7 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::Spacing();
 
                 pthread_mutex_lock(&g_lock);
-                std::string dump = g_dump, keys = g_keys, job = g_job;
+                std::string dump = g_dump, keys = g_keys, job = g_job, job_hint = g_job_hint;
                 bool failed = g_job_failed;
                 pthread_mutex_unlock(&g_lock);
                 if (keys.empty()) {  // (the usual place for them: picked up on its own)
@@ -1272,7 +1292,7 @@ extern "C" void launcher_run(const char *root) {
                 const std::string &job_line = job;
                 std::string ex_d = "Unpacks the game files LAS Recomp needs from your dump, once: a few minutes. Your "
                                    "dump and keys aren't changed.";
-                if (!job.empty()) ex_d += "\n\n" + job;
+                if (!job.empty()) ex_d += "\n\n" + job + (job_hint.empty() ? "" : ".\n" + job_hint);
 
                 // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
                 static int seen_frame = -10, focus_first;  // (not drawn last frame: the window has just opened)
@@ -1321,8 +1341,9 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Yes, delete them", gb, "Deletes the extracted game files now.", true)) {
                             bool ok = rt_remove_game_files(g_root.c_str());
                             status = check_game_files(g_root);
-                            set_job(ok ? "Game files deleted." : "Could not delete the game files (not in LAS Recomp's "
-                                         "data folder?).", !ok);
+                            if (ok) set_job("Game files deleted.");
+                            else set_job("Couldn't delete the game files", true, "They aren't in LAS Recomp's data folder, "
+                                         "so they were left alone.");
                             if (!status.empty()) g_bg = 0;
                             g_confirm_delete = false, files_gb = -1;
                         }
@@ -1334,6 +1355,8 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::PushTextWrapPos(0);
                     ImGui::TextColored(failed ? ImVec4(1, 0.5f, 0.4f, 1) : busy ? ImVec4(0.93f, 0.76f, 0.33f, 1)
                                               : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", job_line.c_str());
+                    if (failed && !job_hint.empty())  // (what to do next, in the rows' own text colour)
+                        ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", job_hint.c_str());
                     ImGui::PopTextWrapPos();
                 }
                 opt_end();
