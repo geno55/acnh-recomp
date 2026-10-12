@@ -19,6 +19,7 @@ FIELD_MINIBOSSES = {
     0x60: [],              # Avalaunch
     0x51: ['RolaStart'],   # Rolling Bones (with its spike bar)
     0x5A: [],              # Gohma
+    0x5F: [],              # Blaino (his knock-out punch sends Link back to the screen's start)
 }
 MINIBOSS_CHANCE = 0.08
 # Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
@@ -30,6 +31,7 @@ MINIBOSS_KITS = {
     0x60: ('Lv10ClothesDungeon_06E', (0x191,)),
     0x51: ('Lv01TailCave_06G', (0x11A, 0x191)),
     0x5A: ('Lv05CatfishsMaw_05D', (0x191,)),
+    0x5F: ('Lv08TurtleRock_03H', (0x191,)),
 }
 
 

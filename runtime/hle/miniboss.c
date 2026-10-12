@@ -20,20 +20,22 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 
 // per class: vtable, its state machine's change(sm, state) (+0xd current state, +0xe previous; states 0x30 apart
 // from +0x40: ctx, enter, exec, exit member functions), the state machine's offset in the actor, idle state, fight
-// state, position offset (x y z floats: the spawn point)
-typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; } Kind;
+// state, position offset (x y z floats: the spawn point), rest state (0xff: none) - one it stays in after a move
+// that ends its fight in its own room (Blaino's knock-out): woken again like idle
+typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest; } Kind;
 static const Kind g_kinds[] = {
-    {MAIN_BASE + 0x1b80e90, MAIN_BASE + 0x3bfc60, 0xff0, 0x260, 0, 1, "Hinox"},  // 0x53: 10 = request HinoxStart
-    // (found 2026-10-12 with tools placing each one on Field_13D: LARECOMP_MB_SCAN_NAME / _FORCE / _CHG_LOG)
-    {MAIN_BASE + 0x1b86e58, MAIN_BASE + 0x4301d0, 0x1110, 0x260, 0, 1, "Smasher"},       // 0x5c (needs its iron ball)
-    {MAIN_BASE + 0x1badc60, MAIN_BASE + 0x6d4f40, 0xff0, 0x260, 0, 1, "Avalaunch"},      // 0x60
-    {MAIN_BASE + 0x1ba32c8, MAIN_BASE + 0x61f250, 0xff0, 0x260, 0, 1, "Rolling Bones"},  // 0x51 (needs its spike bar)
-    {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma"},        // 0x5a
+    {MAIN_BASE + 0x1b80e90, MAIN_BASE + 0x3bfc60, 0xff0, 0x260, 0, 1, "Hinox", 0xff},  // 0x53: 10 = request HinoxStart
+    // (found 2026-10-12 with tools placing each one on Field_13D: LARECOMP_MB_SCAN_NAME / _FORCE)
+    {MAIN_BASE + 0x1b86e58, MAIN_BASE + 0x4301d0, 0x1110, 0x260, 0, 1, "Smasher", 0xff},       // 0x5c (+ iron ball)
+    {MAIN_BASE + 0x1badc60, MAIN_BASE + 0x6d4f40, 0xff0, 0x260, 0, 1, "Avalaunch", 0xff},      // 0x60
+    {MAIN_BASE + 0x1ba32c8, MAIN_BASE + 0x61f250, 0xff0, 0x260, 0, 1, "Rolling Bones", 0xff},  // 0x51 (+ spike bar)
+    {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a
+    {MAIN_BASE + 0x1b91408, MAIN_BASE + 0x4ec6c0, 0x11a0, 0x260, 10, 1, "Blaino", 5},          // 0x5f (5: after a knock-out)
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
 
-typedef struct { uint64_t obj, first, last; int kind, woken; } Seen;
+typedef struct { uint64_t obj, first, last, woken_at; int kind, woken; } Seen;
 static Seen g_seen[32];
 RT_ON_RESET(miniboss_reset) { memset(g_seen, 0, sizeof g_seen); }
 extern uint64_t renderer_present_count(void);
@@ -133,7 +135,7 @@ void rt_mb_seen(uint64_t o) {
         if (g_seen[i].obj == o) { g_seen[i].last = f; return; }
         if (free_i < 0 && (!g_seen[i].obj || f - g_seen[i].last > 120)) free_i = i;
     }
-    if (free_i >= 0) g_seen[free_i] = (Seen){o, f, f, k, 0};
+    if (free_i >= 0) g_seen[free_i] = (Seen){o, f, f, 0, k, 0};
 }
 
 // LARECOMP_MB_FORCE=<frame>:<sm offset hex>:<state>[:<change fn main offset hex>] (RE, with LARECOMP_MB_SCAN_NAME):
@@ -188,13 +190,17 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     for (int i = 0; i < 32; i++) {
         Seen *s = &g_seen[i];
-        if (!s->obj || s->woken || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt)
-            continue;
+        if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
         const Kind *k = &g_kinds[s->kind];
+        uint8_t st = *(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd);
+        // first wake from idle; again from its rest state (a while after the last wake: it went there itself)
+        bool again = s->woken && k->rest != 0xff && st == k->rest && frame - s->woken_at > 180;
+        if (s->woken ? !again : st != k->idle) continue;
         const float *p = (const float *)(uintptr_t)(s->obj + k->pos);
         float dx = p[0] - lp[0], dz = p[2] - lp[2];
-        if (*(uint8_t *)(uintptr_t)(s->obj + k->sm + 0xd) != k->idle || dx * dx + dz * dz > WAKE_DIST * WAKE_DIST) continue;
+        if (dx * dx + dz * dz > WAKE_DIST * WAKE_DIST) continue;
         s->woken = 1;
+        s->woken_at = frame;
         uint64_t saved[31], sp = c->sp;
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = s->obj + k->sm;
