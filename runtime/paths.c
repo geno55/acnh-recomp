@@ -91,6 +91,11 @@ void rt_paths_init(void) {
     else {
 #ifdef _WIN32
         snprintf(root, sizeof root, "%s", g_exe_dir);
+#elif defined(__linux__)
+        // (the AppImage is read-only): $XDG_DATA_HOME/lasrecomp, ~/.local/share/lasrecomp by default
+        const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+        if (xdg && *xdg == '/') snprintf(root, sizeof root, "%s/lasrecomp", xdg);
+        else snprintf(root, sizeof root, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
 #else
         const char *home = getenv("HOME");
         snprintf(root, sizeof root, "%s/Library/Application Support/" RT_BUNDLE_ID, home && *home ? home : "/tmp");
