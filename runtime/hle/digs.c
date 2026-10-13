@@ -67,7 +67,8 @@ static uint64_t g_item[NTILES];   // ... of the tile's item actor
 static uint32_t g_zone = 1;       // zone id the shovel passes (1 on the Field; refreshed by every real dig)
 static int g_queue[64], g_nq;     // dug checks whose item is to be spawned
 static FILE *g_test_out;          // (dig test: LARECOMP_DIG_TEST)
-static uint8_t g_spawns[NTILES];  // holes reopened per tile since the Field loaded (3 that didn't stay: give up)
+static uint8_t g_spawns[NTILES];  // holes reopened per tile that didn't stay (3: give up)
+static uint64_t g_spawn_at[NTILES];  // ... frame of the last reopen (a hole that lasted was unloaded, not failed)
 static uint64_t g_quiet[NTILES];  // reopened hole: until this frame nothing else may appear on the tile (its dig drop)
 static uint64_t g_frame;
 static int g_field_was;           // (the tick: on the Field / which scene, last frame)
@@ -89,6 +90,7 @@ RT_ON_RESET(digs_reset) {
     memset(g_alive, 0, sizeof g_alive);
     memset(g_item, 0, sizeof g_item);
     memset(g_spawns, 0, sizeof g_spawns);
+    memset(g_spawn_at, 0, sizeof g_spawn_at);
     memset(g_quiet, 0, sizeof g_quiet);
     g_zone = 1, g_nq = 0, g_frame = 0;
     g_field_was = 0, g_scene_was = 0, g_scratch = 0, g_pool = 0;
@@ -223,7 +225,13 @@ static int pool_index(Cpu *c, const char *str) {
         g_nstr = 0;
     }
     uint64_t e = LD64(STR_POOL + 8);
-    if (g_nstr == POOL_CAP || e >= g_pool + 32 * POOL_CAP) return -1;
+    if (g_nstr == POOL_CAP || e >= g_pool + 32 * POOL_CAP) {
+        static int nl;
+        if (nl++ < 5) LOG("[digs] pool full: ours %d, vector %llx..%llx (%lld entries), our storage %llx\n", g_nstr,
+                          (unsigned long long)LD64(STR_POOL), (unsigned long long)e, (long long)((e - LD64(STR_POOL)) / 32),
+                          (unsigned long long)g_pool);
+        return -1;
+    }
     size_t n = strlen(str);
     char *buf = hle_alloc(n + 16);
     memcpy(buf, str, n + 1);
@@ -232,8 +240,8 @@ static int pool_index(Cpu *c, const char *str) {
     ST64(e + 16, (uint64_t)(uintptr_t)buf);
     ST64(e + 24, 1ull << 40);  // refs: never released
     ST64(STR_POOL + 8, e + 32);
-    g_strtab[g_nstr] = strdup(str);
-    return (int)((e - g_pool) / 32);
+    g_strtab[g_nstr++] = strdup(str);  // (the lookup: each string once - it was never counted, every spawn added
+    return (int)((e - g_pool) / 32);      //  its six again and the pool was full after ~170 item spawns)
 }
 
 // the current room (shared_ptr): what the shovel spawns its holes into; false when the scene isn't up
@@ -369,6 +377,10 @@ static void dig_test(uint64_t frame) {
         LOG("[digtest] %d tiles -> %s\n", n, op);
     }
     if (state < 0 || (long)frame < at) return;
+    {   // (the shovel on Y: item slot 7 at player status +0xa2)
+        uint64_t ps = LD64(PLAYER_STATUS_PTR);
+        if (ps) ST8(ps + 0xa2, 7);
+    }
     while (cur < n && (!list[cur].ns || flags_ext_get(DIG_FLAG_BASE + list[cur].g))) {  // nowhere to stand / dug
         fprintf(g_test_out, "%s %d\n", list[cur].ns ? "OK" : "NOSTAND", list[cur].g);
         cur++, stand = 0;
@@ -377,7 +389,9 @@ static void dig_test(uint64_t frame) {
         LOG("[digtest] done\n");
         if (g_test_out) fclose(g_test_out);
         g_test_out = NULL;
-        _exit(0);
+        if (!ENV("LARECOMP_DIG_TEST_STAY")) _exit(0);  // (STAY: the game goes on - a test that walks the holes after)
+        state = -2;
+        return;
     }
     const Entry *en = &list[cur];
     if (strcmp(warped, en->warp)) {  // far away: warp to the nearest locator first
@@ -406,6 +420,7 @@ static void dig_test(uint64_t frame) {
     if (state == 0) { t0 = frame; state = 1; }
     long t = (long)(frame - t0), settle = en->g / 80 != prev_screen ? 90 : 12, dig = settle + (en->cut ? 40 : 6);
     if (t <= settle) {  // hold Link on the stand tile while the area streams in, then turn him
+        if (t == 2) g_test_buttons = 1, g_test_buttons_until = frame + 4;  // (a message box left open: closed)
         pos[0] = pos2[0] = en->x[stand];
         pos[2] = pos2[2] = en->z[stand];
         if (t == settle) {
@@ -420,6 +435,9 @@ static void dig_test(uint64_t frame) {
     } else if (t == dig) {
         g_test_buttons = 8;  // Y: shovel
         g_test_buttons_until = frame + 6;
+    } else if (t == dig + 24 || t == dig + 34) {  // A: close an item's message box (the next dig waits behind it)
+        g_test_buttons = 1;
+        g_test_buttons_until = frame + 4;
     } else if (t >= dig + 40) {
         prev_screen = en->g / 80;
         state = 0;
@@ -449,6 +467,7 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
             if (g_item[g] && !alive(g_item[g])) drop(c, &g_item[g]);
         }
         memset(g_spawns, 0, sizeof g_spawns);
+        memset(g_spawn_at, 0, sizeof g_spawn_at);
         g_field_was = field, g_scene_was = scene;
     }
     uint64_t pc0 = field ? doorjump_player(frame) : 0;
@@ -475,11 +494,14 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
                     for (int t = 0; t < 80 && holes + items < 12; t++) {
                         int g = (r * 16 + k) * 80 + t;
                         if (!g_tiles[g].dig || !flags_ext_get(DIG_FLAG_BASE + g)) continue;
-                        if (g_spawns[g] < 3 && !hole_alive(g)) {
+                        bool open = hole_alive(g);
+                        if (!open && g_spawn_at[g] && frame - g_spawn_at[g] > 300) g_spawns[g] = 0;  // (it lasted)
+                        if (g_spawns[g] < 3 && !open) {
                             drop(c, &g_alive[g]);
                             g_quiet[g] = frame + 240;
                             spawn_hole(c, g);
                             g_spawns[g]++;
+                            g_spawn_at[g] = frame;
                             holes++;
                         }
                         if (g_tiles[g].entry && !g_item[g] && !flags_ext_get(GOT_FLAG_BASE + g)) {
