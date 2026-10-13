@@ -333,11 +333,16 @@ def main():
         cat = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'room_catalog.json')))
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
         base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
+        layouts = jumps = None
         for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
             sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
             if room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
-                layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
-                                                              settings=settings)
+                try:
+                    layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
+                                                                  settings=settings)
+                except RuntimeError as e:  # (no round left every dungeon room for its keys and items: next one)
+                    print('room layout:', e, '- planning another', flush=True)
+                    continue
                 logic_rows = jumps
             else:
                 layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
@@ -349,6 +354,8 @@ def main():
             if not why:
                 break
             print('room layout can\'t be filled -', why, '- planning another', flush=True)
+        if layouts is None:
+            raise RuntimeError('no dungeon room layout for this seed')
         room_plan = (layouts, jumps)
         if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only; =<names>: print those conditions)
             for k in os.environ['LARECOMP_PLAN_ONLY'].split(','):
