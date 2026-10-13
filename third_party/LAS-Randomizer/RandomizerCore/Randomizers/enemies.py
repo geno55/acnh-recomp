@@ -8,7 +8,7 @@ from RandomizerCore.randomizer_data import ENEMY_DATA
 # Left out (2026-10-12): Moblin Chief 0x52 / Grim Creeper 0x5d (constructed, then deleted at once by the actor
 # manager - their init decides; runtime RE in notes), Lanmola 0x57 (sand only).
 FIELD_MINIBOSSES = {
-    0x53: ['HinoxStart'],  # Hinox
+    0x53: ['HinoxStart'],  # Hinox (red, or blue: MINIBOSS_VARIANTS)
     0x56: [],              # Dodongo Snake (bombs)
     0x5B: [],              # Armos Knight
     0x61: [],              # Giant Buzz Blob (Magic Powder, then sword)
@@ -20,6 +20,7 @@ FIELD_MINIBOSSES = {
     0x59: [],              # Master Stalfos (starts by himself)
     0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
 }
+MINIBOSS_VARIANTS = {0x53: [['HinoxStart'], [2]]}  # (one picked per mini-boss: Hinox 2 = Turtle Rock's blue one)
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
 # Out for now (user 2026-10-12, maybe later): Gohma 0x5A - its own AI heads for Link with targeted patches
 # (runtime/hle/miniboss.c, tools/patches.py GOHMA_*; walls from tools/rando/roam.py), but it isn't good enough yet.
@@ -53,6 +54,7 @@ MINIBOSS_CHANCE = 0.08
 import os as _os
 if _os.environ.get('LARECOMP_ALL_MINIBOSSES'):  # (test: every room with a randomized land enemy gets one)
     MINIBOSS_CHANCE = 1.0
+_ONLY_PARAM = _os.environ.get('LARECOMP_ONLY_MINIBOSS_PARAM')  # (test: its first parameter, an int)
 _ONLY = _os.environ.get('LARECOMP_ONLY_MINIBOSS')  # (test: hex type - every randomized Field enemy becomes it, any terrain)
 # Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
 # copied from it next to the mini-boss (same offsets, linked both ways as there): Smasher's iron ball (without it the
@@ -260,7 +262,10 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 restr.extend(blocking)
             
             if mini is not None:
-                params = [bytes(p, 'utf-8') if isinstance(p, str) else p for p in FIELD_MINIBOSSES[mini]]
+                params = random.choice(MINIBOSS_VARIANTS[mini]) if mini in MINIBOSS_VARIANTS else FIELD_MINIBOSSES[mini]
+                params = [bytes(p, 'utf-8') if isinstance(p, str) else p for p in params]
+                if _ONLY_PARAM:
+                    params = [int(_ONLY_PARAM)]
                 act.type = mini
                 act.parameters = (params + [b''] * 8)[:8]
                 act.relationships.e = 1
