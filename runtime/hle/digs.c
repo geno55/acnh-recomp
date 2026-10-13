@@ -244,8 +244,12 @@ static int pool_index(Cpu *c, const char *str) {
     return (int)((e - g_pool) / 32);      //  its six again and the pool was full after ~170 item spawns)
 }
 
-// the current room (shared_ptr): what the shovel spawns its holes into; false when the scene isn't up
-static bool current_room(Cpu *c, uint64_t pair, uint64_t *sctrl) {
+// a loaded screen's room (shared_ptr): what a hole or item on that screen is spawned into - the shovel uses the
+// current one (scene +0x228 = Link's screen's holder, +0x1b8 its room), but a screen's actors die with its own room,
+// so one spawned into Link's room on another screen would go when Link's screen unloads. The holders sit in a pool of
+// 0x260-byte entries (+0x50 the entry itself, +0x240 1 while loaded, +0x1a8 -> +0x74 the screen's file, "Field_11A.").
+// false when the scene isn't up or the screen isn't loaded
+static bool screen_room(Cpu *c, uint64_t pair, int screen, uint64_t *sctrl) {
     uint64_t mgr = LD64(GAME_MGR);
     *sctrl = 0;
     if (!mgr) return false;
@@ -254,10 +258,20 @@ static bool current_room(Cpu *c, uint64_t pair, uint64_t *sctrl) {
     guest_call(c, SCENE_LOCK);
     uint64_t scene = LD64(pair + 0x10), holder = scene ? LD64(scene + 0x228) : 0;
     *sctrl = LD64(pair + 0x18);
-    if (!holder || !LD64(holder + 0x1b8)) return false;
-    ST64(pair, LD64(holder + 0x1b8));  // room (ptr, control block): borrowed, as the shovel does
-    ST64(pair + 8, LD64(holder + 0x1c0));
-    return true;
+    if (!holder) return false;
+    char want[16];
+    snprintf(want, sizeof want, "Field_%02d%c", screen / 16 + 1, 'A' + screen % 16);
+    for (int k = 0; k < 64; k++) {  // (the current holder first, then outwards)
+        uint64_t e = holder + (int64_t)((k & 1) ? -(k + 1) / 2 : k / 2) * 0x260;
+        if (e < HEAP_BASE || e + 0x260 > HEAP_BASE + HEAP_MAX || LD64(e + 0x50) != e || LD32(e + 0x240) != 1) continue;
+        uint64_t info = LD64(e + 0x1a8), room = LD64(e + 0x1b8);
+        if (!room || info < HEAP_BASE || info >= HEAP_BASE + HEAP_MAX) continue;
+        if (strncmp((const char *)(uintptr_t)(info + 0x74), want, 9)) continue;  // ("Field_11A.leb")
+        ST64(pair, room);  // room (ptr, control block): borrowed, as the shovel does
+        ST64(pair + 8, LD64(e + 0x1c0));
+        return true;
+    }
+    return false;
 }
 
 static uint64_t scratch(void) {
@@ -266,10 +280,12 @@ static uint64_t scratch(void) {
     return g_scratch;
 }
 
-static void spawn_hole(Cpu *c, int g) {
+// false: the tile's screen isn't loaded
+static bool spawn_hole(Cpu *c, int g) {
     uint64_t s = scratch(), sctrl;
     guest_call(c, HOLE_LIST_INIT);
-    if (current_room(c, s + 0x10, &sctrl)) {
+    bool loaded = screen_room(c, s + 0x10, g / 80, &sctrl);
+    if (loaded) {
         float x, z, y = g_tiles[g].y;
         tile_xz(g, &x, &z);
         float *tr = (float *)(uintptr_t)(s + 0x40);  // the shovel's transform: position, rotation, scale, ground, normal
@@ -293,18 +309,21 @@ static void spawn_hole(Cpu *c, int g) {
         }
     }
     if (sctrl) { c->x[0] = sctrl; guest_call(c, SP_RELEASE); }
+    return loaded;
 }
 
 // the tile's item as a SinkingSword item actor, the way a level spawns one (spawn info: +0 key, +8 type, +0xc zone,
-// +0x10 eight {u32 value, u8 type} parameters, +0x180 position / rotation (quaternion) / scale; the rest zero)
-static void spawn_item(Cpu *c, int g) {
+// +0x10 eight {u32 value, u8 type} parameters, +0x180 position / rotation (quaternion) / scale; the rest zero).
+// false: the tile's screen isn't loaded
+static bool spawn_item(Cpu *c, int g) {
     const Tile *t = &g_tiles[g];
     const char *strs[8] = {t->model, t->mname, t->entry, "LARDigItem", t->shell ? "true" : "false", "", "", ""};
     int idx[8];
     for (int k = 0; k < 8; k++)
-        if ((idx[k] = pool_index(c, strs[k])) < 0) { LOG("[digs] string pool full\n"); return; }
+        if ((idx[k] = pool_index(c, strs[k])) < 0) { LOG("[digs] string pool full\n"); return true; }
     uint64_t s = scratch(), info = s + 0x40, sctrl;
-    if (current_room(c, s + 0x10, &sctrl)) {
+    bool loaded = screen_room(c, s + 0x10, g / 80, &sctrl);
+    if (loaded) {
         ST64(info, 0x7c00000000000000ull | (uint64_t)g);  // (actor key: a tag of ours + the tile)
         ST16(info + 8, T_SINKING_SWORD);
         ST32(info + 0xc, g_zone);
@@ -328,6 +347,7 @@ static void spawn_item(Cpu *c, int g) {
             LD64(s) ? "up" : "failed");
     }
     if (sctrl) { c->x[0] = sctrl; guest_call(c, SP_RELEASE); }
+    return loaded;
 }
 
 static bool hole_alive(int g) { return alive(g_alive[g]); }
@@ -488,28 +508,27 @@ void digs_game_tick(Cpu *c, uint64_t frame) {
         int here = tile_at(p[0], p[2]), holes = 0, items = 0;
         if (here >= 0) {
             int row0 = here / 80 / 16, col = here / 80 % 16;
-            for (int r = row0 - 1; r <= row0 + 1; r++)
-                for (int k = col - 1; k <= col + 1; k++) {
-                    if (r < 0 || r > 15 || k < 0 || k > 15) continue;
-                    for (int t = 0; t < 80 && holes + items < 12; t++) {
-                        int g = (r * 16 + k) * 80 + t;
-                        if (!g_tiles[g].dig || !flags_ext_get(DIG_FLAG_BASE + g)) continue;
-                        bool open = hole_alive(g);
-                        if (!open && g_spawn_at[g] && frame - g_spawn_at[g] > 300) g_spawns[g] = 0;  // (it lasted)
-                        if (g_spawns[g] < 3 && !open) {
-                            drop(c, &g_alive[g]);
-                            g_quiet[g] = frame + 240;
-                            spawn_hole(c, g);
-                            g_spawns[g]++;
-                            g_spawn_at[g] = frame;
-                            holes++;
-                        }
-                        if (g_tiles[g].entry && !g_item[g] && !flags_ext_get(GOT_FLAG_BASE + g)) {
-                            spawn_item(c, g);
-                            items++;
-                        }
+            static const int8_t around[9][2] = {{0, 0}, {0, -1}, {0, 1}, {-1, 0}, {1, 0}, {-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
+            for (int n = 0; n < 9; n++) {  // (Link's screen first: its holes are the ones on screen)
+                int r = row0 + around[n][0], k = col + around[n][1];
+                if (r < 0 || r > 15 || k < 0 || k > 15) continue;
+                for (int t = 0; t < 80 && holes + items < 12; t++) {
+                    int g = (r * 16 + k) * 80 + t;
+                    if (!g_tiles[g].dig || !flags_ext_get(DIG_FLAG_BASE + g)) continue;
+                    bool open = hole_alive(g);
+                    if (!open && g_spawn_at[g] && frame - g_spawn_at[g] > 300) g_spawns[g] = 0;  // (it lasted)
+                    if (g_spawns[g] < 3 && !open) {
+                        drop(c, &g_alive[g]);
+                        g_quiet[g] = frame + 240;
+                        if (!spawn_hole(c, g)) break;  // (the screen isn't loaded: its holes come back once it is)
+                        g_spawns[g]++;
+                        g_spawn_at[g] = frame;
+                        holes++;
                     }
+                    if (g_tiles[g].entry && !g_item[g] && !flags_ext_get(GOT_FLAG_BASE + g) && spawn_item(c, g))
+                        items++;
                 }
+            }
         }
         if (holes || items)
             LOG("[digs] f%llu: %d holes, %d items back around %02d%c\n", (unsigned long long)frame, holes, items,
