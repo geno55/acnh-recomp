@@ -65,6 +65,41 @@ extern "C" bool chaos_overlay_wanted(void) {
     return doorjump_chaos_pairs(current_level(), ids, 4) > 0;
 }
 
+// rando/<seed>/dungeon_map.tsv (tools/rando/dungeon_gen.py): level, cell, x, y - the map page shift of the floor each
+// cell is drawn on. The page shows one floor (its shift is N_MapPosition_00's): doorways of the other floors' cells
+// are left out (Key Cavern's B1 letters were drawn on the 1F page, off its paper).
+namespace {
+struct MapCell { char level[24]; int col, row; float x, y; };
+}
+static MapCell g_cells[640];
+static int g_ncells = -1;
+RT_ON_RESET(chaos_overlay_cells_reset) { g_ncells = -1; }
+
+static bool cell_shift(const char *lv, int col, int row, float *x, float *y) {
+    if (g_ncells < 0) {
+        g_ncells = 0;
+        char p[512];
+        const char *dir = rando_seed_dir();
+        FILE *f = dir ? (snprintf(p, sizeof p, "%s/dungeon_map.tsv", dir), fopen(p, "r")) : NULL;
+        char line[128], cell[8];
+        while (f && g_ncells < 640 && fgets(line, sizeof line, f)) {
+            MapCell &m = g_cells[g_ncells];
+            if (sscanf(line, "%23[^\t]\t%7[^\t]\t%f\t%f", m.level, cell, &m.x, &m.y) == 4 && strlen(cell) == 3) {
+                m.row = (cell[0] - '0') * 10 + (cell[1] - '0');
+                m.col = cell[2] - 'A';
+                g_ncells++;
+            }
+        }
+        if (f) fclose(f);
+    }
+    for (int i = 0; i < g_ncells; i++)
+        if (g_cells[i].col == col && g_cells[i].row == row && !strcmp(g_cells[i].level, lv)) {
+            *x = g_cells[i].x, *y = g_cells[i].y;
+            return true;
+        }
+    return false;
+}
+
 namespace {
 struct Door { int col, row, slot; char side; int label; int to; bool shown; };  // to: label it leads to (one-way), -1
 }
@@ -140,6 +175,8 @@ extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font) {
     for (int k = 0; k < nd; k++) {
         const Door &d = doors[k];
         if (!d.shown) continue;
+        float fx, fy;  // (a cell on another floor: not on this page)
+        if (cell_shift(lv, d.col, d.row, &fx, &fy) && (fabsf(fx - ptx) > 0.5f || fabsf(fy - pty) > 0.5f)) continue;
         // the doorway: on the cell's edge at its centre (slot in half tiles; a cell is 15 x 12 units), pulled
         // a little into the room so the letter sits on the room's map image
         float cx = -326 + (d.col + 0.5f) * CW, cy = 259 - (d.row - 0.5f) * CH;
