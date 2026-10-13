@@ -18,6 +18,7 @@ FIELD_MINIBOSSES = {
     0x5F: [],              # Blaino (his knock-out punch: Link falls back down - runtime)
     0x58: [1, 0],          # Cue Ball (circles a rail fitted to the room)
     0x59: [],              # Master Stalfos (starts by himself)
+    0x57: [],              # Lanmola (his rail from Field_13O; copies give no item: tools/rando/miniboss_guard.py)
     0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
 }
 MINIBOSS_VARIANTS = {0x53: [['HinoxStart'], [2]]}  # (one picked per mini-boss: Hinox 2 = Turtle Rock's blue one)
@@ -64,6 +65,7 @@ MINIBOSS_KITS = {  # (no AreaEventBox: it plays the arena intro - camera, music 
     0x5C: ('Lv06FaceShrine_05F', (0x1E4,)),  # Smasher's iron ball
     0x51: ('Lv01TailCave_06G', (0x11A,)),    # Rolling Bones' spike bar
     0x58: ('Lv04AnglersTunnel_03E', ()),     # Cue Ball (its rail)
+    0x57: ('Field_13O', ()),                 # Lanmola (his rail)
 }
 
 

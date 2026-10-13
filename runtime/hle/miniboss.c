@@ -23,8 +23,11 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 // state, position offset (x y z floats: the spawn point), rest state (0xff: none) - one it stays in after a move
 // that ends its fight in its own room (Blaino's knock-out): woken again like idle, then (0: none) - a state it goes
 // on to a few frames after waking (Master Stalfos: 13 shows him, 1 is his fight), at_once: woken as soon as he's
-// loaded, wherever Link is (an idle Master Stalfos is invisible)
-typedef struct { uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest, then, at_once; } Kind;
+// loaded, wherever Link is (an idle Master Stalfos is invisible), start (main offset, 0: none) - its own start action,
+// called with the actor instead of the state change (Lanmola: what his screen's event runs - up out of the sand)
+typedef struct {
+    uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest, then, at_once; uint32_t start;
+} Kind;
 static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b80e90, MAIN_BASE + 0x3bfc60, 0xff0, 0x260, 0, 1, "Hinox", 0xff},  // 0x53: 10 = request HinoxStart
     // (found 2026-10-12 with tools placing each one on Field_13D: LARECOMP_MB_SCAN_NAME / _FORCE)
@@ -34,6 +37,8 @@ static const Kind g_kinds[] = {
     {MAIN_BASE + 0x1b7e0e8, MAIN_BASE + 0x38bf50, 0x1200, 0x260, 13, 0, "Gohma", 0xff},        // 0x5a (heads for Link: GOHMA_*)
     {MAIN_BASE + 0x1b91408, MAIN_BASE + 0x4ec6c0, 0x11a0, 0x260, 10, 1, "Blaino", 5},          // 0x5f (5: after a knock-out)
     {MAIN_BASE + 0x1b82f70, MAIN_BASE + 0x3e59a0, 0xff0, 0x260, 0, 3, "Cue Ball", 0xff},       // 0x58 (+ a rail fitted)
+    // 0x57: 0 = under the sand until his screen's event (AreaEventBox - not copied) runs his start; back in 0, again
+    {MAIN_BASE + 0x1b8bc08, MAIN_BASE + 0x47db50, 0xff0, 0x260, 0, 1, "Lanmola", 0, 0, 0, 0x487ce0},
     // 0x59: 12 = hidden until his room's event (AreaEventBox - not copied: intro, music) drops him in; 13 shows him
     {MAIN_BASE + 0x1b8ea08, MAIN_BASE + 0x4b9be0, 0x1230, 0x260, 12, 13, "Master Stalfos", 0xff, 1, 1},
 };
@@ -183,6 +188,32 @@ static void force_tick(Cpu *c, uint64_t frame) {
     c->sp = sp;
     LOG("[mb-force] f%llu actor %llx sm +%#llx -> state %d\n", (unsigned long long)frame, (unsigned long long)scan_latest(),
         (unsigned long long)sm, state);
+}
+
+// A copy of a mini-boss whose flow gives a check (Lanmola) skips the item when its switch 2 - the seed's
+// OverworldMinibossMarker flag (settings.json "miniboss-marker-flag", tools/rando/miniboss_guard.py) - is set: set it
+// whenever one is woken. (The original has no switch 2: he gives it as before.)
+static int g_marker = -2;
+RT_ON_RESET(miniboss_marker_reset) { g_marker = -2; }
+static void miniboss_marker_set(void) {
+    if (g_marker == -2) {
+        g_marker = -1;
+        extern const char *rando_seed_dir(void);
+        const char *dir = rando_seed_dir();
+        char p[512];
+        FILE *f = dir ? (snprintf(p, sizeof p, "%s/settings.json", dir), fopen(p, "rb")) : NULL;
+        if (f) {
+            static char buf[1 << 16];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            const char *k = strstr(buf, "\"miniboss-marker-flag\":");
+            if (k) g_marker = atoi(k + strlen("\"miniboss-marker-flag\":"));
+        }
+    }
+    if (g_marker < 0 || g_marker >= 2048) return;
+    uint8_t *fl = (uint8_t *)(uintptr_t)(MAIN_BASE + 0x1CBB220 + 0x5DC0);  // (live save: event flag bits)
+    fl[g_marker >> 3] |= (uint8_t)(1 << (g_marker & 7));
 }
 
 // Gohma on the Field (tools/patches.py GOHMA_*): its moves head for Link (angle units: 2^31 = pi, 0 = +z) - or, with
@@ -361,9 +392,15 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         s->woken_at = frame;
         uint64_t saved[31], sp = c->sp;
         memcpy(saved, c->x, sizeof saved);
-        c->x[0] = s->obj + k->sm;
-        c->x[1] = k->fight;
-        guest_call(c, k->chg);
+        miniboss_marker_set();
+        if (k->start) {
+            c->x[0] = s->obj;
+            guest_call(c, MAIN_BASE + k->start);
+        } else {
+            c->x[0] = s->obj + k->sm;
+            c->x[1] = k->fight;
+            guest_call(c, k->chg);
+        }
         memcpy(c->x, saved, sizeof saved);
         c->sp = sp;
         LOG("[miniboss] f%llu %s woken (Link %.1f away; it stood at %.1f %.1f)\n", (unsigned long long)frame, k->name,
