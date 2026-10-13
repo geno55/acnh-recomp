@@ -113,8 +113,9 @@ def build(seed_dir, romfs):
 
     region_cells = {}
     pos = {}
+    absent = set(settings.get('absent-locations', ()))  # (rooms the dungeon shuffle left out: not in the game)
     for name, v in logic.items():
-        if v.get('type') != 'item' or name.startswith('starting-'):
+        if v.get('type') != 'item' or name.startswith('starting-') or name in absent:
             continue
         lr = loc_rooms.get(name, {})
         room, level = lr.get('room'), lr.get('level')

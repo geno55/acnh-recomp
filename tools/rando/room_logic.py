@@ -600,6 +600,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
 
     dungeon_of = settings.setdefault('dungeon-of', {})
     excluded = settings.setdefault('excluded-locations', set())
+    absent = settings.setdefault('absent-locations', set())  # (their rooms aren't in the layout: not in the game)
     rewritten = unused = fallback = 0
     targets = {k: (v.get('room'), v.get('level')) for k, v in lr.items()}
     for k, room in (extra_locations or {}).items():
@@ -623,7 +624,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             hl = next(l for l, (i, _) in LEVELS.items() if i == n)
             c2, gone = remap_cells(cond)
             if gone:  # (its room isn't in any layout: never reachable)
-                excluded.add(loc)
+                excluded.add(loc), absent.add(loc)
                 unused += 1
                 continue
             c2 = re.sub(rf'key-D{n}:\d+', f'key-D{n}:{lock_count.get(n, 0)}' if lock_count.get(n) else '', c2)
@@ -654,7 +655,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             fallback += 1  # a room at home the graph can't enter (no doorways: Bottle Grotto 03C, reached by a fall):
             continue       # its vanilla condition, on the redefined cell regions
         if not reach:
-            excluded.add(loc)
+            excluded.add(loc), absent.add(loc)
             unused += 1
             continue
         local, _ = strip(parse(cond), drop)
@@ -675,7 +676,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             continue
         c2, gone = remap_cells(cond)
         if gone:
-            excluded.add(loc)
+            excluded.add(loc), absent.add(loc)
             unused += 1
             continue
         v['condition-basic'] = c2
