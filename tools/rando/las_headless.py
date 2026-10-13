@@ -453,7 +453,8 @@ def main():
     for k in [k for k, v in sh.logic_defs.items() if v.get('_check_only')]:
         del sh.logic_defs[k]
     missing = [i for i in playthrough.INSTRUMENTS if not access.get(i)]
-    locs = [k for k, v in sh.logic_defs.items() if v.get('type') == 'item']
+    absent = settings.get('absent-locations', set())  # (rooms the dungeon shuffle left out: not in the game)
+    locs = [k for k, v in sh.logic_defs.items() if v.get('type') == 'item' and k not in absent]
     unreached = [k for k in locs if k not in seen]
     print('playthrough:', 'all instruments reachable' if not missing else f'MISSING {missing}',
           f'- {len(locs) - len(unreached)}/{len(locs)} item locations reachable', flush=True)
@@ -604,6 +605,7 @@ def main():
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
+        s['absent-locations'] = sorted(s.get('absent-locations', ()))
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         s['underwater-items'] = True  # (runtime: the sunken heart-piece actors don't hide for an owned heart piece)
