@@ -21,8 +21,8 @@ Pull requests that include Nintendo files can't be merged. Screenshots and short
 
 ## Reporting bugs
 
-The preferred place to report bugs is the [Discord](https://discord.gg/DhrgdYqdcY) - it's where bugs get
-discussed and worked on. GitHub issues are fine too if you can't use Discord. Please include:
+Report bugs either on the [Discord](https://discord.gg/DhrgdYqdcY) or as a
+[GitHub issue](https://github.com/peiikai/LASRecomp/issues) - whichever you prefer. Please include:
 
 - your platform (macOS / Windows), hardware (CPU, GPU) and window size / aspect ratio
 - what you did, what happened, and what you expected
