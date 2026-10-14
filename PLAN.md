@@ -119,9 +119,23 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    (16 bytes per command plus inline data). The game's own small buffers are now enough: no
    overflow, no heap exhaustion. Buffers given memory with no pool are kept apart per command
    buffer. This replaces the overflow workaround and the null-pool guard, and suits LA as well.
-   **New blocker:** a null dereference (`[x0+8]`, x0 = 0) in undecompiled game code, still inside
-   `RootTask::prepare` → `AppSys::unkB6340` (0x71000b6340) → 0x71013fdd40 → 0x71013c1030 →
-   0x71013c41c0.
+2b. [x] Null dereference in `RootTask::prepare` → `AppSys::unkB6340` → 0x71013fdd40 →
+   0x71013c1030. Traced:
+   - the constructor got `this` = null from `operator new(0xd78, heap = null)`;
+   - with no current heap either, the null came from `sead::ExpHeap::create("Doubutsugo::Mgr",
+     size 0 = all that's left)`, which failed because its parent "Game::Sound::System" was full;
+   - the sound heap was full because `audren:u` `GetWorkBufferSize` returned a flat 16 MB per
+     renderer.
+
+   Fix: the work-buffer size is now estimated from the renderer parameters
+   (`runtime/services/audio.c`); the runtime never uses that buffer. Native, logging versions of
+   `operator new(size_t, sead::Heap*, s32)` and `sead::ExpHeap::create` (`runtime/acnh/decomp_swap.c`)
+   now report which heap ran out.
+4. [x] Confirm the `RootTask` swap-in runs: `RootTask::enter (native): first scene 0` and
+   `RootTask::calc (native) first call` are in the boot log.
+**New blocker:** `nn::nfp::Initialize` (amiibo) crashes on a null. `nfp:user` has no
+implementation, and the logging stub returns OK without the interface object. It needs an offline
+`nfp` service (and likely the same treatment for the other online services).
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. Confirm the `RootTask` swap-in runs.
 5. Implement the `am` commands that are currently unhandled, as needed.

@@ -2,3 +2,5 @@
 # <offset in main> <mangled name>; offset = decomp address - 0x7100000000 (E:\games\acnh, data/functions.csv).
 0x207dcb0 _ZN8RootTask5enterEv
 0x207dd10 _ZN8RootTask4calcEv
+0x1d70230 _ZnwmPN4sead4HeapEi
+0x1d8f970 exp_heap_create  # sead::ExpHeap::create (thunk), for diagnostics

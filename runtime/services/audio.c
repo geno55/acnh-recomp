@@ -991,6 +991,24 @@ static void audio_device(Service *s, IpcReq *req, IpcResp *resp) {
 typedef struct AudioOut AudioOut;
 static void audio_track(Renderer *r, AudioOut *a);
 
+// GetWorkBufferSize(AudioRendererParameter): the memory the game must give OpenAudioRenderer. Renderer state here is
+// host memory, so the buffer goes unused, but games budget their sound heaps for the system's sizes (ACNH opens
+// several renderers; a flat 16 MB each used up its "Game::Sound::System" heap). An estimate from the main terms
+// of the system's calculation: mix buffers (plus the system's own), voices and their channel state, mixes, effects,
+// splitters, performance frames and the command buffer.
+static uint64_t work_buffer_size(const uint32_t *p) {
+    uint64_t samples = p[1], mix_buffers = p[2], submixes = p[3], voices = p[4], sinks = p[5], effects = p[6];
+    uint64_t perf_frames = p[7], splitters = p[9], splitter_sends = p[10];
+    uint64_t sz = (mix_buffers + 6) * samples * 4;            // mix buffers, depop and upsampler buffers (s32)
+    sz += voices * (0x180 + 0x100 + 0x100);                     // voice info, channel resources, voice state
+    sz += (submixes + 1) * (0x940 + mix_buffers * 4);           // mix info and their destinations
+    sz += effects * 0x200 + sinks * 0x200;
+    sz += splitters * 0x40 + splitter_sends * (0x60 + mix_buffers * 4);
+    sz += (perf_frames + 1) * 0x1000;
+    sz += 0x20000;                                              // command buffer
+    return (sz + 0xFFF) & ~0xFFFull;
+}
+
 SERVICE("audren:u", audren_u) {
     (void)s;
     switch (req->cmd) {
@@ -1019,7 +1037,7 @@ SERVICE("audren:u", audren_u) {
         ipc_return_object(resp, service_new("IAudioRenderer", audio_renderer, r));
         break;
     }
-    case 1: OUT(uint64_t, 0) = 0x1000000; resp_size(resp, 8); break;  // GetWorkBufferSize: 16 MB
+    case 1: OUT(uint64_t, 0) = work_buffer_size((const uint32_t *)req->data); resp_size(resp, 8); break;
     case 2: case 4: ipc_return_object(resp, service_new("IAudioDevice", audio_device, NULL)); break;
     default: LOG("[audren] cmd %u (ok)\n", req->cmd);
     }
