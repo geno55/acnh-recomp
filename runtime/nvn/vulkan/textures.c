@@ -376,6 +376,18 @@ static void live_remove(TexBackend *b) {
     b->reg = 0;
 }
 
+// A colour target the scaling rules leave at its own size (not compressible), bound in one pass with a scaled
+// target of the same size: the pass renders at the scaled size, so it is scaled too. (ACNH's depth-of-field
+// coverage buffer, rendered beside the far-field colour: unscaled, it was filled only in its top-left corner and
+// the blur weights were read from the wrong place - dark, blocky silhouettes on the walls behind characters.)
+void vk_tex_promote_scalable(NvnTexture *t) {
+    TexBackend *b = t ? t->backend : NULL;
+    if (!b || b->scalable || getenv("LARECOMP_NO_SCALE") || t->target != 1 || t->samples > 1) return;
+    b->scalable = true;
+    destroy_image(b);
+    create_image(t, b);
+}
+
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {

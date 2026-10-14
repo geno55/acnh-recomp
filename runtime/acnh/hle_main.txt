@@ -4,3 +4,4 @@
 0x207dd10 _ZN8RootTask4calcEv
 0x1d70230 _ZnwmPN4sead4HeapEi
 0x1d8f970 exp_heap_create  # sead::ExpHeap::create (thunk), for diagnostics
+0xc8a0 _ZN8AppHooks23setupFrameworkCreateArgEPN4sead15GameFrameworkNx9CreateArgE

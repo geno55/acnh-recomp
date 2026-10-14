@@ -231,8 +231,22 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    inputs stay exact). Debug: `LARECOMP_LOG_SKIPS=1` (skipped draws by reason),
    `LARECOMP_DEPTH_AT_FS=<fs addr>` (depth buffer dump at that shader's draw), render-enable-skipped
    draws and snapshot decisions logged in debug frames.
+3j. [x] Dark, blocky "shadows" of the characters on the wall behind them (absent on hardware). They
+   were the depth-of-field pass: the far-field colour (compressible, so drawn at the output scale)
+   and its coverage weights (R8, not compressible, so not scaled) are rendered in one pass, so the
+   weights filled only the top-left 2/3 of their target and the blur read them from the wrong place.
+   A colour target bound beside a scaled one of the same size is now scaled too
+   (`vk_tex_promote_scalable`). Feedback snapshots also keep every mip level now (a pass that renders
+   one level and samples another read level 0 only).
 **Now:** the intro plays: dialogue over the 3D Nook Inc. counter with Timmy and Tommy, name and
 birthday entry, voices and sound, 60 fps. Open issues:
+   - TODO 60 fps at the right speed. The game is made for 30 fps (`AppHooks::setupFrameworkCreateArg`
+     sets the sead vsync interval to 2; the window's present interval is 2) and we run it at 60
+     without honouring the interval, so everything (animation, the characters' head bobbing) runs
+     about twice as fast. 60 fps is a goal of the port, so the fix is to halve the game's per-frame
+     step, not to cap at 30. `LARECOMP_VSYNC_INTERVAL=1` (native `setupFrameworkCreateArg`) tells the
+     game it runs at 60: dialogue text speed did not change, so the step is at least partly fixed per
+     frame; the game's timers / animation steps have to be found and scaled.
    - Intermittent hang at startup (once in ~10 runs, seen only in a visible window): the game stops
      after its first controller read, before the first frame. A run with `LARECOMP_THREAD_DUMP`
      that hangs will show where.

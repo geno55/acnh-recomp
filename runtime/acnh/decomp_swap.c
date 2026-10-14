@@ -116,3 +116,19 @@ void hle__ZN8RootTask5enterEv(Cpu *c) {
     c->x[1] = 0;
     guest_call(c, DECOMP(0x710230e4f0));  // Lp::Utl::changeScene(scene, nullptr)
 }
+
+// void AppHooks::setupFrameworkCreateArg(sead::GameFrameworkNx::CreateArg* arg)  0x710000c8a0
+// The game's frame setup: vsync wait interval 2 (30 fps), a 1920x1080 frame buffer and its GPU memory sizes.
+// LARECOMP_VSYNC_INTERVAL=<n> overrides the interval (experiment: does the game's step follow it?).
+void hle__ZN8AppHooks23setupFrameworkCreateArgEPN4sead15GameFrameworkNx9CreateArgE(Cpu *c) {
+    uint8_t *arg = (uint8_t *)(uintptr_t)c->x[1];
+    const char *e = ENV("LARECOMP_VSYNC_INTERVAL");
+    uint32_t interval = e ? (uint32_t)atoi(e) : 2;
+    *(uint32_t *)arg = interval;
+    *(uint32_t *)(arg + 20) = 1920;
+    *(uint32_t *)(arg + 24) = 1080;
+    *(uint32_t *)(arg + 64) = 0x100000;
+    *(uint32_t *)(arg + 52) = 0;
+    *(uint32_t *)(arg + 40) = 0x400000;
+    LOG("[decomp] AppHooks::setupFrameworkCreateArg (native): vsync interval %u\n", interval);
+}

@@ -636,7 +636,7 @@ NVN(nvnWindowInitialize) {
     w->interval = (int)G(uint32_t, A(1), 0x20);
     w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
     SET_HOST(A(0), w);
-    LOG("[nvn] window with %d textures\n", w->num);
+    LOG("[nvn] window with %d textures, present interval %d\n", w->num, w->interval);
     RET(1);
 }
 NVN(nvnWindowFinalize) { (void)c; }
@@ -647,7 +647,7 @@ NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
 NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
 NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
-NVN(nvnWindowSetPresentInterval) { WIN->interval = (int)A(1); }
+NVN(nvnWindowSetPresentInterval) { WIN->interval = (int)A(1); LOG("[nvn] present interval %d (lr %llx)\n", WIN->interval, (unsigned long long)c->x[30]); }
 NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2); cr[2] = (int)A(3); cr[3] = (int)A(4); }
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
 NVN(nvnWindowAcquireTexture) {
