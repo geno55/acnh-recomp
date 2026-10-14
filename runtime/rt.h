@@ -16,7 +16,12 @@
 #define GUEST_LO     0x7000000000ull
 #define GUEST_HI     0x7320000000ull
 #define MAIN_BASE    0x7000000000ull
+#ifdef GAME_ACNH  // Animal Crossing: main is 65.5 MB, then subsdk0 (6.7 MB), then sdk
+#define SUBSDK0_BASE 0x7004200000ull
+#define SDK_BASE     0x7004A00000ull
+#else
 #define SDK_BASE     0x7004000000ull
+#endif
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull

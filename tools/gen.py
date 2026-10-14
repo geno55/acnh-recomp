@@ -1,8 +1,11 @@
 """Generate C for a whole NSO module.
 
-Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [--simd asm|c]
+Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [--simd asm|c] [--no-patches]
 
 --simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
+--hle: one function per line, replaced by a host function hle_<name>: a dynamic symbol name, or
+       "<offset> <name>" (hex offset in the module; stripped functions, e.g. named by a decomp).
+--no-patches: skip tools/patches.py and the randomizer's patch variants (Link's Awakening addresses), for other games.
 """
 import argparse
 import bisect
@@ -50,6 +53,7 @@ class Module:
         self.cache = {}
         self.stats = Counter()
         self.mu = None
+        self.mid_entry = set()  # functions that can be entered at any instruction
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -380,6 +384,10 @@ class Module:
         all_labels = bool(tables)
         if all_labels:
             labels = set(range(entry, end, 4))
+            # an unresolved table jump elsewhere (another piece of a split function) may land inside this one:
+            # dispatch then enters here with mid_entry set (runtime/dispatch.c)
+            out.append('    if (__builtin_expect(c->mid_entry, 0)) { c->mid_entry = 0; goto L_dispatch; }')
+            self.mid_entry.add(entry)
         rando_here = [a for a in range(entry, end, 4) if a - self.base in RANDO_CODE]
         if rando_here:
             labels = set(labels)
@@ -500,21 +508,34 @@ def main():
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--simd', choices=('asm', 'c'),
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
+    ap.add_argument('--no-patches', action='store_true')
     args = ap.parse_args()
+    if args.no_patches:
+        PATCHES.clear()
+        RANDO_CODE.clear()
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd)
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
-        want = {l.strip() for l in open(args.hle) if l.strip() and not l.startswith('#')}
+        want = set()
+        for l in open(args.hle):
+            f = l.split('#')[0].split()
+            if len(f) == 2:
+                a = args.base + int(f[0], 16)
+                if not m.in_text(a):
+                    sys.exit(f"{args.hle}: {f[0]} is not in {args.name}'s text")
+                hle[a] = f[1]
+            elif f:
+                want.add(f[0])
         for name, info, shndx, value, size in m.nso.syms:
             if shndx and name in want:
                 hle[args.base + value] = name
 
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.
-    start_set = set(starts)
+    start_set = set(starts) | set(hle)  # (a replaced function is its own function even if nothing else says so)
     for i, w in enumerate(m.words):
         if (w & 0xFC000000) == 0x94000000:
             t = m.lo + i * 4 + sext26(w) * 4
@@ -522,6 +543,11 @@ def main():
                 start_set.add(t)
     # Code addresses materialized in registers (callbacks, vtables built at runtime): ADR, or
     # ADRP followed shortly by ADD on the same register.
+    # A jump table's base is materialized the same way (adr x10, table; ldrb; add x10, x10, w11, lsl #2; br x10): an
+    # address that a `br` on the same register follows shortly is a table, not a function, and splitting the
+    # function there would leave its table unresolvable.
+    def table_base(i, rd):
+        return any((w2 & 0xFFFFFC1F) == 0xD61F0000 and (w2 >> 5) & 31 == rd for w2 in m.words[i + 1:i + 9])
     adrp_regs = {}
     for i, w in enumerate(m.words):
         pc = m.lo + i * 4
@@ -529,7 +555,7 @@ def main():
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
                 imm -= 1 << 21
-            if m.in_text(pc + imm):
+            if m.in_text(pc + imm) and not table_base(i, w & 31):
                 start_set.add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
@@ -540,7 +566,7 @@ def main():
             rn, rd = (w >> 5) & 31, w & 31
             if rn in adrp_regs and i - adrp_regs[rn][1] <= 8:
                 t = adrp_regs[rn][0] + ((w >> 10) & 0xFFF)
-                if m.in_text(t):
+                if m.in_text(t) and not table_base(i, rd):
                     start_set.add(t)
     scanned = {}
     rounds = 0
@@ -584,6 +610,10 @@ def main():
         text += ['\n'.join(body), '\n']
         write_if_changed(path, ''.join(text))
         nchunks += 1
+    stale = nchunks  # chunks left from an earlier run that made more of them (their functions now live elsewhere)
+    while os.path.exists(os.path.join(args.outdir, f'{args.name}_{stale:03d}.c')):
+        os.remove(os.path.join(args.outdir, f'{args.name}_{stale:03d}.c'))
+        stale += 1
     import io
     with io.StringIO() as f:
         f.write('#include "cpu.h"\n')
@@ -596,6 +626,10 @@ def main():
         f.write(',\n'.join(fname(a) for a in order))
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
+        # per function: its end if it can be entered mid-way (all-instruction labels), else 0
+        f.write(f'const uint64_t {args.name}_fn_ends[] = {{\n')
+        f.write(',\n'.join(hx(entries[a][0]) if a in m.mid_entry else '0' for a in order))
+        f.write('};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
     print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
 

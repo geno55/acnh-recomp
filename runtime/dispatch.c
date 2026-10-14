@@ -10,9 +10,21 @@
 extern const uint64_t main_fn_addrs[], sdk_fn_addrs[];
 extern const GuestFn main_fn_ptrs[], sdk_fn_ptrs[];
 extern const uint64_t main_fn_count, sdk_fn_count;
+// (weak: generated code from before gen.py emitted them, and the no-code stub, have none)
+extern const uint64_t main_fn_ends[] __attribute__((weak)), sdk_fn_ends[] __attribute__((weak));
+#ifdef GAME_ACNH
+extern const uint64_t subsdk0_fn_addrs[];
+extern const GuestFn subsdk0_fn_ptrs[];
+extern const uint64_t subsdk0_fn_count;
+extern const uint64_t subsdk0_fn_ends[] __attribute__((weak));
+#define NTABLES 3
+#else
+#define NTABLES 2
+#endif
 
-typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
-static FnTable tables[2];
+// ends[i]: end of function i if it can be entered at any of its instructions (gen.py: all-instruction labels), else 0
+typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; const uint64_t *ends; } FnTable;
+static FnTable tables[NTABLES];
 
 // HLE stubs live at fake addresses HLE_BASE + 16*i
 #define MAX_HLE 4096
@@ -109,12 +121,18 @@ void *hle_alloc(uint64_t size) {
 }
 
 void dispatch_init(void) {
-    tables[0] = (FnTable){main_fn_addrs, main_fn_ptrs, main_fn_count, main_fn_addrs[0], main_fn_addrs[main_fn_count - 1]};
-    tables[1] = (FnTable){sdk_fn_addrs, sdk_fn_ptrs, sdk_fn_count, sdk_fn_addrs[0], sdk_fn_addrs[sdk_fn_count - 1]};
+    tables[0] = (FnTable){main_fn_addrs, main_fn_ptrs, main_fn_count, main_fn_addrs[0], main_fn_addrs[main_fn_count - 1],
+                          main_fn_ends};
+    tables[1] = (FnTable){sdk_fn_addrs, sdk_fn_ptrs, sdk_fn_count, sdk_fn_addrs[0], sdk_fn_addrs[sdk_fn_count - 1],
+                          sdk_fn_ends};
+#ifdef GAME_ACNH
+    tables[2] = (FnTable){subsdk0_fn_addrs, subsdk0_fn_ptrs, subsdk0_fn_count, subsdk0_fn_addrs[0],
+                          subsdk0_fn_addrs[subsdk0_fn_count - 1], subsdk0_fn_ends};
+#endif
 }
 
 GuestFn dispatch_lookup(uint64_t addr) {
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < NTABLES; t++) {
         FnTable *ft = &tables[t];
         if (addr < ft->lo || addr > ft->hi) continue;
         uint64_t lo = 0, hi = ft->count;
@@ -124,6 +142,22 @@ GuestFn dispatch_lookup(uint64_t addr) {
             else hi = mid;
         }
         if (lo < ft->count && ft->addrs[lo] == addr) return ft->fns[lo];
+    }
+    return NULL;
+}
+
+// The function containing addr, if it can be entered there (see FnTable.ends).
+static GuestFn dispatch_inside(uint64_t addr) {
+    for (int t = 0; t < NTABLES; t++) {
+        FnTable *ft = &tables[t];
+        if (!ft->ends || addr < ft->lo || addr & 3) continue;
+        uint64_t lo = 0, hi = ft->count;  // last function starting at or below addr
+        while (lo < hi) {
+            uint64_t mid = (lo + hi) / 2;
+            if (ft->addrs[mid] <= addr) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo && addr < ft->ends[lo - 1]) return ft->fns[lo - 1];
     }
     return NULL;
 }
@@ -138,6 +172,10 @@ static GuestFn dispatch_slow(Cpu *c) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
+            if (ENV("LARECOMP_TRACE_HLE")) {  // first call of each host function (NVN entry points, SDK HLE)
+                static _Atomic unsigned char seen[MAX_HLE];
+                if (!seen[i] && (seen[i] = 1)) LOG("[hle] first call %s (lr=%llx x0=%llx x1=%llx)\n", hle_slots[i].name, c->x[30], c->x[0], c->x[1]);
+            }
             if (hle_slots[i].fn) return hle_slots[i].fn;
             unimpl_pc = pc;
             return hle_unimplemented;
@@ -146,6 +184,14 @@ static GuestFn dispatch_slow(Cpu *c) {
     for (int i = 0; i < override_count; i++)
         if (overrides[i].addr == pc) return overrides[i].fn;
     GuestFn f = dispatch_lookup(pc);
+    if (!f && (f = dispatch_inside(pc))) {
+        // an unresolved table jump into another function's body (a function split in two by the generator): enter
+        // it at its label switch. Not cached: each entry needs mid_entry set.
+        static int nlog;
+        if (nlog < 20) { nlog++; LOG("[dispatch] mid-function entry %llx (lr=%llx)\n", pc, c->x[30]); }
+        c->mid_entry = 1;
+        return f;
+    }
     if (!f) {
         uint64_t off;
         const char *s = loader_symbol_at(c->x[30], &off);
@@ -182,10 +228,11 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static uint64_t n;
     static __thread char name[32];
     if (!byhost) {
-        uint64_t total = tables[0].count + tables[1].count, k = 0;
+        uint64_t total = 0, k = 0;
+        for (int t = 0; t < NTABLES; t++) total += tables[t].count;
         uint64_t (*v)[2] = malloc(total * sizeof *v);
         if (!v) return NULL;
-        for (int t = 0; t < 2; t++)
+        for (int t = 0; t < NTABLES; t++)
             for (uint64_t i = 0; i < tables[t].count; i++) {
                 v[k][0] = (uint64_t)(uintptr_t)tables[t].fns[i];
                 v[k++][1] = tables[t].addrs[i];

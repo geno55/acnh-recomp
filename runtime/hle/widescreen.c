@@ -156,6 +156,9 @@ static bool heap_ptr(uint64_t p) { return p >= HEAP_BASE && p + 0x40 <= HEAP_BAS
 
 // Current camera zone's box; false when there is none (title, overworld, loading).
 static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
+#ifdef GAME_ACNH
+    return false;  // (LA's camera zone object)
+#endif
     uint64_t o = LD64(SDK_BASE + 0xcf9e38);
     if (!heap_ptr(o)) return false;
     uint64_t z = LD64(o + 0x680);

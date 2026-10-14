@@ -27,11 +27,10 @@ int rt_snap_dir(Cpu *c) {
     double turns = atan2(y, x) / (2 * M_PI) + 0.25;  // (the mod: floor(degrees) + 90)
     uint32_t a = (uint32_t)(int64_t)llround(turns * 4294967296.0);
     if (logn >= 0 && logn++ % 30 == 0) {  // (with the game's own 8-way answer for comparison)
-        extern void f_7000ded9f0(Cpu *);
         static Cpu tmp;
         tmp = *c;
         inner = true;
-        f_7000ded9f0(&tmp);
+        guest_call(&tmp, MAIN_BASE + 0xded9f0);  // (through dispatch: links without generated code)
         inner = false;
         LOG("[qol] snap (%.3f, %.3f): 8-way %#x, 360 %#x (%s)\n", x, y, (uint32_t)tmp.x[0], a, on ? "360" : "8-way");
     }

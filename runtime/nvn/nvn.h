@@ -85,11 +85,14 @@ typedef struct NvnSync {
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
 } NvnSync;
 
-// ---- command recording (stored in guest command memory)
+// ---- command recording (records in host storage behind the guest's command memory: cmdbuf.c)
 typedef struct {
-    uint64_t mem;    // current command memory chunk (guest address)
+    uint64_t mem;    // current guest command memory chunk (guest address)
     uint64_t size;   // chunk size
-    uint64_t used;   // bytes used in chunk
+    uint64_t used;   // guest bytes used in chunk (charged at about NVN's rate)
+    bool over;       // chunk full and the game gave no more: recording on in host memory only
+    struct ShadowBlock *blk;  // host storage being written, and the bytes used there
+    uint64_t boff;
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;

@@ -16,6 +16,19 @@ endif
 # differs per arch (AArch64 hosts run the guest's FP/SIMD as inline asm, others use the portable C of simd.h), so a
 # cross build has its own generated-<arch>/ and build/<arch>/; SYSROOT is the target's root filesystem (headers, libs).
 GEN      ?= generated
+
+# GAME: las (Link's Awakening, the default) or acnh (Animal Crossing: New Horizons, the PLAN.md spike). acnh has its own
+# generated-acnh/ and build/acnh/, a third module (subsdk0, between main and sdk: runtime/rt.h) and no Link's Awakening
+# instruction patches (tools/patches.py, the randomizer's variants).
+GAME     ?= las
+ifeq ($(GAME),acnh)
+GEN      := generated-acnh
+B        ?= build/acnh
+GAMEFLAGS := -DGAME_ACNH
+GEN_MODS := main subsdk0 sdk
+else
+GEN_MODS := main sdk
+endif
 ifeq ($(PLATFORM),linux)
 HOSTARCH := $(patsubst arm64,aarch64,$(shell uname -m))
 ARCH     ?= $(HOSTARCH)
@@ -36,9 +49,9 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -Iruntime
+GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -Iruntime $(GAMEFLAGS)
 
-GEN_SRC  := $(wildcard $(GEN)/main/*.c) $(wildcard $(GEN)/sdk/*.c)
+GEN_SRC  := $(foreach m,$(GEN_MODS),$(wildcard $(GEN)/$(m)/*.c))
 # no generated code yet (make gen): link a stub, the start screen works
 ifeq ($(strip $(GEN_SRC)),)
 GEN_SRC  := tools/nogen_stub.c
@@ -46,6 +59,9 @@ endif
 GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC)))
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
+ifeq ($(GAME),acnh)
+RT_SRC   += $(wildcard runtime/acnh/*.c)  # native replacements of generated functions (runtime/acnh/hle_main.txt)
+endif
 RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
             $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/nvn/vulkan/*.h) $(wildcard runtime/ui/*.h)
 UI_SRC   := $(wildcard runtime/ui/*.mm)
@@ -98,8 +114,8 @@ UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __A
 endif
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS) $(GAMEFLAGS)
+CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC) $(GAMEFLAGS)
 
 all: $(EXE)
 
@@ -157,9 +173,18 @@ $(B)/imgui/imgui_impl_metal.o: $(IMGUI)/backends/imgui_impl_metal.mm
 # Python: tools/venv (macOS, Linux: bin/python, Windows: Scripts/python.exe)
 PY := $(firstword $(wildcard tools/venv/bin/python) $(wildcard tools/venv/Scripts/python.exe))
 
+ifeq ($(GAME),acnh)
+# (bases: runtime/rt.h; logs with function / trap / jump-table counts go to $(GEN)/gen-<module>.log)
+gen:
+	@mkdir -p $(GEN)
+	set -o pipefail; cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7004A00000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt --no-patches $(GENSIMD) 2>&1 | tee ../$(GEN)/gen-sdk.log
+	set -o pipefail; cd tools && ../$(PY) gen.py subsdk0 ../extracted/exefs/subsdk0 0x7004200000 ../$(GEN)/subsdk0 --no-patches $(GENSIMD) 2>&1 | tee ../$(GEN)/gen-subsdk0.log
+	set -o pipefail; cd tools && ../$(PY) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main --hle ../runtime/acnh/hle_main.txt --no-patches $(GENSIMD) 2>&1 | tee ../$(GEN)/gen-main.log
+else
 gen:
 	cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7004000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt $(GENSIMD)
 	cd tools && ../$(PY) gen.py main ../extracted/exefs/main 0x7000000000 ../$(GEN)/main $(GENSIMD)
+endif
 
 gen-objs: $(GEN_OBJ)
 

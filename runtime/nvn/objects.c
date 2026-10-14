@@ -13,7 +13,11 @@ static uint64_t next_debug_id = 1;
 // NVNdeviceInfo -> value
 static uint32_t device_integer(uint32_t which) {
     static const uint32_t v[] = {
+#ifdef GAME_ACNH
+        [0] = 53, [1] = 313,           // API version (ACNH's sead checks for 53.313 or later)
+#else
         [0] = 53, [1] = 207,           // API version
+#endif
         [2] = 14, [3] = 65536, [4] = 256, [5] = 8, [6] = 16, [7] = 4, [8] = 16, [9] = 32,
         [10] = 16, [11] = 4, [12] = 4, [13] = 4, [14] = 16, [15] = 32, [16] = 32,
         [17] = 256, [18] = 256,        // reserved texture / sampler descriptors

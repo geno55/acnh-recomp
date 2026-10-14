@@ -10,3 +10,8 @@ static void no_code(Cpu *c) {
 const uint64_t main_fn_addrs[] = {0}, sdk_fn_addrs[] = {0};
 const GuestFn main_fn_ptrs[] = {no_code}, sdk_fn_ptrs[] = {no_code};
 const uint64_t main_fn_count = 1, sdk_fn_count = 1;
+#ifdef GAME_ACNH
+const uint64_t subsdk0_fn_addrs[] = {0};
+const GuestFn subsdk0_fn_ptrs[] = {no_code};
+const uint64_t subsdk0_fn_count = 1;
+#endif

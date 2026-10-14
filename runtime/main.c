@@ -30,8 +30,14 @@ static void module_init(Cpu *c, Module *m) {
     else run_array(c, m->init_array, m->init_array_sz);
 }
 
-static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
+static void rtld_init_sdk(Cpu *c) {
+    module_init(c, &g_modules[1]);
+    for (int i = 2; i < g_nmodules; i++) module_init(c, &g_modules[i]);  // subsdk*: before the game's own
+}
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+#ifdef GAME_ACNH
+static void rtld_fini(Cpu *c) { (void)c; LOG("nnMain returned\n"); }  // (module finalizers: nothing to do here)
+#endif
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -148,11 +154,19 @@ static void boot(const char *root) {
     }
     LOG("main thread: prio %d, stack 0x%x\n", prio, stack_size);
 
+#ifdef GAME_ACNH
+    // newer SDK: Start(thread_handle, args_region, after nnosInitialize, before nnMain, after nnMain)
+    uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
+#else
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
+#endif
     if (!start) FATAL("nn::init::Start not found\n");
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
+#ifdef GAME_ACNH
+    t->cpu.x[4] = hle_register("<rtld_fini>", rtld_fini);
+#endif
     kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
 }
 

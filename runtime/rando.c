@@ -117,7 +117,9 @@ void rando_boot(void) {
     nwords = 0;
     g_active = false;
     g_seed_dir[0] = 0;
+#ifndef GAME_ACNH  // (a seed is LA patches: never active for ACNH, whatever larecomp.ini says)
     init();
+#endif
     __atomic_store_n(&g_inited, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_init_lock);
 }

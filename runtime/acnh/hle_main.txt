@@ -1,0 +1,4 @@
+# ACNH main functions replaced by native code (runtime/acnh/*.c), for gen.py --hle.
+# <offset in main> <mangled name>; offset = decomp address - 0x7100000000 (E:\games\acnh, data/functions.csv).
+0x207dcb0 _ZN8RootTask5enterEv
+0x207dd10 _ZN8RootTask4calcEv
