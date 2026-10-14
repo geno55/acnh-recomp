@@ -365,6 +365,14 @@ NVN(nvnTextureInitialize) {
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
+    {
+        static uint64_t watch = ~0ull;
+        if (watch == ~0ull) watch = getenv("LARECOMP_WATCH_TEX") ? strtoull(getenv("LARECOMP_WATCH_TEX"), NULL, 16) : 0;
+        if (watch && t->addr <= watch + 0x1000 && t->addr + tegra_total_size(&t->layout) > watch)
+            LOG("[nvn] texture %p over %llx: %ux%ux%u fmt %#x target %u flags %#x levels %u addr %llx guest %llx\n", (void *)t,
+                (unsigned long long)watch, t->width, t->height, t->depth, t->format, t->target, t->flags, t->levels,
+                (unsigned long long)t->addr, (unsigned long long)A(0));
+    }
     SET_HOST(A(0), t);
     RET(1);
 }

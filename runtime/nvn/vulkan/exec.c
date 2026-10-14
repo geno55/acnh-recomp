@@ -1011,6 +1011,23 @@ static void translate_program(void *arg) {
             LOG("[shader] fs %llx forced to solid red\n", (unsigned long long)solid);
         }
     }
+    {   // LARECOMP_FS_SUB=<fs code address hex>|<from>|<to> (debug): a text substitution in that fragment shader
+        const char *e = getenv("LARECOMP_FS_SUB");
+        char from[256], to[256];
+        unsigned long long a;
+        if (e && sscanf(e, "%llx|%255[^|]|%255[^\n]", &a, from, to) == 3 && p->code[1] == a) {
+            char *hit = strstr(p->fi->msl, from);
+            if (hit) {
+                size_t n = strlen(p->fi->msl), fl = strlen(from), tl = strlen(to);
+                char *s = malloc(n - fl + tl + 1);
+                memcpy(s, p->fi->msl, (size_t)(hit - p->fi->msl));
+                memcpy(s + (hit - p->fi->msl), to, tl);
+                strcpy(s + (hit - p->fi->msl) + tl, hit + fl);
+                p->fi->msl = s;  // (leaked: debug only)
+            }
+            LOG("[shader] fs %llx: substitution %s\n", a, hit ? "made" : "NOT FOUND");
+        }
+    }
     run_job(compile_program, p);
 }
 
@@ -1812,6 +1829,19 @@ static void draw(CmdRec *r, bool indexed) {
     draw_(r, indexed);
     PROF_ADD(prof_draw);
 }
+// A draw whose shader or pipeline is still being built is normally skipped (a frame or two of missing objects beats a
+// stall). Draws into 3D textures are one-time bakes (ACNH's colour grading LUT, slice by slice), so a skipped one
+// never comes back: those wait.
+static bool draw_must_not_skip(void) {
+    for (int i = 0; i < st.rt.ncolor; i++)
+        if (st.rt.color[i] && st.rt.color[i]->target == 2) return true;
+    return false;
+}
+static int wait_built(_Atomic int *state) {
+    while (atomic_load(state) == 0) SDL_Delay(1);
+    return atomic_load(state);
+}
+
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
@@ -1823,6 +1853,8 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
+    bool must = draw_must_not_skip();
+    if (pr && must) wait_built(&pr->state);
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
@@ -1924,6 +1956,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_tab[pslot].pipe = pp;
         run_job(build_pipeline, pp);
     }
+    if (must) wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
@@ -2254,7 +2287,10 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
                 const float *u = (const float *)(uintptr_t)st.ubuf[sg][slot].addr;
                 LOG("[draw]   %ccb%d (slot %d) %llx size %u:", sg ? 'f' : 'v', c, slot,
                     (unsigned long long)st.ubuf[sg][slot].addr, (unsigned)st.ubuf[sg][slot].size);
-                for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[sg][slot].size; k++) LOG(" %.6g", u[k]);
+                if (!strcmp(getenv("LARECOMP_DEBUG_DATA"), "hex"))  // (all of it, as words)
+                    for (int k = 0; k * 4 < (int)st.ubuf[sg][slot].size; k++) LOG("%s%08x", k % 16 ? " " : "\n    ", ((const uint32_t *)u)[k]);
+                else
+                    for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[sg][slot].size; k++) LOG(" %.6g", u[k]);
                 LOG("\n");
             }
     }
@@ -2264,6 +2300,15 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         if (!t) { LOG("[draw]   tex%d: none\n", i); continue; }
         LOG("[draw]   tex%d: %p %ux%u f%#x lv %u -> %ux%u scale %.4f %.4f%s\n", i, (void *)t, t->width, t->height, t->format,
             b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "");
+        if (t->target == 2 && t->addr) {  // 3D: where its texels live, and the first of them
+            const uint16_t *h = (const uint16_t *)(uintptr_t)t->addr;
+            LOG("[draw]     3D depth %u addr %llx pool %p+%llx:", t->depth, (unsigned long long)t->addr, (void *)t->pool,
+                (unsigned long long)t->pool_offset);
+            int nz = 0;
+            for (int k = 0; k < 2048; k++) nz += h[k] != 0;
+            for (int k = 0; k < 16; k++) LOG(" %04x", h[k]);
+            LOG(" | nonzero %d/2048, last %04x %04x %04x %04x\n", nz, h[2044], h[2045], h[2046], h[2047]);
+        }
     }
 }
 

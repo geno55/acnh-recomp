@@ -166,10 +166,28 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    - Debug tools added: `LARECOMP_DEBUG_OPS`, per-pass target logs, vertex constant-buffer and
      blend dumps (`LARECOMP_DEBUG_DATA`), `LARECOMP_SOLID_FS=<fs addr>[:fetch]`, `LARECOMP_LOG_PRESENT`,
      and the abort result code on `svcBreak`.
-**Now:** the game shows its loading icon, then Timmy's opening dialogue ("Good afternoon! We're so
-excited to have you here!") at 60 fps, with sound. **The 3D scene behind it is black** (its
-passes come out empty). Audio effects 2, 3, 5 and 6 are not implemented. Next: why the 3D
-passes are empty.
+3d. [x] Black 3D scene behind the dialogue. The scene was rendering all along; the final tonemap
+   pass multiplies everything through an 8×8×8 colour-grading LUT (`agl::pfx::ColorCorrection`,
+   main+0x1df88d0 / 0x1df9bc0), and that LUT was all zeros. Three bugs, each enough on its own:
+   - **3D render targets** were refused by the Vulkan backend (an LA-era shortcut). ACNH fills the
+     LUT with one full-screen draw into 8 colour targets, each a view of a different z-slice. 3D
+     images are now created 2D-array-compatible, and a render view is one slice as a 2D-array layer.
+   - **The bake ran only once** and was skipped because its shader was still compiling in the
+     background. Draws into 3D textures now wait for their program and pipeline (~20-300 ms, once).
+   - **`LDC.64 R0, c[4][R0]`** (dynamic constant-buffer load whose destination overwrites its own
+     address register) read the second word from the clobbered address, so the LUT shader picked
+     garbage parameters and wrote 0. The address is now taken before either word lands.
+   - Debug tools: `LARECOMP_FS_SUB=<fs addr>|<from>|<to>` (text substitution in one fragment
+     shader), `LARECOMP_DEBUG_DATA=hex` (whole constant buffers as words),
+     `LARECOMP_WATCH_TEX=<addr>` (log textures created over a guest address).
+**Now:** the opening dialogue plays over the 3D Nook Inc. counter, colour-graded, at 60 fps with
+sound. Open issues:
+   - Timmy is not drawn behind the counter.
+   - A cube-array texture (256×256×6, target 9) is sampled as a cube: "type mismatch" (30 logs).
+   - An intermittent crash (2 of ~15 boots): `guest_copy` reading guest address 0x5000000033 during
+     a draw (`exec.c` vertex / uniform copy), right after the scene loads. Not yet reproduced
+     reliably.
+   - Audio effects 2, 3, 5 and 6 are not implemented.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.
