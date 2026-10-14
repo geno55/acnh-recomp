@@ -481,6 +481,7 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
         t->in_sync_wait = true;
+        t->sync_handles = handles_ptr, t->sync_count = count;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
@@ -511,7 +512,9 @@ static int prof_svc = -1;
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     rt_unwind_point();
+    if (t_cur) t_cur->in_svc = (int32_t)imm + 1;
     svc_entry(c, imm, pc);
+    if (t_cur) t_cur->in_svc = 0;
     rt_unwind_point();
 }
 
@@ -632,7 +635,20 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[2] = 0xF;
         break;
     }
-    case 0x0F: x[0] = R_OK; break;  // SetThreadCoreMask
+    case 0x0F: {  // SetThreadCoreMask(handle, ideal core, affinity mask)
+        // Threads aren't really pinned (host threads), but GetCurrentProcessorNumber must answer as if they were:
+        // games index per-core data by it (ACNH's parallel loops: threads pinned to cores 0-2 that all said
+        // "core 0" shared one progress slot and synchronized forever).
+        KObject *o = handle_get((uint32_t)x[0]);
+        if (!o || o->type != KOBJ_THREAD) { x[0] = R_INVALID_HANDLE; break; }
+        KThread *t = (KThread *)o;
+        int32_t ideal = (int32_t)x[1];
+        uint64_t mask = x[2] & 0xF;
+        if (ideal >= 0 && ideal < 4) t->core = ideal;  // (-1: don't care, -2: process default, -3: no change)
+        else if (mask && !(mask & (1ull << t->core))) t->core = __builtin_ctzll(mask);
+        x[0] = R_OK;
+        break;
+    }
     case 0x10: x[0] = t_cur->core; break;  // GetCurrentProcessorNumber
     case 0x11: case 0x12: case 0x17: {  // SignalEvent / ClearEvent / ResetSignal
         pthread_mutex_lock(&g_klock);
@@ -831,7 +847,66 @@ void kernel_reset(void) {
     pthread_mutex_unlock(&g_klock);
 }
 
+// LARECOMP_THREAD_DUMP=<seconds>[,<seconds>...]: at those times after boot, every guest thread - what it waits on
+// (the SVC it's in, its handles / mutex / condvar / arbiter address) and its guest call stack from the frame
+// pointer chain (fp -> {previous fp, lr}). For hangs: the thread that should signal the others shows up here.
+static void thread_dump(void) {
+    static const char *kinds[] = {"-", "mutex", "condvar", "arbiter"};
+    pthread_mutex_lock(&g_klock);
+    LOG("===== thread dump =====\n");
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (t->finished) continue;
+        Cpu *c = &t->cpu;
+        LOG("thread %llu (handle %x, prio %d, entry %llx)%s: svc %02x, wait %s addr %llx tag %x, lr %llx sp %llx\n",
+            (unsigned long long)t->id, t->handle, t->prio, (unsigned long long)t->entry, t->started ? "" : " not started",
+            t->in_svc ? t->in_svc - 1 : 0xff, kinds[t->wait_kind & 3], (unsigned long long)t->wait_addr, t->wait_tag,
+            (unsigned long long)c->x[30], (unsigned long long)c->sp);
+        if (t->in_sync_wait) {
+            LOG("    WaitSynchronization on");
+            for (int i = 0; i < t->sync_count && i < 16; i++) {
+                uint32_t h = ((const uint32_t *)(uintptr_t)t->sync_handles)[i];
+                KObject *o = handle_get(h);
+                LOG(" %x(%s%s)", h, !o ? "bad" : o->type == KOBJ_EVENT ? "event" : o->type == KOBJ_THREAD ? "thread"
+                                   : o->type == KOBJ_SESSION ? "session" : "other", o && o->signaled ? ",signaled" : "");
+            }
+            LOG("\n");
+        }
+        LOG("    stack: %llx", (unsigned long long)c->x[30]);
+        uint64_t fp = c->x[29];
+        for (int i = 0; i < 24 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); i++) {
+            uint64_t lr = LD64(fp + 8);
+            if (!lr) break;
+            LOG(" %llx", (unsigned long long)lr);
+            uint64_t next = LD64(fp);
+            if (next <= fp) break;
+            fp = next;
+        }
+        LOG("\n");
+    }
+    LOG("===== end of thread dump =====\n");
+    pthread_mutex_unlock(&g_klock);
+}
+
+static void *thread_dump_main(void *arg) {
+    const char *p = arg;
+    uint64_t t0 = plat_now_ns();
+    while (p && *p) {
+        long at = strtol(p, (char **)&p, 10);
+        while ((long)((plat_now_ns() - t0) / 1000000000) < at && !g_rt_unwind)
+            plat_sleep_until_ns(plat_now_ns() + 200000000);
+        if (g_rt_unwind) break;
+        thread_dump();
+        if (*p == ',') p++; else break;
+    }
+    return NULL;
+}
+
 void kernel_init(void) {
+    static bool dump_started;
+    if (getenv("LARECOMP_THREAD_DUMP") && !dump_started) {
+        pthread_t th;
+        dump_started = !pthread_create(&th, NULL, thread_dump_main, (void *)getenv("LARECOMP_THREAD_DUMP"));
+    }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {

@@ -138,10 +138,20 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    `nfp:user`: it initializes and lists no devices, and device operations return DeviceNotFound.
 3. [ ] **First frame submitted and presented** (`nvnQueueSubmitCommands`, `nvnQueuePresentTexture`):
    one black 1920×1080 frame.
-   **New blocker: a hang after the first frame.** No crash, but fewer than 3 frames are presented
-   in 100 s. Next: a per-thread dump of what each guest thread is waiting on (sync object, event,
-   fence or service). Last log lines: `ICommonStateGetter cmd 66` repeated; audio effects 2, 3, 5
-   and 6 are used but not implemented.
+3b. [x] Hang after the first frame. `LARECOMP_THREAD_DUMP=<s>[,<s>...]` (kernel.c) now dumps every guest
+   thread: the SVC it's in, its wait object and a frame-pointer call stack.
+   - **What the dump showed:** the frame loop and two job workers ping-ponged about 1,000 times a
+     second through the address arbiter. They were all in the same parallel loop (main+0x5f410),
+     synchronizing through a barrier (main+0x102af0).
+   - **Why:** each thread's progress slot comes from `nn::os::GetCurrentCoreNumber`. The game pins
+     its threads with `SetThreadCoreMask` (masks 1, 2, 4), which the runtime ignored, so all of them
+     said "core 0", shared one slot, and the loop never finished.
+   - **Fix:** `SetThreadCoreMask` now sets the thread's core (an explicit ideal core, or the lowest
+     core of the mask).
+**Now:** the game runs at a steady 60 fps, but the screen stays black (frames 1 to 1,200 and
+beyond). Each frame has about 1 indexed draw plus clears, after a burst of setup work. It is
+probably waiting in an early boot stage (logo, loading, save data or account). Next: find what
+the frame loop's scene is waiting for. Audio effects 2, 3, 5 and 6 are used but not implemented.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.
