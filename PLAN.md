@@ -180,11 +180,14 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    - Debug tools: `LARECOMP_FS_SUB=<fs addr>|<from>|<to>` (text substitution in one fragment
      shader), `LARECOMP_DEBUG_DATA=hex` (whole constant buffers as words),
      `LARECOMP_WATCH_TEX=<addr>` (log textures created over a guest address).
-**Now:** the opening dialogue plays over the 3D Nook Inc. counter, colour-graded, at 60 fps with
-sound. Open issues:
-   - Timmy is not drawn behind the counter.
+3e. [x] Timmy and Tommy missing. Their skinning vertex shader reads bone matrix rows with negative
+   constant-buffer offsets (`LDC c[6][R9 + 0xfff8]`, i.e. R9 - 8). The translator added 0xfff8 as
+   unsigned, read past the buffer (clamped to its last row) and placed the vertices nowhere. Dynamic
+   constant-buffer addresses now wrap to 16 bits, as on the hardware.
+**Now:** the opening dialogue plays over the 3D Nook Inc. counter with Timmy and Tommy, colour-graded,
+at 60 fps with sound. Open issues:
    - A cube-array texture (256×256×6, target 9) is sampled as a cube: "type mismatch" (30 logs).
-   - An intermittent crash (2 of ~15 boots): `guest_copy` reading guest address 0x5000000033 during
+   - An intermittent crash (3 of ~25 boots): `guest_copy` reading guest address 0x5000000033 during
      a draw (`exec.c` vertex / uniform copy), right after the scene loads. Not yet reproduced
      reliably.
    - Audio effects 2, 3, 5 and 6 are not implemented.

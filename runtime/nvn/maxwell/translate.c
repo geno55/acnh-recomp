@@ -125,7 +125,8 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
-    if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
+    // (constant buffer addresses are 16-bit: an offset of 0xfff8 is -8 from the register)
+    if (dyn) sprintf(buf, "cbr(cb%d, ((%s) + %lldu) & 0xFFFFu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
 }
