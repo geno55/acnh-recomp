@@ -137,7 +137,7 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
 implementation, and the logging stub returns OK without the interface object. It needs an offline
 `nfp` service (and likely the same treatment for the other online services).
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
-4. Confirm the `RootTask` swap-in runs.
+4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.
 6. Write up and make the go/no-go call.
 
