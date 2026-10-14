@@ -388,7 +388,15 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
+static void guest_copy_bad(uint64_t addr, uint64_t size);
 static VkSpan guest_copy(uint64_t addr, uint64_t size) {
+    if (addr < GUEST_LO || addr + size > GUEST_HI || addr + size < addr) {
+        guest_copy_bad(addr, size);
+        void *zero = calloc(1, size < 0x10000 ? size : 0x10000);
+        VkSpan s = vk_transient_copy(zero, size < 0x10000 ? size : 0x10000, 256);
+        free(zero);
+        return s;
+    }
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
     if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
@@ -517,6 +525,29 @@ static struct {
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
 } st;
+
+static CmdRec *cur_rec;  // the record being executed (diagnostics)
+typedef struct { uint64_t p, list; uint32_t op, size; uint64_t x0, x1; } RecentOp;
+static RecentOp recent[32];
+static unsigned recent_n;
+static void guest_copy_bad(uint64_t addr, uint64_t size) {
+    static int n;
+    if (n++ >= 20) return;
+    LOG("[vk] copy from outside guest memory: %llx size %llx | rec %p op %u | prog vs %llx fs %llx\n", (unsigned long long)addr,
+        (unsigned long long)size, (void *)cur_rec, cur_rec ? cur_rec->op : 0,
+        st.program ? (unsigned long long)st.program->stages[0].code_addr : 0ull,
+        st.program ? (unsigned long long)st.program->stages[1].code_addr : 0ull);
+    for (int s = 0; s < 16; s++)
+        if (st.vbuf[s].addr == addr) LOG("[vk]   = vertex buffer %d (size %llx)\n", s, (unsigned long long)st.vbuf[s].size);
+    for (int g = 0; g < 6; g++)
+        for (int k = 0; k < 18; k++)
+            if (st.ubuf[g][k].addr == addr) LOG("[vk]   = stage %d uniform buffer %d (size %llx)\n", g, k, (unsigned long long)st.ubuf[g][k].size);
+    for (unsigned i = recent_n - (recent_n < 32 ? recent_n : 32); i != recent_n; i++) {
+        const RecentOp *o = &recent[i & 31];
+        LOG("[vk]   recent: list %llx rec %llx op %u size %u x %llx %llx\n", (unsigned long long)o->list, (unsigned long long)o->p,
+            o->op, o->size, (unsigned long long)o->x0, (unsigned long long)o->x1);
+    }
+}
 
 uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
@@ -2818,6 +2849,8 @@ static void exec_list(uint64_t handle, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
+        cur_rec = r;
+        recent[recent_n++ & 31] = (RecentOp){p, handle, r->op, r->size, r->x[0], r->x[1]};
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (g_debug_frame && r->op > CMD_CALL && ENV("LARECOMP_DEBUG_OPS"))
         {
@@ -2855,7 +2888,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
             const uint64_t *h = x;
-            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
+            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) { nvn_cmd_check_call(h[i], handle); exec_list(h[i], depth + 1); }
             break;
         }
         case CMD_BIND_PROGRAM: st.program = (NvnProgram *)(uintptr_t)r->x[0]; break;

@@ -184,12 +184,24 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    constant-buffer offsets (`LDC c[6][R9 + 0xfff8]`, i.e. R9 - 8). The translator added 0xfff8 as
    unsigned, read past the buffer (clamped to its last row) and placed the vertices nowhere. Dynamic
    constant-buffer addresses now wrap to 16 bits, as on the hardware.
+3f. [x] Intermittent crash (about 1 boot in 8): a draw read a vertex buffer at 0x5000000033, which
+   is really a barrier record's header (op 51, size 80) written over a pre-recorded bindings list.
+   - ACNH packs up to 64 display lists back to back (main+0x1ecbaa0). It measures them in one pass,
+     sets the region's budget to the total, and then records them for real, advancing by each
+     list's `GetCommandMemoryUsed`.
+   - Our command mirror skipped guest bytes when a record would straddle a 1 MiB mirror page,
+     so a list's usage depended on where it landed. A list crossing a page in the real pass grew by
+     up to its record size, the last lists ran past the budget, and the next structure's lists were
+     written over them. When one of those was called, it ran a corrupted binding.
+   - Fix (`cmdbuf.c`): mirror pages have slack; a record that runs past the end of its page spills
+     into the slack and is followed by a jump to the next page. Guest usage never depends on
+     placement. 16 boots clean afterwards.
+   - Kept for diagnosis: `LARECOMP_CMD_CHECK=1` (each 16-byte granule of command memory knows its
+     list; calling a list that was written over logs both sides), and `guest_copy` now refuses
+     addresses outside guest memory (logged with the draw's recent records) instead of crashing.
 **Now:** the opening dialogue plays over the 3D Nook Inc. counter with Timmy and Tommy, colour-graded,
 at 60 fps with sound. Open issues:
    - A cube-array texture (256×256×6, target 9) is sampled as a cube: "type mismatch" (30 logs).
-   - An intermittent crash (3 of ~25 boots): `guest_copy` reading guest address 0x5000000033 during
-     a draw (`exec.c` vertex / uniform copy), right after the scene loads. Not yet reproduced
-     reliably.
    - Audio effects 2, 3, 5 and 6 are not implemented.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).

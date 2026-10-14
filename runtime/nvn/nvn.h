@@ -93,6 +93,7 @@ typedef struct {
     bool has_mem;    // a chunk was given
     bool over;       // chunk full and the game gave no more: recording on in host memory of its own
     uint32_t id;     // (address space for memory given without a pool)
+    uint32_t list_id;  // (LARECOMP_CMD_CHECK: the list being recorded)
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
@@ -135,3 +136,4 @@ void backend_execute(uint64_t handle);            // run a recorded command list
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);
+void nvn_cmd_check_call(uint64_t handle, uint64_t caller);  // (cmdbuf.c, LARECOMP_CMD_CHECK)

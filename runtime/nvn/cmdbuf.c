@@ -8,6 +8,7 @@
 // HOST_PER_GUEST), so the game's out-of-memory callbacks come as they would, and when the game records over a guest
 // range again - it knows the GPU is done with the commands there - exactly the matching host range is overwritten.
 // (Lists elsewhere stay intact: a parent list may still call them by handle.)
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +20,11 @@
 _Static_assert(sizeof(CmdRec) <= GUEST_CMD * HOST_PER_GUEST, "record header must fit its guest charge");
 #define PAGE_BITS 20       // the mirror is made of 1 MiB guest pages (HOST_PER_GUEST MiB each), allocated on first use
 #define PAGE_SIZE (1ull << PAGE_BITS)
+// Each mirror page has slack after it: a record that runs past the page's end spills into it, followed there by a jump
+// to where the next record goes (mirror(end), in the next page). No guest bytes are skipped: ACNH measures its display
+// lists in one pass and packs them by those sizes in the next, so usage must not depend on where a list lands. (Only a
+// record too big for the slack - inline data over 64 KiB - starts afresh at the next page instead.)
+#define SLACK ((0x10000 + 256) * HOST_PER_GUEST + 2 * 128)
 
 typedef struct MirrorPage { uint64_t key; uint8_t *mem; struct MirrorPage *next; } MirrorPage;
 #define PAGE_BUCKETS 1024
@@ -36,7 +42,7 @@ static uint64_t mirror(uint64_t g) {
     if (!p) {
         p = calloc(1, sizeof *p);
         p->key = key;
-        p->mem = malloc(PAGE_SIZE * HOST_PER_GUEST);
+        p->mem = malloc(PAGE_SIZE * HOST_PER_GUEST + SLACK);
         if (!p->mem) FATAL("nvn: out of host memory for command records\n");
         p->next = pages[h];
         pages[h] = p;
@@ -46,6 +52,75 @@ static uint64_t mirror(uint64_t g) {
 }
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
+
+// LARECOMP_CMD_CHECK=1 (diagnostic): which recorded list owns each 16-byte granule of guest command memory. A record
+// written over a finished list kills it (who did, kept); calling a dead list logs both sides (nvn_cmd_check_call).
+typedef struct { uint64_t key; uint32_t *owner; } OwnerPage;
+#define OWNER_PAGES 4096
+static OwnerPage owner_pages[OWNER_PAGES];
+typedef struct { uint64_t handle, lo; uint32_t cb, killer_cb, killer_op; uint64_t lr, killer_lr, killer_g; bool done, dead;
+                 uint64_t mem, size, used, chunks, kmem, ksize, kused; } ListInfo;
+#define NLIST (1u << 20)
+static ListInfo *lists;
+static _Atomic uint32_t next_list = 1;
+static struct { uint64_t handle; uint32_t id; } by_handle[NLIST];  // (direct-mapped: the latest list at a handle)
+static unsigned handle_slot(uint64_t h) { return (unsigned)((h * 0x9E3779B97F4A7C15ull) >> 44) & (NLIST - 1); }
+static int cmd_check = -1;
+static bool cmd_checking(void) {
+    if (cmd_check < 0) cmd_check = getenv("LARECOMP_CMD_CHECK") != NULL;
+    return cmd_check;
+}
+static uint32_t *owner_of(uint64_t g) {
+    uint64_t key = g >> PAGE_BITS;
+    unsigned h = (unsigned)((key * 0x9E3779B97F4A7C15ull) >> 52) & (OWNER_PAGES - 1);
+    for (int i = 0; i < OWNER_PAGES; i++, h = (h + 1) & (OWNER_PAGES - 1)) {
+        if (owner_pages[h].owner && owner_pages[h].key == key) return owner_pages[h].owner + ((g & (PAGE_SIZE - 1)) >> 4);
+        if (!owner_pages[h].owner) {
+            owner_pages[h].key = key;
+            owner_pages[h].owner = calloc(PAGE_SIZE >> 4, sizeof(uint32_t));
+            return owner_pages[h].owner + ((g & (PAGE_SIZE - 1)) >> 4);
+        }
+    }
+    return NULL;
+}
+static void cmd_check_write(NvnCmdBuf *cb, uint64_t g, uint64_t len, uint32_t op, uint64_t lr) {
+    if (!cmd_checking() || !cb->list_id) return;
+    pthread_mutex_lock(&page_lock);
+    for (uint64_t a = g; a < g + len; a += 16) {
+        uint32_t *o = owner_of(a);
+        if (!o) break;
+        uint32_t id = *o;
+        if (id && id != cb->list_id) {
+            ListInfo *l = &lists[id & (NLIST - 1)];
+            if (l->done && !l->dead) {
+                l->dead = true, l->killer_cb = cb->id, l->killer_op = op, l->killer_lr = lr, l->killer_g = a;
+                l->kmem = cb->mem, l->ksize = cb->size, l->kused = cb->used;
+            }
+        }
+        *o = cb->list_id;
+    }
+    pthread_mutex_unlock(&page_lock);
+}
+// (exec.c, before running a called list)
+void nvn_cmd_check_call(uint64_t handle, uint64_t caller) {
+    if (!cmd_checking() || !lists) return;
+    uint32_t i = by_handle[handle_slot(handle)].id;
+    ListInfo *l = &lists[i & (NLIST - 1)];
+    if (by_handle[handle_slot(handle)].handle == handle && l->handle == handle && l->dead) {
+        static int n;
+        if (n++ < 20)
+            LOG("[nvn] call of overwritten list %llx (list %u of cmdbuf %u, guest %llx, ended at lr %llx) from %llx: "
+                "overwritten at guest %llx by cmdbuf %u op %u, lr %llx\n",
+                (unsigned long long)handle, i, l->cb, (unsigned long long)l->lo, (unsigned long long)l->lr,
+                (unsigned long long)caller, (unsigned long long)l->killer_g, l->killer_cb, l->killer_op,
+                (unsigned long long)l->killer_lr);
+        if (n <= 20)
+            LOG("[nvn]   list chunk %llx size %llx used %llx (chunks %llu) | writer chunk %llx size %llx used %llx\n",
+                (unsigned long long)l->mem, (unsigned long long)l->size, (unsigned long long)l->used, (unsigned long long)l->chunks,
+                (unsigned long long)l->kmem, (unsigned long long)l->ksize, (unsigned long long)l->kused);
+        return;
+    }
+}
 
 NVN(nvnCommandBufferInitialize) {
     static _Atomic uint32_t next_id;
@@ -69,6 +144,7 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 // Continue in guest command memory at g (size bytes); a list being recorded jumps there (the reserve after the last
 // record holds the jump).
 static void attach(NvnCmdBuf *cb, uint64_t g, uint64_t size) {
+    if (cb->list_id && lists) lists[cb->list_id & (NLIST - 1)].chunks++;
     if (cb->recording && cb->has_mem) raw_rec(mirror(cb->mem + cb->used), CMD_JUMP, sizeof(CmdRec))->x[0] = mirror(g);
     cb->mem = g, cb->size = size, cb->used = 0, cb->over = false, cb->has_mem = true;
 }
@@ -103,9 +179,11 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     uint64_t cost = GUEST_CMD + ((extra + 7) & ~7u);
     for (int tries = 0;; tries++) {
-        if (cb->has_mem) {  // a record and the jump after it stay inside one mirror page: else go on at the next page
+        if (cb->has_mem) {  // a record and the jump after it fit in the page and its slack: else go on at the next page
             uint64_t g = cb->mem + cb->used, room = PAGE_SIZE - (g & (PAGE_SIZE - 1));
-            if (cost + GUEST_RESERVE > room && (cb->over || cb->used + room + cost + GUEST_RESERVE <= cb->size)) {
+            bool fits = cost + GUEST_RESERVE <= room ||
+                        (cost + GUEST_RESERVE - room) * HOST_PER_GUEST + 2 * sizeof(CmdRec) <= SLACK;
+            if (!fits && (cb->over || cb->used + room + cost + GUEST_RESERVE <= cb->size)) {
                 raw_rec(mirror(g), CMD_JUMP, sizeof(CmdRec))->x[0] = mirror(g + room);
                 cb->used += room;
             }
@@ -132,21 +210,40 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         memcpy(c->x, saved, sizeof saved);
     }
     // (the record's size spans its whole mirror slot, so walking the list - p += size - finds the next one)
-    CmdRec *r = raw_rec(mirror(cb->mem + cb->used), op, (uint32_t)(cost * HOST_PER_GUEST));
+    cmd_check_write(cb, cb->mem + cb->used, cost, op, c->x[30]);
+    uint64_t g = cb->mem + cb->used;
+    CmdRec *r = raw_rec(mirror(g), op, (uint32_t)(cost * HOST_PER_GUEST));
     (void)size;
     cb->used += cost;
+    if ((g & (PAGE_SIZE - 1)) + cost >= PAGE_SIZE)  // ran into the slack: the walk (p += size) continues at the next page
+        raw_rec((uint64_t)(uintptr_t)r + cost * HOST_PER_GUEST, CMD_JUMP, sizeof(CmdRec))->x[0] = mirror(g + cost);
     return r;
 }
 
 NVN(nvnCommandBufferBeginRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     cb->recording = true;
+    if (cmd_checking()) {
+        if (!lists) lists = calloc(NLIST, sizeof *lists);
+        cb->list_id = atomic_fetch_add(&next_list, 1);
+        memset(&lists[cb->list_id & (NLIST - 1)], 0, sizeof *lists);
+        lists[cb->list_id & (NLIST - 1)].cb = cb->id;
+    }
     cb->start = (uint64_t)(uintptr_t)rec(c, cb, CMD_BARRIER, 0);  // the list starts here
+    if (cmd_checking()) lists[cb->list_id & (NLIST - 1)].lo = cb->mem + cb->used - GUEST_CMD;
 }
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
+    if (cmd_checking() && cb->list_id) {
+        ListInfo *l = &lists[cb->list_id & (NLIST - 1)];
+        l->handle = cb->start, l->lr = c->x[30], l->done = true;
+        l->mem = cb->mem, l->size = cb->size, l->used = cb->used;
+        by_handle[handle_slot(cb->start)].handle = cb->start;
+        by_handle[handle_slot(cb->start)].id = cb->list_id;
+        cb->list_id = 0;
+    }
     RET(cb->start);
 }
 NVN(nvnCommandBufferIsRecording) { RET(cb_of(A(0))->recording); }
