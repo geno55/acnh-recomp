@@ -466,6 +466,39 @@ HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", hid_state_left)
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", hid_state_handheld) { fill_state(c); }
 HLE_FUNC("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", hid_state_right) { fill_state(c); }
 
+// GetNpadStates(states, count, id): the latest samples, newest first (ACNH). One sample: the current state.
+static void fill_states(Cpu *c) {
+    if ((int32_t)c->x[1] <= 0) { c->x[0] = 0; return; }
+    uint64_t x1 = c->x[1];
+    c->x[1] = c->x[2];  // (fill_state takes (state, id))
+    fill_state(c);
+    c->x[1] = x1;
+    c->x[0] = 1;
+}
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", hid_states_fullkey) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", hid_states_dual) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", hid_states_left) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", hid_states_handheld) { fill_states(c); }
+HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", hid_states_right) { fill_states(c); }
+
+// Touch screen (docked: never touched). TouchScreenState<N> = {int64 sampling, int32 count, int32 reserved,
+// TouchState[N] (40 bytes each)}. There must be a sample: ACNH reads states[0].count whatever the call returns, and
+// from the stack garbage it found there (the SDK's own call, over our empty shared memory, wrote nothing) subtracted
+// 15 from "touch coordinates" far over the heap - pointers 0x72.. became 0x63.., crashing the vibration thread.
+static int64_t touch_sampling;
+HLE_FUNC("_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi", hid_touch_states16) {
+    if ((int32_t)c->x[1] <= 0) { c->x[0] = 0; return; }
+    uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
+    memset(s, 0, 16 + 16 * 40);
+    *(int64_t *)s = ++touch_sampling;
+    c->x[0] = 1;
+}
+HLE_FUNC("_ZN2nn3hid19GetTouchScreenStateILm1EEEvPNS0_16TouchScreenStateIXT_EEE", hid_touch_state1) {
+    uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
+    memset(s, 0, 16 + 40);
+    *(int64_t *)s = ++touch_sampling;
+}
+
 // FullKey for player 1 only (we report docked mode, where Handheld is unavailable)
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];

@@ -61,6 +61,7 @@ void plat_fatal_notice(void);  // a fatal error is about to end the process: tel
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)
 // Called by the crash handler (runtime/dispatch.c): true = fault handled (watchpoint), resume.
 bool rt_fault_watch(uint64_t fault_addr, uint64_t host_pc);
+void rt_watch_stepped(uint64_t host_pc);  // (Windows: after the single-stepped access)
 void rt_fault_report(const char *what, uint64_t fault_addr, uint64_t host_pc, uint64_t host_lr) __attribute__((noreturn));
 
 #ifdef __cplusplus

@@ -286,40 +286,76 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 
 // ---- crash reporting
 
-// Debug data watchpoint: the page is protected; accesses in [lo, hi) are attributed to the host
-// function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
+// Debug data watchpoint (LARECOMP_WATCH=<lo>,<hi>, or set by debug code): the page holding lo is protected. An access
+// to it faults; the page is opened and the faulting instruction single-stepped (plat: trap flag), then the page is
+// closed again. A change to the 16 bytes at lo is logged with the host code that made it and the guest return address.
 uint64_t g_watch_lo, g_watch_hi;
-static uint64_t watch_page;
+static uint64_t watch_page, watch_size;  // (every page of [lo, hi))
+static uint64_t watch_val[2], watch_fa, watch_fa_val;
+static pthread_mutex_t watch_lock = PTHREAD_MUTEX_INITIALIZER;  // (one access in flight: others wait in the fault)
 static void *watch_thread(void *a) {
     (void)a;
-    int r = plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
-    fprintf(stderr, "[watch] page %llx protect -> %d\n", (unsigned long long)watch_page, r);
-    for (;;) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    // Kept closed: committing the page (lazily, on first touch) or remapping the heap opens it again.
+    for (bool said = false;; usleep(1000)) {
+        pthread_mutex_lock(&watch_lock);  // (never in the middle of a single-stepped access)
+        int r = plat_protect(watch_page, watch_size, PLAT_PROT_NONE);
+        pthread_mutex_unlock(&watch_lock);
+        if (r == 0 && !said) fprintf(stderr, "[watch] page %llx protected\n", (unsigned long long)watch_page), said = true;
+    }
     return NULL;
 }
 void watch_arm(void) {
     if (!g_watch_lo || watch_page) return;
     watch_page = g_watch_lo & ~(PLAT_PAGE - 1);
+    watch_size = ((g_watch_hi + PLAT_PAGE - 1) & ~(PLAT_PAGE - 1)) - watch_page;
     pthread_t t;
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
+// An access fault in the watched page: open it for this one instruction (true: single-step it).
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
-    if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
-    if (fa >= g_watch_lo && fa < g_watch_hi) {
-        static char seen[64][48];
-        static int nseen;
-        const char *nm = host_sym(pc, NULL);
-        if (!nm) nm = "?";
-        bool found = false;
-        for (int i = 0; i < nseen; i++) found |= !strcmp(seen[i], nm);
-        if (!found && nseen < 64) {
-            snprintf(seen[nseen++], 48, "%s", nm);
-            fprintf(stderr, "[watch] +%#llx by %s\n", fa - g_watch_lo, nm);
+    (void)pc;
+    if (!watch_page || fa < watch_page || fa >= watch_page + watch_size) return false;
+#ifdef _WIN32
+    pthread_mutex_lock(&watch_lock);
+    plat_protect(watch_page, watch_size, PLAT_PROT_RW);
+    memcpy(watch_val, (void *)(uintptr_t)g_watch_lo, sizeof watch_val);
+    watch_fa = fa & ~7ull;
+    watch_fa_val = *(uint64_t *)(uintptr_t)watch_fa;
+#else  // (no single-step there: the page just opens; accesses after this one go unseen)
+    plat_protect(watch_page, watch_size, PLAT_PROT_RW);
+#endif
+    return true;
+}
+// The instruction at pc has run: log a change, close the page.
+void rt_watch_stepped(uint64_t pc) {
+    uint64_t v[2];
+    memcpy(v, (void *)(uintptr_t)g_watch_lo, sizeof v);
+    {   // anywhere in the page: a store that leaves a pointer 0x6x_xxxx_xxxx (heap pointers are 0x72...)
+        uint64_t nv = *(uint64_t *)(uintptr_t)watch_fa;
+        if (nv != watch_fa_val && (nv >> 36) == 6) {
+            uint64_t off = 0;
+            const char *nm = host_sym(pc, &off);
+            Cpu *c = kernel_current_cpu();
+            fprintf(stderr, "[watch] %llx: %llx -> %llx by %s+%llx (guest lr %llx)\n", (unsigned long long)watch_fa,
+                    (unsigned long long)watch_fa_val, (unsigned long long)nv, nm ? nm : "?", (unsigned long long)off,
+                    c ? (unsigned long long)c->x[30] : 0ull);
+            if (c) for (int i = 0; i < 31; i += 4)
+                fprintf(stderr, "    x%d %llx x%d %llx x%d %llx x%d %llx\n", i, (unsigned long long)c->x[i], i + 1,
+                        (unsigned long long)c->x[i + 1], i + 2, (unsigned long long)c->x[i + 2], i + 3,
+                        (unsigned long long)(i + 3 < 31 ? c->x[i + 3] : c->sp));
         }
     }
-    plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
-    return true;
+    if (memcmp(v, watch_val, sizeof v)) {
+        uint64_t off = 0;
+        const char *nm = host_sym(pc, &off);
+        Cpu *c = kernel_current_cpu();
+        fprintf(stderr, "[watch] %llx: %llx %llx -> %llx %llx by %s+%llx (guest lr %llx, x0 %llx)\n", (unsigned long long)g_watch_lo,
+                (unsigned long long)watch_val[0], (unsigned long long)watch_val[1], (unsigned long long)v[0], (unsigned long long)v[1],
+                nm ? nm : "?", (unsigned long long)off, c ? (unsigned long long)c->x[30] : 0ull, c ? (unsigned long long)c->x[0] : 0ull);
+    }
+    plat_protect(watch_page, watch_size, PLAT_PROT_NONE);
+    pthread_mutex_unlock(&watch_lock);
 }
 
 void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
@@ -331,4 +367,10 @@ void rt_fault_report(const char *what, uint64_t fa, uint64_t pc, uint64_t lr) {
     rt_fatal_trace();
 }
 
-void crash_handler_install(void) { plat_crash_handler_install(); }
+void crash_handler_install(void) {
+    plat_crash_handler_install();
+    // LARECOMP_WATCH=<lo>,<hi> (hex guest addresses): log each function that touches [lo, hi), from the start
+    unsigned long long lo, hi;
+    const char *e = getenv("LARECOMP_WATCH");
+    if (e && sscanf(e, "%llx,%llx", &lo, &hi) == 2 && lo < hi) { g_watch_lo = lo, g_watch_hi = hi; watch_arm(); }
+}

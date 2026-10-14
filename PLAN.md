@@ -199,10 +199,37 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    - Kept for diagnosis: `LARECOMP_CMD_CHECK=1` (each 16-byte granule of command memory knows its
      list; calling a list that was written over logs both sides), and `guest_copy` now refuses
      addresses outside guest memory (logged with the draw's recent records) instead of crashing.
-**Now:** the opening dialogue plays over the 3D Nook Inc. counter with Timmy and Tommy, colour-graded,
-at 60 fps with sound. Open issues:
+3g. [x] Input, and the crash after name / birthday entry.
+   - ACNH reads the controller with `nn::hid::GetNpadStates` (a list of samples); only LA's
+     `GetNpadState` was implemented, so the game never saw a button. Added for all five styles.
+   - Crash in the vibration thread about a minute in: heap pointers 0x72.. had become 0x63..
+     (−0xF0000_0000). The game reads `GetTouchScreenStates<16>` into a stack buffer and then reads
+     `states[0].count` whatever the call returned; the SDK's own call, over our empty shared memory,
+     wrote nothing, so it used stack garbage as the touch count and subtracted 15 from "touch
+     coordinates" far across the heap (main+0x18726b0). The touch screen readers now return one
+     sample with no touches.
+   - Found with `LARECOMP_WATCH=<lo>,<hi>` (dispatch.c): the pages are protected and each access
+     single-stepped (Windows trap flag), logging every change to the 16 bytes at lo, and any store in
+     the range that leaves a 0x6x_xxxx_xxxx value, with the host code and guest lr.
+   - Headless repro: `LARECOMP_INPUT="1600:A:6,1700:A:6,..."` (A every 100 frames) reaches the
+     name entry keyboard.
+3h. [x] Character voices (Animalese). Silent, then left ear only:
+   - Splitters were ignored: most voices and several sub mixes reach their mixes only through them
+     (mix id 0x7fffffff, a splitter id). Now parsed (REV8: 'SNDH' header; 'SNDI' id, rate, count,
+     ids, 12 stale bytes; 'SNDD' id, 24 volumes, mix, in use; only changes are sent) and mixed:
+     destination k takes source channel / mix buffer k % channels. Sub mixes are ordered by depth
+     over splitter edges too.
+   - Aux (effect 2) was ignored: ACNH runs nearly every mix through the game's own processing, which
+     pans the mono voices. Implemented as the SDK's `nn::audio::dsp::WriteAuxBufferDsp` /
+     `ReadAuxBufferDsp`: int32 ring buffers, the DSP half of each info block at +0x40.
+   - `LARECOMP_AUDIO_ROUTES=<frame>` dumps the routing graph.
+**Now:** the intro plays: dialogue over the 3D Nook Inc. counter with Timmy and Tommy, name and
+birthday entry, voices and sound, 60 fps. Open issues:
+   - Intermittent hang at startup (once in ~10 runs, seen only in a visible window): the game stops
+     after its first controller read, before the first frame. A run with `LARECOMP_THREAD_DUMP`
+     that hangs will show where.
    - A cube-array texture (256×256×6, target 9) is sampled as a cube: "type mismatch" (30 logs).
-   - Audio effects 2, 3, 5 and 6 are not implemented.
+   - Audio effects 3, 5 and 6 (delay, I3dl2 reverb, biquad filter) are not implemented.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.

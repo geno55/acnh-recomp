@@ -30,10 +30,20 @@ static bool g_report_crashes;
 
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    static __thread bool watch_stepping;
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && watch_stepping) {  // (debug watchpoint: the access has run)
+        watch_stepping = false;
+        rt_watch_stepped(ep->ContextRecord->Rip);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
     if (lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
-    if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) {
+        ep->ContextRecord->EFlags |= 0x100;  // trap flag: single-step the access
+        watch_stepping = true;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
