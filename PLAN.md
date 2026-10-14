@@ -235,9 +235,16 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    were the depth-of-field pass: the far-field colour (compressible, so drawn at the output scale)
    and its coverage weights (R8, not compressible, so not scaled) are rendered in one pass, so the
    weights filled only the top-left 2/3 of their target and the blur read them from the wrong place.
-   A colour target bound beside a scaled one of the same size is now scaled too
-   (`vk_tex_promote_scalable`). Feedback snapshots also keep every mip level now (a pass that renders
+   A render target bound beside a scaled one (colour or depth) of the same size is now scaled too
+   (`vk_tex_promote_scalable`). The same bug darkened everything right of / below 2/3 of the screen:
+   the ambient-occlusion mask (R8) is drawn with the scaled half-size depth buffer. Feedback snapshots also keep every mip level now (a pass that renders
    one level and samples another read level 0 only).
+3k. [x] Crash entering the character creator's last page (Cheeks). The game's render targets live in a
+   virtual memory pool mapped 1:1 onto a physical one; `nvnMemoryPoolMapVirtual` was a no-op, so
+   their addresses were bare pool offsets and sampling one before it was rendered read from there.
+   The virtual pool now takes the address its mapping gives. Its cheek swatches are then rendered
+   through one texture object and drawn through another at the same memory: a never-rendered
+   texture now samples the rendered one with the same address, size and format (black otherwise).
 **Now:** the intro plays: dialogue over the 3D Nook Inc. counter with Timmy and Tommy, name and
 birthday entry, voices and sound, 60 fps. Open issues:
    - TODO 60 fps at the right speed. The game is made for 30 fps (`AppHooks::setupFrameworkCreateArg`

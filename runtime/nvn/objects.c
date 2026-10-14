@@ -192,6 +192,8 @@ NVN(nvnMemoryPoolInitialize) {
     p->size = G(uint64_t, A(1), 0x18);
     p->flags = G(uint32_t, A(1), 8);
     SET_HOST(A(0), p);
+    if (p->flags & 0x300) LOG("[nvn] memory pool %llx flags %#x storage %llx size %#llx\n", (unsigned long long)A(0), p->flags,
+                              (unsigned long long)p->storage, (unsigned long long)p->size);
     RET(1);
 }
 NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
@@ -205,7 +207,29 @@ NVN(nvnMemoryPoolFlushMappedRange) {
     backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; }
-NVN(nvnMemoryPoolMapVirtual) { RET(1); }
+// A virtual pool has no storage of its own: mapping requests (physical pool@0, physical offset@8, virtual
+// offset@0x10, size@0x18, storage class@0x20; 0x28 bytes) back its ranges with physical pools. GPU address ==
+// CPU address here, so the virtual pool takes the address its offset 0 maps to, which is right as long as one
+// physical range backs it contiguously - ACNH maps its whole render-target pool 1:1 onto one physical pool.
+// (Unmapped, its textures had their bare offsets as addresses: sampling one before it was rendered read from
+// there - the crash entering the character creator's last page.)
+NVN(nvnMemoryPoolMapVirtual) {
+    NvnPool *p = HOST(NvnPool, A(0));
+    int n = (int)A(1);
+    const uint8_t *r = AP(2);
+    for (int i = 0; i < n; i++, r += 0x28) {
+        uint64_t phys = *(uint64_t *)r, poff = *(uint64_t *)(r + 8), voff = *(uint64_t *)(r + 0x10), size = *(uint64_t *)(r + 0x18);
+        uint64_t base = phys ? HOST(NvnPool, phys)->storage + poff - voff : 0;
+        static int nlog;
+        if (nlog++ < 20)
+            LOG("[nvn] map virtual pool %llx +%#llx size %#llx -> physical %llx +%#llx\n", (unsigned long long)A(0),
+                (unsigned long long)voff, (unsigned long long)size, (unsigned long long)phys, (unsigned long long)poff);
+        if (!phys) continue;  // (unmapping: the range keeps its last address)
+        if (p->storage && p->storage != base) LOG("[nvn] virtual pool %llx: piecewise mapping not supported\n", (unsigned long long)A(0));
+        else p->storage = base;
+    }
+    RET(1);
+}
 
 // ================================================================== buffers
 // Builder: device@0 pool@8 offset@0x10 size@0x18. Buffer: address@0 pool@8 offset@0x10 size@0x18 id@0x20
@@ -354,7 +378,7 @@ static NvnTexture *texture_from_builder(uint64_t b) {
     uint64_t pool = G(uint64_t, b, 0x38);
     t->pool = pool ? HOST(NvnPool, pool) : NULL;
     t->pool_offset = G(uint64_t, b, 0x40);
-    t->addr = t->pool ? t->pool->storage + t->pool_offset : 0;
+    t->addr = t->pool && t->pool->storage ? t->pool->storage + t->pool_offset : 0;  // (0: an unmapped virtual pool)
     builder_layout(b, &t->layout);
     t->debug_id = next_debug_id++;
     return t;
@@ -362,6 +386,8 @@ static NvnTexture *texture_from_builder(uint64_t b) {
 
 NVN(nvnTextureInitialize) {
     NvnTexture *t = texture_from_builder(A(1));
+    if (t->pool && (t->pool->flags & 0x200) && !t->pool->storage)
+        LOG("[nvn] texture %p in an unmapped virtual pool: %ux%u fmt %#x\n", (void *)t, t->width, t->height, t->format);
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);

@@ -697,13 +697,13 @@ static void begin_pass(void) {
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
-    for (int i = 0; i < st.rt.ncolor; i++) {  // same-size colour targets render at one scale (vk_tex_promote_scalable)
-        NvnTexture *s = st.rt.color[i];
+    for (int i = 0; i <= st.rt.ncolor; i++) {  // same-size targets (colour and depth) render at one scale (vk_tex_promote_scalable)
+        NvnTexture *s = i < st.rt.ncolor ? st.rt.color[i] : st.rt.depth;
         float sx = 1, sy = 1;
         if (s) { vk_tex(s, true); renderer_texture_scale(s, &sx, &sy); }
         if (sx == 1 && sy == 1) continue;
-        for (int j = 0; j < st.rt.ncolor; j++) {
-            NvnTexture *t = st.rt.color[j];
+        for (int j = 0; j <= st.rt.ncolor; j++) {
+            NvnTexture *t = j < st.rt.ncolor ? st.rt.color[j] : st.rt.depth;
             if (t && t != s && t->width == s->width && t->height == s->height) { vk_tex(t, true); vk_tex_promote_scalable(t); }
         }
         break;
@@ -717,10 +717,10 @@ static void begin_pass(void) {
         VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (g_debug_frame)
-            LOG("[vk] pass color %d: %p image %p view %p | cview %d mask %x levels %u+%u layers %u+%u fmt %#x target %u\n", i,
+            LOG("[vk] pass color %d: %p image %p view %p | cview %d mask %x levels %u+%u layers %u+%u fmt %#x target %u | %ux%u addr %llx\n", i,
                 (void *)t, b ? (void *)b->image : NULL, (void *)v, st.rt.has_cview[i], st.rt.cview[i].setmask,
                 st.rt.cview[i].base_level, st.rt.cview[i].num_levels, st.rt.cview[i].min_layer, st.rt.cview[i].num_layers,
-                st.rt.cview[i].format, st.rt.cview[i].target);
+                st.rt.cview[i].format, st.rt.cview[i].target, t->width, t->height, (unsigned long long)t->addr);
         if (!v) continue;
         ca[i].imageView = v;
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2384,8 +2384,9 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         if (!t) { LOG("[draw]   tex%d: none\n", i); continue; }
-        LOG("[draw]   tex%d: %p %ux%u f%#x lv %u -> %ux%u scale %.4f %.4f%s\n", i, (void *)t, t->width, t->height, t->format,
-            b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "");
+        LOG("[draw]   tex%d: %p %ux%u f%#x lv %u -> %ux%u scale %.4f %.4f%s addr %llx\n", i, (void *)t, t->width, t->height, t->format,
+            b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "",
+            (unsigned long long)t->addr);
         if (t->target == 2 && t->addr) {  // 3D: where its texels live, and the first of them
             const uint16_t *h = (const uint16_t *)(uintptr_t)t->addr;
             LOG("[draw]     3D depth %u addr %llx pool %p+%llx:", t->depth, (unsigned long long)t->addr, (void *)t->pool,

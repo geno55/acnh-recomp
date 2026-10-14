@@ -376,10 +376,11 @@ static void live_remove(TexBackend *b) {
     b->reg = 0;
 }
 
-// A colour target the scaling rules leave at its own size (not compressible), bound in one pass with a scaled
-// target of the same size: the pass renders at the scaled size, so it is scaled too. (ACNH's depth-of-field
-// coverage buffer, rendered beside the far-field colour: unscaled, it was filled only in its top-left corner and
-// the blur weights were read from the wrong place - dark, blocky silhouettes on the walls behind characters.)
+// A render target the scaling rules leave at its own size (not compressible), bound in one pass with a scaled
+// target (colour or depth) of the same size: the pass renders at the scaled size, so it is scaled too. Unscaled,
+// it was filled only in its top-left corner and read stretched. (ACNH: the depth-of-field coverage weights beside
+// the far-field colour - blocky silhouettes on the walls; the ambient-occlusion mask drawn with the scaled
+// half-size depth - everything right of / below 2/3 of the screen darkened.)
 void vk_tex_promote_scalable(NvnTexture *t) {
     TexBackend *b = t ? t->backend : NULL;
     if (!b || b->scalable || getenv("LARECOMP_NO_SCALE") || t->target != 1 || t->samples > 1) return;
@@ -406,7 +407,30 @@ static TexBackend *tex_backend(NvnTexture *t) {
     return b;
 }
 
+// Render targets by guest address: a game may render through one texture object and sample the same memory
+// through another (ACNH's character creator renders each swatch with one object and draws it with a second).
+// Each object has its own image here, so the second would upload the (never written) memory instead: black.
+static NvnTexture *rendered_at[4096];
+static uint32_t rendered_slot(uint64_t addr) { return (uint32_t)((addr >> 9) * 0x9E3779B1u >> 20) & 4095; }
+
+static void note_rendered(NvnTexture *t) {
+    if (t->addr) rendered_at[rendered_slot(t->addr)] = t;
+}
+
+// The rendered texture that t's memory holds, when t itself was never rendered: same address, size, target and
+// format (one slot per hash: a collision only loses the alias, the texture is used as before).
+static NvnTexture *rendered_alias(NvnTexture *t) {
+    TexBackend *b = t->backend;
+    if (!t->addr || (b && b->gpu_owned)) return NULL;
+    NvnTexture *a = rendered_at[rendered_slot(t->addr)];
+    if (!a || a == t || a->addr != t->addr || a->width != t->width || a->height != t->height || a->depth != t->depth ||
+        a->target != t->target || vk_format(a->format) != vk_format(t->format) || !a->backend)
+        return NULL;
+    return a;
+}
+
 void backend_texture_destroyed(NvnTexture *t) {
+    if (t->addr && rendered_at[rendered_slot(t->addr)] == t) rendered_at[rendered_slot(t->addr)] = NULL;
     TexBackend *b = t->backend;
     if (b) {
         live_remove(b);
@@ -575,7 +599,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);
     if (b->pending_rgba) upload_pending(b);
-    if (for_render) b->gpu_owned = true;
+    if (for_render) { b->gpu_owned = true; note_rendered(t); }
     else if (!b->gpu_owned) {
         extern uint64_t prof_up_ns;
         uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
@@ -585,7 +609,7 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     return b;
 }
 
-void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
+void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; note_rendered(t); }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
@@ -662,6 +686,7 @@ static const VkComponentMapping IDENTITY = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_CO
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
+    if (!render) { NvnTexture *a = rendered_alias(t); if (a) t = a; }
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
     VkFormat fmt = b->format;
