@@ -117,6 +117,8 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
+    extern bool g_debug_frame;
+    if (g_debug_frame && ENV("LARECOMP_DEBUG_OPS")) LOG("[submit] %d list(s), lr %llx\n", n, (unsigned long long)c->x[30]);
     for (int i = 0; i < n; i++) backend_execute(handles[i]);
 }
 NVN(nvnQueueFlush) { (void)c; }
@@ -656,6 +658,13 @@ NVN(nvnQueueAcquireTexture) {
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    if (ENV("LARECOMP_LOG_PRESENT")) {
+        static int n;
+        if (n++ % 300 == 0)
+            LOG("[present] index %d of %d: texture %p (guest %llx)\n", i, w->num,
+                i >= 0 && i < w->num ? (void *)HOST(NvnTexture, w->textures[i]) : NULL,
+                i >= 0 && i < w->num ? (unsigned long long)w->textures[i] : 0ull);
+    }
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
 }
 

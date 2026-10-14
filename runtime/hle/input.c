@@ -474,6 +474,25 @@ HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     c->x[0] = id == 0 ? 1 : 0;  // docked: no handheld controller
 }
 
+// nn::hid::ShowControllerSupport: the system's controller applet ("press L + R", player assignment). Our am
+// service runs no library applets, so the game waited for it forever (ACNH at boot: a black screen). The one
+// controller there is - player 1, FullKey, above - is taken as confirmed right away.
+// ControllerSupportResultInfo = {s8 player count; pad[3]; u32 selected NpadId}
+static void controller_support(Cpu *c, uint64_t info) {
+    static int nlog;
+    if (nlog++ < 3) LOG("[input] ShowControllerSupport: player 1 (no applet)\n");
+    if (info) {
+        *(int8_t *)(uintptr_t)info = 1;
+        *(uint32_t *)(uintptr_t)(info + 4) = 0;  // NpadId::No1
+    }
+    c->x[0] = 0;
+}
+HLE_FUNC("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",
+         hid_controller_support_info) { controller_support(c, c->x[0]); }
+HLE_FUNC("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", hid_controller_support) {
+    controller_support(c, 0);
+}
+
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
 // controller connected.
 #include "../kernel.h"

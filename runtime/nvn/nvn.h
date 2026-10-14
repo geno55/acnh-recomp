@@ -85,14 +85,14 @@ typedef struct NvnSync {
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
 } NvnSync;
 
-// ---- command recording (records in host storage behind the guest's command memory: cmdbuf.c)
+// ---- command recording (records in a host mirror of the guest's command memory: cmdbuf.c)
 typedef struct {
-    uint64_t mem;    // current guest command memory chunk (guest address)
+    uint64_t mem;    // current guest command memory chunk (its address in the mirror's address space)
     uint64_t size;   // chunk size
     uint64_t used;   // guest bytes used in chunk (charged at about NVN's rate)
-    bool over;       // chunk full and the game gave no more: recording on in host memory only
-    struct ShadowBlock *blk;  // host storage being written, and the bytes used there
-    uint64_t boff;
+    bool has_mem;    // a chunk was given
+    bool over;       // chunk full and the game gave no more: recording on in host memory of its own
+    uint32_t id;     // (address space for memory given without a pool)
     uint64_t start;  // first record of the list being recorded
     uint64_t callback, callback_data;
     bool recording;
@@ -123,6 +123,7 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
+    CMD_SET_RENDER_ENABLE_COND,
     CMD_COUNT
 };
 

@@ -1,61 +1,61 @@
 // NVN command buffers. Commands are recorded as CmdRec records; a command handle is the address of a list's first
 // record (the executors in runtime/nvn/vulkan/exec.c and renderer.m walk them).
 //
-// Records are much larger than NVN's own encoding, and some games (ACNH) give a command buffer only as much memory as
-// real NVN needs. So records don't go into the guest's command memory itself but into host storage behind it: a
-// "shadow" per piece of guest command memory, keyed by its guest address. The game still manages its memory as
-// designed: use is reported in guest bytes at about NVN's rate (so its out-of-memory callbacks come as they would),
-// and a shadow is written again exactly when the game hands the same guest memory again - when it knows the GPU is
-// done with the commands there. Host memory stays bounded by the game's own use.
+// Records are larger than NVN's own encoding, and some games (ACNH) give a command buffer only as much memory as real
+// NVN needs. So records don't go into the guest's command memory itself but into a host mirror of it, HOST_PER_GUEST
+// times larger: the record charged at guest address g lives at mirror(g). Use is reported in guest bytes at about
+// NVN's rate (GUEST_CMD per command plus its inline data; the record fits in that many guest bytes times
+// HOST_PER_GUEST), so the game's out-of-memory callbacks come as they would, and when the game records over a guest
+// range again - it knows the GPU is done with the commands there - exactly the matching host range is overwritten.
+// (Lists elsewhere stay intact: a parent list may still call them by handle.)
 #include <stdlib.h>
 #include <string.h>
 
 #include "nvn.h"
 
-#define GUEST_CMD 16      // guest bytes charged per command, plus its inline data: about NVN's own rate
-#define GUEST_RESERVE 16  // kept free at the end of a guest chunk for the jump to the next one, as NVN does
+#define GUEST_CMD 16       // guest bytes charged per command, plus its inline data: about NVN's own rate
+#define GUEST_RESERVE 16   // kept free after every record for a jump (to the next chunk or page), as NVN does
+#define HOST_PER_GUEST 5   // host bytes per guest byte: the CmdRec header (80) is 5 x GUEST_CMD, data 1:1
+_Static_assert(sizeof(CmdRec) <= GUEST_CMD * HOST_PER_GUEST, "record header must fit its guest charge");
+#define PAGE_BITS 20       // the mirror is made of 1 MiB guest pages (HOST_PER_GUEST MiB each), allocated on first use
+#define PAGE_SIZE (1ull << PAGE_BITS)
 
-typedef struct ShadowBlock { struct ShadowBlock *next; uint64_t size; uint8_t data[]; } ShadowBlock;
-typedef struct Shadow { uint64_t key; ShadowBlock *first; struct Shadow *next; } Shadow;
+typedef struct MirrorPage { uint64_t key; uint8_t *mem; struct MirrorPage *next; } MirrorPage;
+#define PAGE_BUCKETS 1024
+static MirrorPage *pages[PAGE_BUCKETS];
+static pthread_mutex_t page_lock = PTHREAD_MUTEX_INITIALIZER;
 
-#define SHADOW_BUCKETS 4096
-static Shadow *shadows[SHADOW_BUCKETS];
-static pthread_mutex_t shadow_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static ShadowBlock *block_new(uint64_t need) {
-    uint64_t size = need > 0x40000 ? need : 0x40000;
-    ShadowBlock *b = malloc(sizeof *b + size);
-    if (!b) FATAL("nvn: out of host memory for command records\n");
-    b->next = NULL;
-    b->size = size;
-    return b;
-}
-
-static Shadow *shadow_for(uint64_t key) {
-    pthread_mutex_lock(&shadow_lock);
-    unsigned h = (unsigned)((key * 0x9E3779B97F4A7C15ull) >> 52) & (SHADOW_BUCKETS - 1);
-    Shadow *s = shadows[h];
-    while (s && s->key != key) s = s->next;
-    if (!s) {
-        s = calloc(1, sizeof *s);
-        s->key = key;
-        s->first = block_new(0);
-        s->next = shadows[h];
-        shadows[h] = s;
+// Host address of guest command memory address g. Pool memory uses its guest address; memory given with no pool
+// (ACNH, some command buffers: offsets only) gets an address space of its own per command buffer (1 << 62 | id << 32).
+static uint64_t mirror(uint64_t g) {
+    uint64_t key = g >> PAGE_BITS;
+    pthread_mutex_lock(&page_lock);
+    unsigned h = (unsigned)((key * 0x9E3779B97F4A7C15ull) >> 54) & (PAGE_BUCKETS - 1);
+    MirrorPage *p = pages[h];
+    while (p && p->key != key) p = p->next;
+    if (!p) {
+        p = calloc(1, sizeof *p);
+        p->key = key;
+        p->mem = malloc(PAGE_SIZE * HOST_PER_GUEST);
+        if (!p->mem) FATAL("nvn: out of host memory for command records\n");
+        p->next = pages[h];
+        pages[h] = p;
     }
-    pthread_mutex_unlock(&shadow_lock);
-    return s;
+    pthread_mutex_unlock(&page_lock);
+    return (uint64_t)(uintptr_t)(p->mem + (g & (PAGE_SIZE - 1)) * HOST_PER_GUEST);
 }
 
 static NvnCmdBuf *cb_of(uint64_t guest) { return HOST(NvnCmdBuf, guest); }
 
 NVN(nvnCommandBufferInitialize) {
+    static _Atomic uint32_t next_id;
     NvnCmdBuf *cb = calloc(1, sizeof *cb);
     cb->guest = A(0);
+    cb->id = ++next_id;
     SET_HOST(A(0), cb);
     RET(1);
 }
-NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }  // (shadows belong to guest memory: kept)
+NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }  // (the mirror belongs to guest memory: kept)
 NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
@@ -65,26 +65,18 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     r->size = size;
     return r;
 }
-static uint64_t host_pos(NvnCmdBuf *cb) { return (uint64_t)(uintptr_t)(cb->blk->data + cb->boff); }
 
-// Switch to the shadow for `key`; a list being recorded continues there. Every block keeps room for that jump.
-static void attach(NvnCmdBuf *cb, uint64_t key, uint64_t mem, uint64_t size) {
-    Shadow *s = shadow_for(key);
-    if (cb->recording && cb->blk) raw_rec(host_pos(cb), CMD_JUMP, sizeof(CmdRec))->x[0] = (uint64_t)(uintptr_t)s->first->data;
-    cb->mem = mem, cb->size = size, cb->used = 0, cb->over = false;
-    cb->blk = s->first, cb->boff = 0;
+// Continue in guest command memory at g (size bytes); a list being recorded jumps there (the reserve after the last
+// record holds the jump).
+static void attach(NvnCmdBuf *cb, uint64_t g, uint64_t size) {
+    if (cb->recording && cb->has_mem) raw_rec(mirror(cb->mem + cb->used), CMD_JUMP, sizeof(CmdRec))->x[0] = mirror(g);
+    cb->mem = g, cb->size = size, cb->used = 0, cb->over = false, cb->has_mem = true;
 }
 
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
-    uint64_t off = A(2), size = A(3), mem, key;
-    if (A(1)) {
-        mem = key = HOST(NvnPool, A(1))->storage + off;
-    } else {  // (ACNH, some command buffers: no pool, increasing offsets - kept apart per command buffer)
-        mem = off;
-        key = (1ull << 63) | ((cb->guest << 20) ^ off);
-    }
-    attach(cb, key, mem, size);
+    uint64_t off = A(2), size = A(3);
+    attach(cb, A(1) ? HOST(NvnPool, A(1))->storage + off : (1ull << 62) | ((uint64_t)cb->id << 32) | off, size);
 }
 NVN(nvnCommandBufferAddControlMemory) { (void)c; }
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
@@ -110,19 +102,25 @@ NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     uint64_t cost = GUEST_CMD + ((extra + 7) & ~7u);
-    for (int tries = 0; !cb->blk || (!cb->over && cb->used + cost + GUEST_RESERVE > cb->size); tries++) {
-        if (!cb->callback || tries == 2) {
-            // the game gives no (more) memory: go on past its chunk - host storage grows, reported use stops at
-            // the chunk's size - until it adds some. A command buffer it never gave any gets a shadow of its own.
-            if (!cb->blk) attach(cb, (1ull << 62) | cb->guest, 0, 0);
-            if (!cb->over) {
-                static int nlog;
-                if (nlog++ < 5)
-                    LOG("[nvn] cmdbuf %llx: guest command memory (%llx, size %llx) full, recording on in host memory\n",
-                        (unsigned long long)cb->guest, (unsigned long long)cb->mem, (unsigned long long)cb->size);
+    for (int tries = 0;; tries++) {
+        if (cb->has_mem) {  // a record and the jump after it stay inside one mirror page: else go on at the next page
+            uint64_t g = cb->mem + cb->used, room = PAGE_SIZE - (g & (PAGE_SIZE - 1));
+            if (cost + GUEST_RESERVE > room && (cb->over || cb->used + room + cost + GUEST_RESERVE <= cb->size)) {
+                raw_rec(mirror(g), CMD_JUMP, sizeof(CmdRec))->x[0] = mirror(g + room);
+                cb->used += room;
             }
+            if (cb->over || cb->used + cost + GUEST_RESERVE <= cb->size) break;
+        }
+        if (!cb->callback || tries == 2) {
+            // the game gives no (more) memory: go on in host memory of this command buffer's own (reported use stops
+            // at the chunk's size) until it adds some
+            static int nlog;
+            if (nlog++ < 5)
+                LOG("[nvn] cmdbuf %llx: no guest command memory left (%llx, size %llx), recording on in host memory\n",
+                    (unsigned long long)cb->guest, (unsigned long long)cb->mem, (unsigned long long)cb->size);
+            attach(cb, (1ull << 61) | ((uint64_t)cb->id << 32), 1ull << 31);
             cb->over = true;
-            break;
+            continue;
         }
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
@@ -133,19 +131,9 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
         guest_call(c, cb->callback);
         memcpy(c->x, saved, sizeof saved);
     }
-    // host space, keeping room for a jump: further blocks of the same shadow are chained on as needed (and reused)
-    if (cb->boff + size + sizeof(CmdRec) > cb->blk->size) {
-        ShadowBlock *n = cb->blk->next;
-        if (!n || n->size < size + sizeof(CmdRec)) {
-            ShadowBlock *b = block_new(size + sizeof(CmdRec));
-            b->next = n;
-            cb->blk->next = n = b;
-        }
-        raw_rec(host_pos(cb), CMD_JUMP, sizeof(CmdRec))->x[0] = (uint64_t)(uintptr_t)n->data;
-        cb->blk = n, cb->boff = 0;
-    }
-    CmdRec *r = raw_rec(host_pos(cb), op, size);
-    cb->boff += size;
+    // (the record's size spans its whole mirror slot, so walking the list - p += size - finds the next one)
+    CmdRec *r = raw_rec(mirror(cb->mem + cb->used), op, (uint32_t)(cost * HOST_PER_GUEST));
+    (void)size;
     cb->used += cost;
     return r;
 }
@@ -326,7 +314,9 @@ PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
+// SetRenderEnableConditional(cmd, mode, counters): rendering on or off by comparing the 64-bit values at counters and
+// counters + 16 (two counter reports) when the list runs. Mode 0: render if equal, 1: render if not equal.
+PLAIN(nvnCommandBufferSetRenderEnableConditional, CMD_SET_RENDER_ENABLE_COND)
 NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
 NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
 NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
@@ -349,13 +339,9 @@ NVN(nvnCommandBufferRestoreZCullData) { (void)c; }
 static uint64_t copy_row_stride, copy_image_stride;
 RT_ON_RESET(cmdbuf_reset) {
     copy_row_stride = copy_image_stride = 0;
-    for (int i = 0; i < SHADOW_BUCKETS; i++) {
-        for (Shadow *sh = shadows[i], *next; sh; sh = next) {
-            next = sh->next;
-            for (ShadowBlock *b = sh->first, *bn; b; b = bn) bn = b->next, free(b);
-            free(sh);
-        }
-        shadows[i] = NULL;
+    for (int i = 0; i < PAGE_BUCKETS; i++) {
+        for (MirrorPage *pg = pages[i], *next; pg; pg = next) next = pg->next, free(pg->mem), free(pg);
+        pages[i] = NULL;
     }
 }
 NVN(nvnCommandBufferSetCopyRowStride) {
@@ -524,7 +510,27 @@ PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 NVN(nvnCommandBufferReportValue) { (void)c; }
 NVN(nvnCommandBufferResetCounter) { (void)c; }
 NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
+// CopyCommands(cmd, count, handles): unlike CallCommands, the commands are copied into this list now - the game may
+// record over the source lists' memory right after (ACNH's worker threads re-record theirs for the next frame: by
+// reference, this frame replayed the next frame's "set target + clear" and presented black).
+NVN(nvnCommandBufferCopyCommands) {
+    NvnCmdBuf *cb = cb_of(A(0));
+    uint64_t n = A(1), handles[64];
+    if (n > 64) n = 64;
+    memcpy(handles, (const void *)(uintptr_t)A(2), n * 8);  // (rec may call back into the guest)
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t p = handles[i];
+        for (int guard = 0; p && guard < 1000000; guard++) {
+            const CmdRec *src = (const CmdRec *)(uintptr_t)p;
+            if (src->op == CMD_END) break;
+            if (src->op == CMD_JUMP) { p = src->x[0]; continue; }
+            uint32_t size = src->size;
+            CmdRec *dst = rec(c, cb, src->op, size - (uint32_t)sizeof(CmdRec));
+            memcpy((uint8_t *)dst + 8, (const uint8_t *)src + 8, size - 8);  // (op and size set by rec)
+            p += size;
+        }
+    }
+}
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }

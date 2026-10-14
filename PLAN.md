@@ -148,10 +148,28 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
      said "core 0", shared one slot, and the loop never finished.
    - **Fix:** `SetThreadCoreMask` now sets the thread's core (an explicit ideal core, or the lowest
      core of the mask).
-**Now:** the game runs at a steady 60 fps, but the screen stays black (frames 1 to 1,200 and
-beyond). Each frame has about 1 indexed draw plus clears, after a burst of setup work. It is
-probably waiting in an early boot stage (logo, loading, save data or account). Next: find what
-the frame loop's scene is waiting for. Audio effects 2, 3, 5 and 6 are used but not implemented.
+3c. [x] Black screen. Fixed in order:
+   - `nn::hid::ShowControllerSupport` waited forever for the controller applet. It is now replaced,
+     with player 1 confirmed at once.
+   - Offline `nifm:u` (`runtime/services/nifm.c`): requests end with "no internet".
+   - Offline BCAT (`runtime/hle/bcat.c`): an empty delivery cache.
+   - Lifter: jump-table targets in other pieces of a split function now become function starts
+     (main: 1,999 tables resolved, 332 unresolved).
+   - Maxwell `TLD4S` and `TLD4` (texture gather) in the shader translator.
+   - NVN command records: a linear host mirror of guest command memory (×5) instead of per-chunk
+     shadows. Reusing a guest range must overwrite only the matching host range, because lists
+     called by handle (`CallCommands`) elsewhere must survive. `CopyCommands` now really copies.
+   - **The cause of the black screen:** `nvnCommandBufferSetRenderEnableConditional` was a no-op.
+     ACNH clears its layers' shared colour buffer conditionally, and run unconditionally the clears
+     wiped the frame before the final copy. Render enable and conditional render enable (compare the
+     64-bit values at +0 and +16) now skip draws and clears.
+   - Debug tools added: `LARECOMP_DEBUG_OPS`, per-pass target logs, vertex constant-buffer and
+     blend dumps (`LARECOMP_DEBUG_DATA`), `LARECOMP_SOLID_FS=<fs addr>[:fetch]`, `LARECOMP_LOG_PRESENT`,
+     and the abort result code on `svcBreak`.
+**Now:** the game shows its loading icon, then Timmy's opening dialogue ("Good afternoon! We're so
+excited to have you here!") at 60 fps, with sound. **The 3D scene behind it is black** (its
+passes come out empty). Audio effects 2, 3, 5 and 6 are not implemented. Next: why the 3D
+passes are empty.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.

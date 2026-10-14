@@ -740,6 +740,86 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
+// TLD4S: 2D texture gather, short form. Component (bits 52-53), depth compare (50), register offsets (51), .F16
+// results (55). Coordinates: a, b; with compare a, a+1 and the reference in b; with offsets a, a+1 and the offsets
+// (6-bit signed x at 0, y at 8) in b, then the reference in b+1. Results go to d0, d0+1, d1, d1+1 like TEXS.
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13);
+    bool dc = bits(w, 50, 1), aoffi = bits(w, 51, 1), f16 = bits(w, 55, 1);
+    int comp = (int)bits(w, 52, 2);
+    char ra[16], ra1[16], rb[16], rb1[16];
+    const char *A = reg(c, a, ra), *A1 = reg(c, a == RZ ? RZ : a + 1, ra1), *Bv = reg(c, b, rb),
+               *B1 = reg(c, b == RZ ? RZ : b + 1, rb1);
+    const char *cx = A, *cy = (dc || aoffi) ? A1 : Bv;
+    const char *dref = !dc ? NULL : aoffi ? B1 : Bv;
+    char off[160] = "";
+    if (aoffi) snprintf(off, sizeof off, "int2(int(%s << 26) >> 26, int(%s << 18) >> 26)", Bv, Bv);
+    int slot = tex_slot(c, index, TEXTYPE_2D, dc, false);
+    char call[1024];
+    if (c->glsl) {
+        char P[512];
+        if (aoffi) snprintf(P, sizeof P, "(vec2(%s, %s) + vec2(%s) / vec2(tsize%d(0).xy))", F(cx), F(cy), off, slot);
+        else snprintf(P, sizeof P, "vec2(%s, %s)", F(cx), F(cy));
+        if (dc) snprintf(call, sizeof call, "textureGather(t%d, %s, %s)", slot, P, F(dref));
+        else snprintf(call, sizeof call, "textureGather(t%d, %s, %d)", slot, P, comp);
+    } else {
+        static const char *comps[] = {"x", "y", "z", "w"};
+        char O[200];
+        snprintf(O, sizeof O, "%s", aoffi ? off : "int2(0)");
+        if (dc) snprintf(call, sizeof call, "t%d.gather_compare(s%d, float2(%s, %s), %s, %s)", slot, slot, F(cx), F(cy), F(dref), O);
+        else snprintf(call, sizeof call, "t%d.gather(s%d, float2(%s, %s), %s, component::%s)", slot, slot, F(cx), F(cy), O, comps[comp]);
+    }
+    write_tex_result(c, slot, call, 0xF, d0, d1, true, f16);
+}
+
+// TLD4: texture gather, full form. Type (bits 28-30: target << 1 | array), write mask (31-34), depth compare (50),
+// offsets (54-55: 0 none, 1 AOFFI, 2 PTP), component (56-57). Coordinates from consecutive registers at a (array
+// layer first); at b: the packed offsets (AOFFI), then the depth reference. Results: masked components from d on.
+static void emit_tld4(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13);
+    int ttype = (int)bits(w, 28, 3), offmode = (int)bits(w, 54, 2), comp = (int)bits(w, 56, 2);
+    uint32_t mask = (uint32_t)bits(w, 31, 4);
+    bool dc = bits(w, 50, 1), array = ttype & 1;
+    int target = ttype >> 1;  // 0 1D, 1 2D, 2 3D, 3 cube
+    if (target != 1 && target != 3) { fail(c, "tld4 target %d", target); return; }
+    if (offmode == 2) { fail(c, "tld4 ptp offsets"); return; }
+    if (target == 3 && offmode) { fail(c, "tld4 cube offsets"); return; }
+    int type = target == 1 ? (array ? TEXTYPE_2D_ARRAY : TEXTYPE_2D) : (array ? TEXTYPE_CUBE_ARRAY : TEXTYPE_CUBE);
+    int slot = tex_slot(c, index, type, dc, array);
+    int ncoord = target == 1 ? 2 : 3, ra = a;
+    char lr[16], cr[3][16], br[2][16];
+    const char *layer = NULL, *co[3];
+    if (array) layer = ALAYER(reg(c, ra++, lr), slot);
+    for (int i = 0; i < ncoord; i++) co[i] = F(reg(c, a == RZ ? RZ : ra + i, cr[i]));
+    int rb = b;
+    const char *offr = offmode == 1 ? reg(c, rb == RZ ? RZ : rb++, br[0]) : NULL;
+    const char *dref = dc ? F(reg(c, rb == RZ ? RZ : rb, br[1])) : NULL;
+    char off[160] = "", call[1200];
+    if (offr) snprintf(off, sizeof off, "int2(int(%s << 26) >> 26, int(%s << 18) >> 26)", offr, offr);
+    if (c->glsl) {
+        char xs[400], P[600];
+        if (ncoord == 2 && offr) snprintf(xs, sizeof xs, "(vec2(%s, %s) + vec2(%s) / vec2(tsize%d(0).xy))", co[0], co[1], off, slot);
+        else if (ncoord == 2) snprintf(xs, sizeof xs, "vec2(%s, %s)", co[0], co[1]);
+        else snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);
+        if (layer) snprintf(P, sizeof P, "vec%d(%s, float(%s))", ncoord + 1, xs, layer);
+        else snprintf(P, sizeof P, "%s", xs);
+        if (dc) snprintf(call, sizeof call, "textureGather(t%d, %s, %s)", slot, P, dref);
+        else snprintf(call, sizeof call, "textureGather(t%d, %s, %d)", slot, P, comp);
+    } else {
+        static const char *comps[] = {"x", "y", "z", "w"};
+        char P[400], L[200] = "", O[200] = "";
+        if (ncoord == 2) snprintf(P, sizeof P, "float2(%s, %s)", co[0], co[1]);
+        else snprintf(P, sizeof P, "float3(%s, %s, %s)", co[0], co[1], co[2]);
+        if (layer) snprintf(L, sizeof L, ", %s", layer);
+        if (ncoord == 2) snprintf(O, sizeof O, ", %s", offr ? off : "int2(0)");
+        if (dc) snprintf(call, sizeof call, "t%d.gather_compare(s%d, %s%s, %s%s)", slot, slot, P, L, dref, O);
+        else snprintf(call, sizeof call, "t%d.gather(s%d, %s%s%s, component::%s)", slot, slot, P, L, O, comps[comp]);
+    }
+    write_tex_result(c, slot, call, mask, d, RZ, false, false);
+}
+
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
 static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
@@ -907,6 +987,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)
         emit_tex(c, w, true);
+    } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull)) {  // TLD4S
+        emit_tld4s(c, w);
+    } else if (OPM(0xc838000000000000ull, 0xfc38000000000000ull)) {  // TLD4
+        emit_tld4(c, w);
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);

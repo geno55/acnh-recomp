@@ -50,6 +50,8 @@ static int cur_sub;
 static uint64_t submit_seq;  // last submitted
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
+static bool render_off;  // NVN render enable is off (exec_list)
+static NvnTexture *pass_rt0;  // the pass's color target 0 (debug pass dumps: st.rt may already be the next pass's)
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
@@ -627,7 +629,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && pass_rt0 && pass_rt0->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
@@ -635,7 +637,9 @@ static void vk_end_pass_at(int line) {
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        LOG("[vk] pass %d: target %p %ux%u f%#x\n", debug_pass_no - 1, (void *)pass_rt0, pass_rt0->width, pass_rt0->height,
+            pass_rt0->format);
+        renderer_save_texture_tex(pass_rt0->backend, path);
     }
 }
 
@@ -670,6 +674,11 @@ static void begin_pass(void) {
         renderer_mark_gpu_owned(t);
         VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
+        if (g_debug_frame)
+            LOG("[vk] pass color %d: %p image %p view %p | cview %d mask %x levels %u+%u layers %u+%u fmt %#x target %u\n", i,
+                (void *)t, b ? (void *)b->image : NULL, (void *)v, st.rt.has_cview[i], st.rt.cview[i].setmask,
+                st.rt.cview[i].base_level, st.rt.cview[i].num_levels, st.rt.cview[i].min_layer, st.rt.cview[i].num_layers,
+                st.rt.cview[i].format, st.rt.cview[i].target);
         if (!v) continue;
         ca[i].imageView = v;
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -716,6 +725,7 @@ static void begin_pass(void) {
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
     in_pass = true;
+    pass_rt0 = st.rt.ncolor ? st.rt.color[0] : NULL;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -984,6 +994,23 @@ static void translate_program(void *arg) {
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
+    {   // LARECOMP_SOLID_FS=<fs code address hex> (debug): that fragment shader writes solid red to target 0
+        static uint64_t solid = ~0ull;
+        if (solid == ~0ull) solid = getenv("LARECOMP_SOLID_FS") ? strtoull(getenv("LARECOMP_SOLID_FS"), NULL, 16) : 0;
+        char *end = solid && p->code[1] == solid ? strrchr(p->fi->msl, '}') : NULL;
+        if (end) {
+            size_t n = (size_t)(end - p->fi->msl);
+            char *s = malloc(n + 64);
+            memcpy(s, p->fi->msl, n);
+            // (":fetch": texel t0 under this fragment instead, bypassing the sampler)
+            bool fetch = strstr(getenv("LARECOMP_SOLID_FS"), ":fetch") != NULL;
+            s = realloc(s, n + 256);
+            strcpy(s + n, fetch ? "  c0 = texelFetch(t0, ivec2(gl_FragCoord.xy * vec2(textureSize(t0, 0)) / vec2(1920.0, 1080.0)), 0);\n}\n"
+                                : "  c0 = vec4(1.0, 0.0, 0.0, 1.0);\n}\n");
+            p->fi->msl = s;  // (leaked: debug only)
+            LOG("[shader] fs %llx forced to solid red\n", (unsigned long long)solid);
+        }
+    }
     run_job(compile_program, p);
 }
 
@@ -2204,11 +2231,13 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[0], (unsigned long long)r->x[2],
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
         pr->vi->cbuf_mask, pr->fi->cbuf_mask, st.rt.ncolor);
-    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format);
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x@%p", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format, (void *)st.rt.color[i]);
     if (st.rt.depth) LOG(" d%#x %p", st.rt.depth->format, (void *)st.rt.depth);
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
         st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
         st.channel_mask);
+    LOG("[draw]   blend0 %02x %02x %02x %02x %02x %02x %02x %02x\n", st.blend[0][0], st.blend[0][1], st.blend[0][2],
+        st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6], st.blend[0][7]);
     if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
@@ -2217,13 +2246,17 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             for (int k = 0; k < 16; k++) LOG(" %.4g", v[k]);
             LOG("\n");
         }
-        for (int c = 0; c < 18; c++) {
-            if (!((pr->fi->cbuf_mask >> c) & 1) || !st.ubuf[1][c].addr) continue;
-            const float *u = (const float *)(uintptr_t)st.ubuf[1][c].addr;
-            LOG("[draw]   fcb%d %llx size %u:", c, (unsigned long long)st.ubuf[1][c].addr, (unsigned)st.ubuf[1][c].size);
-            for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[1][c].size; k++) LOG(" %.6g", u[k]);
-            LOG("\n");
-        }
+        for (int sg = 0; sg < 2; sg++)  // vertex, then fragment cbufs
+            for (int c = 3; c < 18 + 3; c++) {  // shader c[k] is bound slot k - 3 (cbuf_base)
+                uint32_t mask = sg ? pr->fi->cbuf_mask : pr->vi->cbuf_mask;
+                int slot = c - 3;
+                if (!((mask >> c) & 1) || !st.ubuf[sg][slot].addr) continue;
+                const float *u = (const float *)(uintptr_t)st.ubuf[sg][slot].addr;
+                LOG("[draw]   %ccb%d (slot %d) %llx size %u:", sg ? 'f' : 'v', c, slot,
+                    (unsigned long long)st.ubuf[sg][slot].addr, (unsigned)st.ubuf[sg][slot].size);
+                for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[sg][slot].size; k++) LOG(" %.6g", u[k]);
+                LOG("\n");
+            }
     }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {  // fragment textures: guest size / format, allocation, scale
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
@@ -2741,6 +2774,37 @@ static void exec_list(uint64_t handle, int depth) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (g_debug_frame && r->op > CMD_CALL && ENV("LARECOMP_DEBUG_OPS"))
+        {
+            LOG("[op] %u x %llx %llx %llx %llx%s%llx", r->op, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
+                (unsigned long long)r->x[2], (unsigned long long)r->x[3], r->op == CMD_SET_RENDER_TARGETS ? " rt0 " : "",
+                r->op == CMD_SET_RENDER_TARGETS ? (unsigned long long)((const uint64_t *)x)[0] : 0ull);
+            if (r->op == CMD_CLEAR_COLOR) { const float *f = x; LOG(" color %g %g %g %g", f[0], f[1], f[2], f[3]); }
+            if (r->op == CMD_SET_SCISSORS) { const int32_t *v = x; LOG(" scissor %d %d %d %d", v[0], v[1], v[2], v[3]); }
+            LOG(" | sc %d %d %d %d\n", st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3]);
+        }
+        // NVN render enable (SetRenderEnable / SetRenderEnableConditional): while off, draws and clears are skipped.
+        // ACNH clears its layers' shared color buffer conditionally; run unconditionally, the clears wiped the frame.
+        if (r->op == CMD_SET_RENDER_ENABLE || r->op == CMD_SET_RENDER_ENABLE_COND) {
+            if (r->op == CMD_SET_RENDER_ENABLE) {
+                render_off = !r->x[0];
+            } else {  // mode 0: render if the two counter values (at +0 and +16) are equal, 1: if they differ
+                const uint64_t *v = (const uint64_t *)(uintptr_t)r->x[1];
+                bool eq = v && v[0] == v[2];
+                render_off = r->x[0] == 0 ? !eq : eq;
+                if (g_debug_frame && ENV("LARECOMP_DEBUG_OPS"))
+                    LOG("[op] render enable conditional: mode %llu, %llx vs %llx -> %s\n", (unsigned long long)r->x[0],
+                        (unsigned long long)(v ? v[0] : 0), (unsigned long long)(v ? v[2] : 0), render_off ? "off" : "on");
+            }
+            p += r->size;
+            continue;
+        }
+        if (render_off && (r->op == CMD_CLEAR_COLOR || r->op == CMD_CLEAR_DEPTH_STENCIL || r->op == CMD_DRAW_ARRAYS ||
+                           r->op == CMD_DRAW_ELEMENTS || r->op == CMD_DRAW_ARRAYS_INDIRECT ||
+                           r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_DRAW_TEXTURE)) {
+            p += r->size;
+            continue;
+        }
         switch (r->op) {
         case CMD_END: return;
         case CMD_JUMP: p = r->x[0]; continue;
@@ -2770,6 +2834,11 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_BIND_UNIFORM_BUFFERS:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 18 && r->x[0] < 6; i++)
                 memcpy(&st.ubuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
+            if (g_debug_frame && getenv("LARECOMP_DEBUG_DATA"))
+                for (uint64_t i = 0; i < r->x[2] && i < 4; i++)
+                    LOG("[bind] ubo stage %llu slot %llu: %llx size %llx\n", (unsigned long long)r->x[0],
+                        (unsigned long long)(r->x[1] + i), (unsigned long long)((const uint64_t *)x)[2 * i],
+                        (unsigned long long)((const uint64_t *)x)[2 * i + 1]);
             break;
         case CMD_BIND_STORAGE_BUFFERS:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 16 && r->x[0] < 6; i++)
