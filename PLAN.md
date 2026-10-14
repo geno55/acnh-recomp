@@ -133,9 +133,15 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    now report which heap ran out.
 4. [x] Confirm the `RootTask` swap-in runs: `RootTask::enter (native): first scene 0` and
    `RootTask::calc (native) first call` are in the boot log.
-**New blocker:** `nn::nfp::Initialize` (amiibo) crashes on a null. `nfp:user` has no
-implementation, and the logging stub returns OK without the interface object. It needs an offline
-`nfp` service (and likely the same treatment for the other online services).
+2c. [x] `nn::nfp::Initialize` (amiibo) crashed on a null: `nfp:user` had no implementation, and the
+   logging stub returned OK without the `IUser` object. `runtime/services/nfp.c` is an offline
+   `nfp:user`: it initializes and lists no devices, and device operations return DeviceNotFound.
+3. [ ] **First frame submitted and presented** (`nvnQueueSubmitCommands`, `nvnQueuePresentTexture`):
+   one black 1920×1080 frame.
+   **New blocker: a hang after the first frame.** No crash, but fewer than 3 frames are presented
+   in 100 s. Next: a per-thread dump of what each guest thread is waiting on (sync object, event,
+   fence or service). Last log lines: `ICommonStateGetter cmd 66` repeated; audio effects 2, 3, 5
+   and 6 are used but not implemented.
 3. Get the first frame submitted and presented (`nvnQueueSubmitCommands`, present).
 4. [x] Confirm the `RootTask` swap-in runs (see 4 above).
 5. Implement the `am` commands that are currently unhandled, as needed.
