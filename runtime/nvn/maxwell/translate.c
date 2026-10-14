@@ -73,6 +73,7 @@ typedef struct {
     bool fail;
     bool branchy;  // program uses the pc state machine
     int ipa_mode;  // interpolation mode of the IPA being translated (-1 for plain loads)
+    int ipa_mul;   // its multiplier register (mode 1)
     // GLSL (fields kept last: the MSL path's layout, including its out-of-range reg_used writes, is unchanged)
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
@@ -253,8 +254,17 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
                 strcpy(e, comp == 3 ? "0x3f800000u" : "0u");  // not provided by the vertex shader
             } else {
                 c->in_attr_mask |= 1u << a;
-                // IPA "pass" yields attr/w (the shader multiplies by w itself); Metal gives attr.
+                // IPA "pass" yields attr/w; "multiply" yields attr/w times a register - usually w (giving attr),
+                // but not always: soft particles pass w / v.w to get v.xy / v.w, their screen position. (Metal and
+                // Vulkan give attr: attr/w is attr * pos.w.)
                 if (c->ipa_mode == 0) sprintf(e, "as_type<uint>(in.v%d[%d] * in.pos.w)", a, comp);
+                else if (c->ipa_mode == 1 && c->ipa_mul != RZ) {
+                    char rb[16];
+                    // (multiplier ~w: attr exactly, as before - 3.0 must not come back as 2.9999998 for an F2I)
+                    const char *m = reg(c, c->ipa_mul, rb);
+                    sprintf(e, "as_type<uint>(abs(in.pos.w * as_type<float>(%s) - 1.0f) < 1e-5f ? in.v%d[%d] : "
+                               "in.v%d[%d] * in.pos.w * as_type<float>(%s))", m, a, comp, a, comp, m);
+                }
                 else sprintf(e, "as_type<uint>(in.v%d[%d])", a, comp);
             }
         } else if (addr == 0x3FC) { c->uses_front_facing = true; strcpy(e, "(front_facing ? 0xFFFFFFFFu : 0u)"); }
@@ -953,6 +963,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             if (mode == 2) c->flat_mask |= 1u << at;
         }
         c->ipa_mode = mode;
+        c->ipa_mul = (int)bits(w, 20, 8);
         attr_load(c, d, addr, NULL);
         c->ipa_mode = -1;
         if (bits(w, 51, 1) && d != RZ) sp(&c->body, "    r%d = as_type<uint>(saturate(as_type<float>(r%d)));\n", d, d);

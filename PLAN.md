@@ -223,6 +223,14 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
      pans the mono voices. Implemented as the SDK's `nn::audio::dsp::WriteAuxBufferDsp` /
      `ReadAuxBufferDsp`: int32 ring buffers, the DSP half of each info block at +0x40.
    - `LARECOMP_AUDIO_ROUTES=<frame>` dumps the routing graph.
+3i. [x] Missing "surprise" particle effect (yellow lines above Timmy and Tommy). Its soft-particle
+   shader reads `v.xy` with `IPA.MUL` and the multiplier `w / v.w`, getting `v.xy / v.w`, its screen
+   position for the scene depth; the translator treated every `IPA.MUL` as "times w" and returned
+   `v.xy`, so the depth came from the wrong place, the fade was 0 and every pixel was discarded.
+   `IPA.MUL` now multiplies `attr / w` by its register (unchanged when that is w, so integer-valued
+   inputs stay exact). Debug: `LARECOMP_LOG_SKIPS=1` (skipped draws by reason),
+   `LARECOMP_DEPTH_AT_FS=<fs addr>` (depth buffer dump at that shader's draw), render-enable-skipped
+   draws and snapshot decisions logged in debug frames.
 **Now:** the intro plays: dialogue over the 3D Nook Inc. counter with Timmy and Tommy, name and
 birthday entry, voices and sound, 60 fps. Open issues:
    - Intermittent hang at startup (once in ~10 runs, seen only in a visible window): the game stops

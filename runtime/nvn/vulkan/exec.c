@@ -1424,7 +1424,8 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
 
 // (debug frames) a depth image's depth values as a greyscale PGM, stretched over its own min..max
 static void debug_save_depth(TexBackend *b, const char *path) {
-    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || b->format != VK_FORMAT_D32_SFLOAT_S8_UINT) return;
+    if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
+        (b->format != VK_FORMAT_D32_SFLOAT_S8_UINT && b->format != VK_FORMAT_D32_SFLOAT)) return;
     uint64_t n = (uint64_t)b->width * b->height;
     VkSpan out = vk_readback(n * 4);
     VkCommandBuffer cb = vk_cmd();
@@ -1467,6 +1468,11 @@ static void resolve_feedback(Prog *pr) {
             for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
+            if (g_debug_frame)
+                LOG("[feedback] tex %p (%s) slot %d ok %d self_write %d existing %p copy image %p fmt %d/%d %ux%u vs %ux%u\n", (void *)t,
+                    t == st.rt.depth ? "depth" : "color", si, si >= 0 ? snap_ok[si] : -1, self_write, (void *)existing,
+                    existing ? (void *)existing->copy.image : NULL, existing ? existing->copy.format : -1, src->format,
+                    existing ? existing->copy.width : 0, existing ? existing->copy.height : 0, src->width, src->height);
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
                 feedback_tex[nfeedback] = t;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
@@ -1874,9 +1880,18 @@ static int wait_built(_Atomic int *state) {
 }
 
 static uint64_t prof_tp_;
+// A draw left out (LARECOMP_LOG_SKIPS: the first few per reason, by source line, with the shaders).
+static void note_skip(int line) {
+    stat_skipped++;
+    static int log = -1, counts[4096];
+    if (log < 0) log = getenv("LARECOMP_LOG_SKIPS") != NULL;
+    if (!log || line >= 4096 || counts[line]++ >= 8) return;
+    LOG("[skip] exec.c:%d vs %llx fs %llx\n", line, st.program ? (unsigned long long)st.program->stages[0].code_addr : 0ull,
+        st.program ? (unsigned long long)st.program->stages[1].code_addr : 0ull);
+}
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
-    if (!st.program) { stat_skipped++; return; }
+    if (!st.program) { note_skip(__LINE__); return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -1886,7 +1901,7 @@ static void draw_(CmdRec *r, bool indexed) {
     Prog *pr = get_program(st.program, &vkey, &fkey);
     bool must = draw_must_not_skip();
     if (pr && must) wait_built(&pr->state);
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+    if (!pr || atomic_load(&pr->state) != 1) { note_skip(__LINE__); return; }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -1903,9 +1918,9 @@ static void draw_(CmdRec *r, bool indexed) {
                 while (*p == ',') p++;
             }
         }
-        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { note_skip(__LINE__); return; }
         extern bool pot_level_active(void);
-        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { stat_skipped++; return; }
+        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { note_skip(__LINE__); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
@@ -1914,6 +1929,17 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
+    if (g_debug_frame && st.rt.depth && st.rt.depth->backend && getenv("LARECOMP_DEPTH_AT_FS") &&
+        strtoull(getenv("LARECOMP_DEPTH_AT_FS"), NULL, 16) == st.program->stages[1].code_addr) {  // (debug) depth here
+        static int nd;
+        if (nd < 2) {
+            char path[64];
+            snprintf(path, sizeof path, "build/depth_at_fs_%d.pgm", nd++);
+            vk_end_pass();
+            debug_save_depth(st.rt.depth->backend, path);
+            st.rt_dirty = true;
+        }
+    }
     resolve_feedback(pr);
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
@@ -1927,7 +1953,7 @@ static void draw_(CmdRec *r, bool indexed) {
     VkPrimitiveTopology topo;
     uint8_t cls;
     bool native = topology(mode, &topo, &cls);
-    if (!native && mode != 6 && mode != 7 && mode != 9) { stat_skipped++; return; }
+    if (!native && mode != 6 && mode != 7 && mode != 9) { note_skip(__LINE__); return; }
 
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
@@ -1988,7 +2014,7 @@ static void draw_(CmdRec *r, bool indexed) {
         run_job(build_pipeline, pp);
     }
     if (must) wait_built(&pp->state);
-    if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
+    if (atomic_load(&pp->state) != 1) { note_skip(__LINE__); return; }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe);
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
@@ -2058,7 +2084,7 @@ static void draw_(CmdRec *r, bool indexed) {
             for (int i = 0; i < pr->fi->ntex; i++) {
                 NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
                 const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { stat_skipped++; return; }
+                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { note_skip(__LINE__); return; }
             }
     }
     float tint[8] = {0};
@@ -2300,6 +2326,9 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
         st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
         st.channel_mask);
+    LOG("[draw]   depth range %g %g, ds bytes %02x %02x %02x %02x %02x %02x %02x %02x, poly offset %g %g %g, depth mode %d\n",
+        st.depth_range[0][0], st.depth_range[0][1], st.ds[0], st.ds[1], st.ds[2], st.ds[3], st.ds[4], st.ds[5], st.ds[6], st.ds[7],
+        st.poly_offset[0], st.poly_offset[1], st.poly_offset[2], nvn_depth_mode());
     LOG("[draw]   blend0 %02x %02x %02x %02x %02x %02x %02x %02x\n", st.blend[0][0], st.blend[0][1], st.blend[0][2],
         st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6], st.blend[0][7]);
     if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
@@ -2880,6 +2909,10 @@ static void exec_list(uint64_t handle, int depth) {
         if (render_off && (r->op == CMD_CLEAR_COLOR || r->op == CMD_CLEAR_DEPTH_STENCIL || r->op == CMD_DRAW_ARRAYS ||
                            r->op == CMD_DRAW_ELEMENTS || r->op == CMD_DRAW_ARRAYS_INDIRECT ||
                            r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_DRAW_TEXTURE)) {
+            if (g_debug_frame)
+                LOG("[draw-off] op %u (render enable off) prog vs %llx fs %llx\n", r->op,
+                    st.program ? (unsigned long long)st.program->stages[0].code_addr : 0ull,
+                    st.program ? (unsigned long long)st.program->stages[1].code_addr : 0ull);
             p += r->size;
             continue;
         }
