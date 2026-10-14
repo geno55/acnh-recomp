@@ -854,9 +854,19 @@ void kernel_reset(void) {
 // LARECOMP_THREAD_DUMP=<seconds>[,<seconds>...]: at those times after boot, every guest thread - what it waits on
 // (the SVC it's in, its handles / mutex / condvar / arbiter address) and its guest call stack from the frame
 // pointer chain (fp -> {previous fp, lr}). For hangs: the thread that should signal the others shows up here.
+static void thread_dump_body(void);
 static void thread_dump(void) {
-    static const char *kinds[] = {"-", "mutex", "condvar", "arbiter"};
     pthread_mutex_lock(&g_klock);
+    thread_dump_body();
+    pthread_mutex_unlock(&g_klock);
+}
+
+// From the crash handler: the other threads' state at the crash (a race shows the second thread). Without the
+// kernel lock, which the crashed thread may hold: the list is only read, and a stale entry is the worst case.
+void kernel_thread_dump_crash(void) { thread_dump_body(); }
+
+static void thread_dump_body(void) {
+    static const char *kinds[] = {"-", "mutex", "condvar", "arbiter"};
     LOG("===== thread dump =====\n");
     for (KThread *t = g_threads; t; t = t->anext) {
         if (t->finished) continue;
@@ -888,7 +898,6 @@ static void thread_dump(void) {
         LOG("\n");
     }
     LOG("===== end of thread dump =====\n");
-    pthread_mutex_unlock(&g_klock);
 }
 
 static void *thread_dump_main(void *arg) {

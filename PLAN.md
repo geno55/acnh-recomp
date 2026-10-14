@@ -245,6 +245,14 @@ Answer one question: is extending LASRecomp months of work, or a rewrite?
    The virtual pool now takes the address its mapping gives. Its cheek swatches are then rendered
    through one texture object and drawn through another at the same memory: a never-rendered
    texture now samples the rendered one with the same address, size and format (black otherwise).
+3l. [x] Intermittent crash (about 1 run in 8) in the system font engine (`nn::fontll` `map_font` /
+   `map_char`) as Timmy says the player's name. The font texture cache keeps one engine per core and
+   picks it by the current core; on the Switch, same-core threads at one priority never interleave in
+   it, here they run at once (threads 80, 83, 99 share engine 0; 100 and 120 engine 1). The cache's
+   three engine-picking functions are wrapped (`gen.py` `wrap`: the original stays as
+   `f_<addr>_orig`) and each engine has a lock, held from the first pick to the outermost return
+   (`runtime/acnh/decomp_swap.c`). Collisions now show as "[font] engine N busy" and wait.
+   `LARECOMP_CRASH_THREADS=1`: every guest thread's state is dumped with a crash.
 **Now:** the intro plays: dialogue over the 3D Nook Inc. counter with Timmy and Tommy, name and
 birthday entry, voices and sound, 60 fps. Open issues:
    - TODO 60 fps at the right speed. The game is made for 30 fps (`AppHooks::setupFrameworkCreateArg`

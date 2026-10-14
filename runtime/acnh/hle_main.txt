@@ -5,3 +5,7 @@
 0x1d70230 _ZnwmPN4sead4HeapEi
 0x1d8f970 exp_heap_create  # sead::ExpHeap::create (thunk), for diagnostics
 0xc8a0 _ZN8AppHooks23setupFrameworkCreateArgEPN4sead15GameFrameworkNx9CreateArgE
+0x1cfc430 font_engine_index  # nn::font texture cache: engine for this thread (locks it)
+0x1cfa720 font_check_glyph wrap  # (callers of 0x1cfc430: the engine lock scope)
+0x1cfc310 font_use_1 wrap
+0x1cfc540 font_use_2 wrap

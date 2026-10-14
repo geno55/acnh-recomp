@@ -132,3 +132,50 @@ void hle__ZN8AppHooks23setupFrameworkCreateArgEPN4sead15GameFrameworkNx9CreateAr
     *(uint32_t *)(arg + 40) = 0x400000;
     LOG("[decomp] AppHooks::setupFrameworkCreateArg (native): vsync interval %u\n", interval);
 }
+
+// ---- Font engines: one per core, as on the Switch
+// The font texture cache (nn::font, linked into main) keeps one ScalableFontEngine per core and picks it with a
+// callback returning the current core (0x7101cfc430). On the Switch, threads on one core at the same priority never
+// interleave inside it; here every guest thread is a host thread, so two "core 0" threads used engine 0 at once and
+// one crashed in the engine (map_font / map_char on a font switched under it): about one run in four, as Timmy
+// says the player's name. Each engine now has a lock, taken when a thread first asks for that engine inside one of
+// the cache's functions that pick an engine, and released when the outermost of them returns.
+#include "../kernel.h"
+#define FONT_ENGINES 16
+static pthread_mutex_t font_engine_lock[FONT_ENGINES] = {[0 ... FONT_ENGINES - 1] = PTHREAD_MUTEX_INITIALIZER};
+static __thread int font_depth;      // nesting of the functions below on this thread
+static __thread uint32_t font_held;  // engines this thread holds
+
+// int engine_index(cache)  0x7101cfc430: obj[7121] callback set, obj[7128] the callback (called with x0 = itself)
+void hle_font_engine_index(Cpu *c) {
+    uint64_t obj = c->x[0];
+    if (!LD8(obj + 7121)) c->x[0] = 0;
+    else {
+        uint64_t fn = LD64(obj + 7128);
+        c->x[0] = fn;
+        guest_call(c, fn);
+    }
+    uint32_t i = (uint32_t)c->x[0];
+    if (font_depth && i < FONT_ENGINES && !(font_held & (1u << i))) {
+        if (pthread_mutex_trylock(&font_engine_lock[i]) != 0) {
+            static int nlog;  // (the collisions that crashed: this thread waits for the other one instead)
+            if (nlog++ < 10) LOG("[font] engine %u busy: thread %llu waits\n", i, (unsigned long long)kernel_current_thread()->id);
+            pthread_mutex_lock(&font_engine_lock[i]);
+        }
+        font_held |= 1u << i;
+    }
+}
+
+static void font_scope(Cpu *c, void (*orig)(Cpu *)) {
+    font_depth++;
+    orig(c);
+    if (--font_depth == 0)
+        for (uint32_t m = font_held; m; m &= m - 1) pthread_mutex_unlock(&font_engine_lock[__builtin_ctz(m)]);
+    if (font_depth == 0) font_held = 0;
+}
+void f_7001cfa720_orig(Cpu *c);
+void f_7001cfc310_orig(Cpu *c);
+void f_7001cfc540_orig(Cpu *c);
+void hle_font_check_glyph(Cpu *c) { font_scope(c, f_7001cfa720_orig); }  // 0x7101cfa720: glyph in any font?
+void hle_font_use_1(Cpu *c) { font_scope(c, f_7001cfc310_orig); }        // 0x7101cfc310
+void hle_font_use_2(Cpu *c) { font_scope(c, f_7001cfc540_orig); }        // 0x7101cfc540 (calls 0x7101cfa720)

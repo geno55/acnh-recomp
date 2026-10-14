@@ -5,6 +5,7 @@ Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [
 --simd: FP/SIMD/CRC32 as AArch64 inline asm (default on arm64 hosts) or portable C (default elsewhere).
 --hle: one function per line, replaced by a host function hle_<name>: a dynamic symbol name, or
        "<offset> <name>" (hex offset in the module; stripped functions, e.g. named by a decomp).
+       "<offset> <name> wrap" keeps the original as f_<addr>_orig for hle_<name> to call.
 --no-patches: skip tools/patches.py and the randomizer's patch variants (Link's Awakening addresses), for other games.
 """
 import argparse
@@ -359,12 +360,14 @@ class Module:
             return ['return;']
         raise Unsupported(k)
 
-    def emit_function(self, entry, end, labels, tables, hle):
+    def emit_function(self, entry, end, labels, tables, hle, wrap=()):
         out = [f'void {fname(entry)}(Cpu *c) {{']
         if entry in hle:
             out.append(f'    {sanitize(hle[entry])}(c);')
             out.append('}')
-            return out
+            if entry not in wrap:
+                return out
+            out.append(f'void {fname(entry)}_orig(Cpu *c) {{')  # (wrapped: the host function calls the original)
         out.append(f'    FN_ENTER({hx(entry)});')
         batch = []
         refs = set()
@@ -524,16 +527,18 @@ def main():
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd)
     starts = m.boundaries()
-    hle = {}
+    hle, wrap = {}, set()
     if args.hle and os.path.exists(args.hle):
         want = set()
         for l in open(args.hle):
             f = l.split('#')[0].split()
-            if len(f) == 2:
+            if len(f) in (2, 3):
                 a = args.base + int(f[0], 16)
                 if not m.in_text(a):
                     sys.exit(f"{args.hle}: {f[0]} is not in {args.name}'s text")
                 hle[a] = f[1]
+                if len(f) == 3 and f[2] == 'wrap':
+                    wrap.add(a)
             elif f:
                 want.add(f[0])
         for name, info, shndx, value, size in m.nso.syms:
@@ -607,7 +612,7 @@ def main():
         body, refs = [], set()
         for a in order[ci:ci + args.chunk]:
             end, labels, tables = entries[a]
-            body += m.emit_function(a, end, labels, tables, hle)
+            body += m.emit_function(a, end, labels, tables, hle, wrap)
             refs |= getattr(m, '_refs', set())
             m._refs = set()
         path = os.path.join(args.outdir, f'{args.name}_{nchunks:03d}.c')
